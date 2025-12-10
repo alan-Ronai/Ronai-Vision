@@ -1,0 +1,28 @@
+# Core dependencies
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.5.0
+
+# Computer Vision & ML
+# Note: torch, torchvision, numpy are installed via conda-forge for consistency
+opencv-python-headless>=4.8.0
+ultralytics>=8.3.0
+pillow>=10.0.0
+
+# Async & WebSocket
+aiohttp>=3.9.0
+websockets>=12.0
+
+# ReID utilities
+torchreid==0.2.5
+
+# RTP/RTSP Audio Server
+aiortc>=1.5.0
+av>=10.0.0
+opuslib>=3.0.0
+pydub>=0.25.0
+soundfile>=0.12.0
+
+# Development (optional)
+pytest>=7.4.0
+pytest-asyncio>=0.21.0

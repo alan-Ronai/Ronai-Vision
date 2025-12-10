@@ -1,0 +1,91 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+env/
+venv/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Byte-compiled / optimized / DLL files
+*.pyc
+*.pyo
+*.pyd
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+pip-wheel-metadata/
+share/python-wheels/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+.tox/
+*.cover
+*.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*,cover
+.hypothesis/
+.pytest_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+
+# IDEs
+.idea/
+
+# Environment variables
+.env
+.env.*
+dev.env
+prod.env
+
+# Logs
+logs/
+*.log
+
+# Data and weights
+data/
+weights/
+*.pt
+*.pth
+*.onnx
+*.tflite
+
+# SQLite
+*.sqlite3
+
+# OS generated files
+Thumbs.db
+ehthumbs.db
+
+# Audio storage (RTP/RTSP recordings)
+audio_storage/
+*.wav
+*.mp3
+*.aac

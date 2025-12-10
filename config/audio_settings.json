@@ -1,0 +1,24 @@
+{
+  "rtsp": {
+    "host": "0.0.0.0",
+    "port": 8554,
+    "session_timeout": 60,
+    "keepalive_interval": 30
+  },
+  "rtp": {
+    "base_port": 5004,
+    "port_range": 2,
+    "jitter_buffer_ms": 100,
+    "max_packet_size": 1500
+  },
+  "codecs": {
+    "enabled": ["g711", "opus", "amr"],
+    "melpe_binary": "/usr/local/bin/melpe_decoder"
+  },
+  "storage": {
+    "base_path": "audio_storage/recordings",
+    "format": "wav",
+    "max_file_size_mb": 100,
+    "retention_days": 30
+  }
+}
