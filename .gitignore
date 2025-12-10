@@ -70,12 +70,12 @@ logs/
 *.log
 
 # Data and weights
-data/
-weights/
-*.pt
-*.pth
-*.onnx
-*.tflite
+# data/
+# weights/
+# *.pt
+# *.pth
+# *.onnx
+# *.tflite
 
 # SQLite
 *.sqlite3
