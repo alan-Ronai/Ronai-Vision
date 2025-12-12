@@ -24,6 +24,31 @@ class Track:
         self.confidence = confidence
         self.age = 0  # frames since first detection
         self.hits = 0  # consecutive successful detections
+        self.confidence_history = []  # Track confidence over time for validation
+
+    def update_confidence(self, confidence: float, history_size: int = 10):
+        """Update confidence history for track validation.
+
+        Args:
+            confidence: New confidence value
+            history_size: Maximum number of samples to keep
+        """
+        self.confidence = confidence
+        self.confidence_history.append(confidence)
+
+        # Keep only last N samples
+        if len(self.confidence_history) > history_size:
+            self.confidence_history = self.confidence_history[-history_size:]
+
+    def get_avg_confidence(self) -> float:
+        """Get average confidence over history.
+
+        Returns:
+            Average confidence, or current confidence if no history
+        """
+        if not self.confidence_history:
+            return self.confidence
+        return float(np.mean(self.confidence_history))
 
 
 class BaseTracker(ABC):

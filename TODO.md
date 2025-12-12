@@ -32,9 +32,27 @@ This file mirrors the project's tracked work items and acts as a readable checkl
 -   [x] Produce clean final frames (only boxes + IDs) and make mask overlay optional (`show_masks` parameter)
 -   [x] Testing, validation, and small integration tests for graceful shutdown
 -   [x] Performance tuning: model warmup and per-stage profiling metrics (`/api/status/perf`)
+-   [x] Fix pipeline to ensure OSNet ReID only processes person class after YOLO+SAM2
+-   [x] Ensure camera setup uses `camera_settings.json` config by default (no hardcoded cameras)
+-   [x] Implement RTP/RTSP audio server for military-grade audio ingestion (`services/audio/`)
+    -   [x] RTSP session control (OPTIONS, SETUP, PLAY, TEARDOWN) on TCP port 8554
+    -   [x] RTP packet reception and parsing on UDP port 5004
+    -   [x] Jitter buffer for packet reordering and timing
+    -   [x] Multi-codec support (G.711 μ-law/A-law, Opus, AMR, MELPe placeholder)
+    -   [x] Audio storage as WAV files with metadata JSON
+    -   [x] FastAPI endpoints for server control (`/api/audio/*`)
+    -   [x] Test client for RTSP/RTP connectivity validation
+    -   [x] Raw RTP receiver (no RTSP handshake) for simple streaming
+-   [x] AWS EC2 deployment documentation and automation scripts
+    -   [x] Deployment guide for t3.micro/t3.xlarge/g4dn.xlarge instances
+    -   [x] Security group configuration (TCP 22/8000/8554, UDP 5004-5005)
+    -   [x] Systemd service setup with privileged port capabilities
+    -   [x] Automated deployment script (`scripts/deploy_to_ec2.sh`)
+-   [x] Deploy audio server to AWS EC2 and verify connectivity
 
 ## In Progress / Next
 
+-   [ ] Troubleshoot boss's RTP packet connectivity (packets leaving his machine but not arriving at EC2)
 -   [ ] Add example detectors for weapons/car-color (placeholders + training recipes)
 -   [ ] Write docs + runbook (README updates, runbook for macOS/conda)
 -   [ ] Persist full `ReIDStore` state to disk and restore on startup (checkpoint save/load methods)
@@ -42,6 +60,8 @@ This file mirrors the project's tracked work items and acts as a readable checkl
 -   [ ] Add runtime tuning endpoints for `match_threshold` and `max_history`
 -   [ ] Clarify SAM2 prompting options + add optional CLIP/text-filter helper
 -   [ ] Performance tuning: advanced optimizations (improved batching, device selection strategies)
+-   [ ] Implement bidirectional RTP/RTSP (currently input-only, need output/publishing mode)
+-   [ ] Integrate audio transcription/analysis into detection pipeline (future work)
 
 ## Notes
 

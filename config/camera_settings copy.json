@@ -1,0 +1,21 @@
+{
+    "cameras": {
+        "cam1": {
+            "type": "simulator",
+            "source": "assets/sample_video.mp4",
+            "description": "Test video file (development)"
+        },
+        "cam2": {
+            "type": "simulator",
+            "source": "assets/sample_video2.mp4",
+            "description": "Test video file (development)"
+        }
+    },
+    "notes": {
+        "rtsp_example": {
+            "type": "rtsp",
+            "source": "rtsp://username:password@192.168.1.100:554/stream",
+            "description": "Real RTSP camera - update credentials/IP and move to cameras section to use"
+        }
+    }
+}

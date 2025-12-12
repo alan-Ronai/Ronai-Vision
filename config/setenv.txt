@@ -1,0 +1,7 @@
+set -a                                            
+source config/dev.env
+set +a
+
+
+
+lsof -i :8000

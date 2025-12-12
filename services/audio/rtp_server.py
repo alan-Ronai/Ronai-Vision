@@ -15,6 +15,7 @@ from .session_manager import RTSPSessionManager, RTSPState
 from .jitter_buffer import JitterBuffer, RTPPacket
 from .audio_decoders import get_decoder, AudioDecoder
 from .audio_writer import AudioWriter
+from .rtp_sender import RTPAudioSender, RTPSenderConfig
 
 
 class RTPAudioServer:
@@ -27,7 +28,7 @@ class RTPAudioServer:
         rtp_base_port: int = 5004,
         storage_path: str = "audio_storage/recordings",
         session_timeout: int = 60,
-        jitter_buffer_ms: int = 100
+        jitter_buffer_ms: int = 100,
     ):
         """Initialize RTP/RTSP audio server.
 
@@ -56,6 +57,9 @@ class RTPAudioServer:
         # RTP receivers (per session)
         self._rtp_receivers: Dict[str, RTPReceiver] = {}
 
+        # RTP senders (per session) for bidirectional audio
+        self._rtp_senders: Dict[str, RTPAudioSender] = {}
+
         # Server state
         self._running = False
 
@@ -81,7 +85,9 @@ class RTPAudioServer:
             self._rtsp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self._rtsp_socket.bind((self.rtsp_host, self.rtsp_port))
             self._rtsp_socket.listen(5)
-            print(f"[RTPAudioServer] RTSP server listening on {self.rtsp_host}:{self.rtsp_port}")
+            print(
+                f"[RTPAudioServer] RTSP server listening on {self.rtsp_host}:{self.rtsp_port}"
+            )
 
         except Exception as e:
             print(f"[RTPAudioServer] Failed to bind RTSP socket: {e}")
@@ -134,8 +140,62 @@ class RTPAudioServer:
             "rtsp_port": self.rtsp_port,
             "rtp_base_port": self.rtp_base_port,
             "active_sessions": self.session_manager.get_session_count(),
-            "active_receivers": len(self._rtp_receivers)
+            "active_receivers": len(self._rtp_receivers),
+            "active_senders": len(self._rtp_senders),
         }
+
+    def send_audio_to_session(
+        self, session_id: str, audio: "np.ndarray", sample_rate: int = 16000
+    ) -> bool:
+        """Send audio to a specific session (field device).
+
+        Args:
+            session_id: Session identifier
+            audio: Audio samples (int16 numpy array)
+            sample_rate: Sample rate of input audio
+
+        Returns:
+            True if sent successfully, False otherwise
+        """
+        import numpy as np
+
+        # Get session
+        session = self.session_manager.get_session(session_id)
+        if not session:
+            print(f"[RTPAudioServer] Session {session_id} not found")
+            return False
+
+        # Get or create RTP sender for this session
+        if session_id not in self._rtp_senders:
+            # Create sender
+            sender = RTPAudioSender(
+                destination_host=session.client_address[0],
+                destination_port=session.rtp_port,
+                config=RTPSenderConfig(
+                    payload_type=0,  # G.711 μ-law
+                    codec="g711_ulaw",
+                ),
+            )
+            sender.connect()
+            self._rtp_senders[session_id] = sender
+            print(f"[RTPAudioServer] Created RTP sender for session {session_id}")
+
+        # Send audio
+        sender = self._rtp_senders[session_id]
+        packet_count = sender.send_audio(audio, sample_rate)
+
+        print(
+            f"[RTPAudioServer] Sent audio to session {session_id} ({packet_count} packets)"
+        )
+        return packet_count > 0
+
+    def get_active_sessions(self) -> list:
+        """Get list of active session IDs.
+
+        Returns:
+            List of session ID strings
+        """
+        return list(self.session_manager.sessions.keys())
 
     def _rtsp_server_loop(self):
         """Main RTSP server loop (accepts connections)."""
@@ -151,7 +211,7 @@ class RTPAudioServer:
                 client_thread = threading.Thread(
                     target=self._handle_rtsp_client,
                     args=(client_socket, client_address),
-                    daemon=True
+                    daemon=True,
                 )
                 client_thread.start()
 
@@ -180,14 +240,16 @@ class RTPAudioServer:
                 if not request_data:
                     break
 
-                request = request_data.decode('utf-8', errors='ignore')
+                request = request_data.decode("utf-8", errors="ignore")
                 print(f"[RTSP] Request from {client_address}:\n{request[:200]}")
 
                 # Parse and handle request
-                response, session_id = self._handle_rtsp_request(request, client_address, session_id)
+                response, session_id = self._handle_rtsp_request(
+                    request, client_address, session_id
+                )
 
                 # Send response
-                client_socket.sendall(response.encode('utf-8'))
+                client_socket.sendall(response.encode("utf-8"))
 
         except socket.timeout:
             print(f"[RTSP] Client {client_address} timeout")
@@ -200,7 +262,9 @@ class RTPAudioServer:
             if session_id:
                 self._cleanup_session(session_id)
 
-    def _handle_rtsp_request(self, request: str, client_address: tuple, session_id: Optional[str]) -> tuple:
+    def _handle_rtsp_request(
+        self, request: str, client_address: tuple, session_id: Optional[str]
+    ) -> tuple:
         """Parse and handle RTSP request.
 
         Args:
@@ -211,7 +275,7 @@ class RTPAudioServer:
         Returns:
             (response_string, session_id) tuple
         """
-        lines = request.strip().split('\r\n')
+        lines = request.strip().split("\r\n")
         if not lines:
             return self._rtsp_error(400, "Bad Request"), session_id
 
@@ -227,19 +291,21 @@ class RTPAudioServer:
         # Parse headers
         headers = {}
         for line in lines[1:]:
-            if ':' in line:
-                key, value = line.split(':', 1)
+            if ":" in line:
+                key, value = line.split(":", 1)
                 headers[key.strip()] = value.strip()
 
         # Get CSeq (required)
-        cseq = headers.get('CSeq', '1')
+        cseq = headers.get("CSeq", "1")
 
         # Handle methods
         if method == "OPTIONS":
             return self._handle_options(cseq), session_id
 
         elif method == "SETUP":
-            response, new_session_id = self._handle_setup(cseq, url, headers, client_address)
+            response, new_session_id = self._handle_setup(
+                cseq, url, headers, client_address
+            )
             return response, new_session_id
 
         elif method == "PLAY":
@@ -267,7 +333,9 @@ class RTPAudioServer:
             f"\r\n"
         )
 
-    def _handle_setup(self, cseq: str, url: str, headers: dict, client_address: tuple) -> tuple:
+    def _handle_setup(
+        self, cseq: str, url: str, headers: dict, client_address: tuple
+    ) -> tuple:
         """Handle SETUP request.
 
         Args:
@@ -280,17 +348,17 @@ class RTPAudioServer:
             (response_string, session_id) tuple
         """
         # Parse Transport header
-        transport = headers.get('Transport', '')
-        if 'RTP/AVP' not in transport:
+        transport = headers.get("Transport", "")
+        if "RTP/AVP" not in transport:
             return self._rtsp_error(461, "Unsupported Transport", cseq), None
 
         # Extract client ports
         client_rtp_port = None
         client_rtcp_port = None
 
-        if 'client_port=' in transport:
-            port_str = transport.split('client_port=')[1].split(';')[0]
-            ports = port_str.split('-')
+        if "client_port=" in transport:
+            port_str = transport.split("client_port=")[1].split(";")[0]
+            ports = port_str.split("-")
             client_rtp_port = int(ports[0])
             client_rtcp_port = int(ports[1]) if len(ports) > 1 else client_rtp_port + 1
 
@@ -309,7 +377,7 @@ class RTPAudioServer:
             client_rtcp_port=client_rtcp_port,
             server_rtp_port=server_rtp_port,
             server_rtcp_port=server_rtcp_port,
-            codec="g711"  # Default to G.711, will be updated when RTP packets arrive
+            codec="g711",  # Default to G.711, will be updated when RTP packets arrive
         )
 
         # Build response
@@ -348,14 +416,11 @@ class RTPAudioServer:
         # Start RTP receiver for this session
         self._start_rtp_receiver(session)
 
-        return (
-            f"RTSP/1.0 200 OK\r\n"
-            f"CSeq: {cseq}\r\n"
-            f"Session: {session_id}\r\n"
-            f"\r\n"
-        )
+        return f"RTSP/1.0 200 OK\r\nCSeq: {cseq}\r\nSession: {session_id}\r\n\r\n"
 
-    def _handle_teardown(self, cseq: str, headers: dict, session_id: Optional[str]) -> str:
+    def _handle_teardown(
+        self, cseq: str, headers: dict, session_id: Optional[str]
+    ) -> str:
         """Handle TEARDOWN request.
 
         Args:
@@ -369,11 +434,7 @@ class RTPAudioServer:
         if session_id:
             self._cleanup_session(session_id)
 
-        return (
-            f"RTSP/1.0 200 OK\r\n"
-            f"CSeq: {cseq}\r\n"
-            f"\r\n"
-        )
+        return f"RTSP/1.0 200 OK\r\nCSeq: {cseq}\r\n\r\n"
 
     def _rtsp_error(self, code: int, message: str, cseq: str = "1") -> str:
         """Generate RTSP error response.
@@ -386,11 +447,7 @@ class RTPAudioServer:
         Returns:
             RTSP error response
         """
-        return (
-            f"RTSP/1.0 {code} {message}\r\n"
-            f"CSeq: {cseq}\r\n"
-            f"\r\n"
-        )
+        return f"RTSP/1.0 {code} {message}\r\nCSeq: {cseq}\r\n\r\n"
 
     def _start_rtp_receiver(self, session):
         """Start RTP receiver for session.
@@ -399,14 +456,16 @@ class RTPAudioServer:
             session: RTSPSession object
         """
         if session.session_id in self._rtp_receivers:
-            print(f"[RTPAudioServer] RTP receiver already exists for session {session.session_id}")
+            print(
+                f"[RTPAudioServer] RTP receiver already exists for session {session.session_id}"
+            )
             return
 
         # Create RTP receiver
         receiver = RTPReceiver(
             session=session,
             storage_path=self.storage_path,
-            jitter_buffer_ms=self.jitter_buffer_ms
+            jitter_buffer_ms=self.jitter_buffer_ms,
         )
 
         self._rtp_receivers[session.session_id] = receiver
@@ -424,6 +483,11 @@ class RTPAudioServer:
         if session_id in self._rtp_receivers:
             receiver = self._rtp_receivers.pop(session_id)
             receiver.stop()
+
+        # Stop RTP sender
+        if session_id in self._rtp_senders:
+            sender = self._rtp_senders.pop(session_id)
+            sender.disconnect()
 
         # Remove session
         self.session_manager.remove_session(session_id)
@@ -485,16 +549,20 @@ class RTPReceiver:
                     session_id=self.session.session_id,
                     codec=self.session.codec or "g711",
                     sample_rate=self.decoder.get_sample_rate(),
-                    channels=self.decoder.get_channels()
+                    channels=self.decoder.get_channels(),
                 )
                 self.audio_writer.open()
 
             # Start threads
             self._running = True
-            self._rtp_thread = threading.Thread(target=self._rtp_receiver_loop, daemon=True)
+            self._rtp_thread = threading.Thread(
+                target=self._rtp_receiver_loop, daemon=True
+            )
             self._rtp_thread.start()
 
-            self._decoder_thread = threading.Thread(target=self._decoder_loop, daemon=True)
+            self._decoder_thread = threading.Thread(
+                target=self._decoder_loop, daemon=True
+            )
             self._decoder_thread.start()
 
             print(f"[RTPReceiver] Started for session {self.session.session_id}")
@@ -527,7 +595,7 @@ class RTPReceiver:
             stats = self.jitter_buffer.get_stats()
             self.audio_writer.update_stats(
                 packets_received=stats["packets_received"],
-                packets_lost=stats["packets_dropped"]
+                packets_lost=stats["packets_dropped"],
             )
             self.audio_writer.close()
 
@@ -596,7 +664,7 @@ class RTPReceiver:
             # 2-3: Sequence number
             # 4-7: Timestamp
             # 8-11: SSRC
-            byte0, byte1, seq, timestamp, ssrc = struct.unpack('!BBHII', data[:12])
+            byte0, byte1, seq, timestamp, ssrc = struct.unpack("!BBHII", data[:12])
 
             version = (byte0 >> 6) & 0x03
             padding = (byte0 >> 5) & 0x01
@@ -613,7 +681,7 @@ class RTPReceiver:
             if extension:
                 if len(data) < header_len + 4:
                     return None
-                ext_len = struct.unpack('!H', data[header_len+2:header_len+4])[0]
+                ext_len = struct.unpack("!H", data[header_len + 2 : header_len + 4])[0]
                 header_len += 4 + (ext_len * 4)
 
             # Extract payload
@@ -629,7 +697,7 @@ class RTPReceiver:
                 timestamp=timestamp,
                 payload_type=payload_type,
                 payload=payload,
-                received_at=time.time()
+                received_at=time.time(),
             )
 
         except Exception as e:

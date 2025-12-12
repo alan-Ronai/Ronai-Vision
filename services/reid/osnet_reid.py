@@ -11,18 +11,9 @@ It expects a CPU or CUDA PyTorch runtime; behavior is governed by the
 import os
 import numpy as np
 from typing import Optional
-
 import torch
-
-try:
-    import torchreid
-    from torchreid.utils import FeatureExtractor
-
-    TORCHREID_AVAILABLE = True
-except Exception:
-    TORCHREID_AVAILABLE = False
-
-from services.reid.base_reid import BaseReID, ReIDResult
+from torchreid.reid.utils.feature_extractor import FeatureExtractor
+from services.reid.base_reid import BaseReID
 
 
 class OSNetReID(BaseReID):
@@ -35,20 +26,23 @@ class OSNetReID(BaseReID):
     def __init__(
         self, model_name: str = "osnet_x0_5_imagenet.pth", device: Optional[str] = None
     ):
-        if not TORCHREID_AVAILABLE:
-            raise ImportError(
-                "`torchreid` is required for OSNetReID. Install: `pip install torchreid`."
-            )
-
         # Resolve device
         env_device = os.environ.get("DEVICE", "cpu")
         if device is None:
             device = env_device
-        self.device = (
-            device
-            if device == "cpu"
-            else ("cuda" if torch.cuda.is_available() else "cpu")
-        )
+
+        # Resolve device: prefer requested device if available, fallback to CPU
+        if device == "cpu":
+            self.device = "cpu"
+        elif device == "cuda":
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        elif device == "mps":
+            try:
+                self.device = "mps" if torch.backends.mps.is_available() else "cpu"
+            except Exception:
+                self.device = "cpu"
+        else:
+            self.device = "cpu"
 
         repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
         models_dir = os.path.join(repo_root, "models")
@@ -60,19 +54,16 @@ class OSNetReID(BaseReID):
             )
 
         # Build a torchreid FeatureExtractor using an OSNet backbone
-        # torchreid FeatureExtractor expects a model name registered in torchreid or a model file.
-        # We'll use torchreid's model building utilities.
-        try:
+        # Note: Classifier layers are discarded (expected for feature extraction)
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
             self.extractor = FeatureExtractor(
                 model_name="osnet_x0_5",
                 device=self.device,
                 model_path=checkpoint_path,
             )
-        except Exception as e:
-            # Fall back to loading via torchreid.models if needed
-            raise RuntimeError(
-                f"Failed to initialize torchreid FeatureExtractor: {e}"
-            ) from e
 
     def extract_features(self, frame: np.ndarray, boxes: np.ndarray) -> np.ndarray:
         """Extract L2-normalized embeddings for each box.
@@ -104,12 +95,25 @@ class OSNetReID(BaseReID):
         crops_rgb = [c[:, :, ::-1] if c.ndim == 3 else c for c in crops]
 
         try:
-            feats = self.extractor(crops_rgb)  # returns numpy array (N, D)
+            feats = self.extractor(crops_rgb)
         except Exception as e:
             raise RuntimeError(f"OSNet extractor failed: {e}") from e
 
-        # L2-normalize and return numpy array
+        # The extractor may return a torch.Tensor or a numpy array (or a list).
+        # Convert to numpy if necessary.
+        try:
+            import torch as _torch
+        except Exception:
+            _torch = None
+
+        if _torch is not None and isinstance(feats, _torch.Tensor):
+            feats = feats.detach().cpu().numpy()
+        elif isinstance(feats, list):
+            feats = np.asarray(feats)
+
+        # L2-normalize and return numpy array (float32)
+        feats = feats.astype(np.float32)
         norms = np.linalg.norm(feats, axis=1, keepdims=True) + 1e-6
-        feats = feats.astype(np.float32) / norms.astype(np.float32)
+        feats = feats / norms.astype(np.float32)
 
         return feats

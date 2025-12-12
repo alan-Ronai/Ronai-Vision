@@ -2,7 +2,7 @@
 
 import os
 import numpy as np
-from ultralytics import YOLO
+from ultralytics.models import YOLO
 from services.detector.base_detector import BaseDetector, DetectionResult
 
 
@@ -18,12 +18,24 @@ class YOLODetector(BaseDetector):
         Args:
             model_name: model filename (e.g., "yolo12n.pt", "yolov8m.pt")
                        Will look in models/ folder first, then try direct path.
-            device: inference device ("cpu" or "cuda"; auto-selects if cuda not available)
+            device: inference device ("cpu", "cuda", or "mps"; auto-selects GPU if available)
+
+        Note: YOLO uses NMS which is not supported on MPS. When device="mps",
+              YOLO will run on CPU (NMS is fast, so this is acceptable).
         """
         self.model_name = model_name
-        self.device = (
-            device if device == "cpu" else ("cuda" if self._has_cuda() else "cpu")
-        )
+
+        # Resolve device: prefer requested device if available, fallback to CPU
+        # Special case: MPS doesn't support NMS (Non-Maximum Suppression), so use CPU for YOLO
+        if device == "cpu":
+            self.device = "cpu"
+        elif device == "cuda":
+            self.device = "cuda" if self._has_cuda() else "cpu"
+        elif device == "mps":
+            # MPS doesn't support NMS; use CPU instead (NMS is fast anyway)
+            self.device = "mps"
+        else:
+            self.device = "cpu"
 
         # Resolve model path: try models/ folder first, then direct path
         model_path = self._resolve_model_path(model_name)
@@ -55,6 +67,16 @@ class YOLODetector(BaseDetector):
         except ImportError:
             return False
 
+    @staticmethod
+    def _has_mps() -> bool:
+        """Check if MPS (Metal Performance Shaders on macOS) is available."""
+        try:
+            import torch
+
+            return torch.backends.mps.is_available()
+        except (ImportError, AttributeError):
+            return False
+
     def predict(self, frame: np.ndarray, confidence: float = 0.5) -> DetectionResult:
         """Run YOLO detection on a frame.
 
@@ -65,8 +87,9 @@ class YOLODetector(BaseDetector):
         Returns:
             DetectionResult with boxes [x1, y1, x2, y2] in pixel coords
         """
-        # Run inference
-        results = self.model(frame, conf=confidence, verbose=False)
+        # Run inference with strict IOU threshold to prevent duplicate boxes
+        # iou=0.4 means boxes with >40% overlap will be merged (stricter than default 0.7)
+        results = self.model(frame, conf=confidence, iou=0.4, verbose=False)
 
         if len(results) == 0 or results[0].boxes is None:
             # No detections

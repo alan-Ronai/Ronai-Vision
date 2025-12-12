@@ -96,7 +96,12 @@ class FrameRenderer:
                 if track.class_id < len(class_names)
                 else "unknown"
             )
-            label = f"ID:{track.track_id} {class_name} {track.confidence:.2f}"
+
+            # Show global ID if available, otherwise show local track ID
+            if hasattr(track, "global_id") and track.global_id is not None:
+                label = f"GID:{track.global_id} {class_name} {track.confidence:.2f}"
+            else:
+                label = f"ID:{track.track_id} {class_name} {track.confidence:.2f}"
 
             # Draw box
             cv2.rectangle(output, (x1, y1), (x2, y2), self.bbox_color, self.thickness)

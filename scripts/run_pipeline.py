@@ -8,6 +8,7 @@ from services.segmenter.sam2_segmenter import SAM2Segmenter
 from services.tracker.centroid_tracker import CentroidTracker
 from services.reid.histogram_reid import HistogramReID
 from services.output.renderer import FrameRenderer
+from services.device import choose_device
 
 
 def main():
@@ -16,8 +17,10 @@ def main():
 
     cam = LocalCameraSimulator(file_path="assets/sample_video.mp4")
 
-    detector = YOLODetector(model_name="yolo12n.pt", device="cpu")
-    segmenter = SAM2Segmenter(model_type="small", device="cpu")
+    device = choose_device()
+    print(f"[INFO] Using device: {device}")
+    detector = YOLODetector(model_name="yolo12n.pt", device=device)
+    segmenter = SAM2Segmenter(model_type="tiny", device=device)
     tracker = CentroidTracker()
     reid = HistogramReID()
     renderer = FrameRenderer()

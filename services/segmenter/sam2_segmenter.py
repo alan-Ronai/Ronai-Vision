@@ -5,17 +5,9 @@
 import os
 import numpy as np
 from typing import Optional
-
-try:
-    import torch
-    from sam2.build_sam import build_sam2
-    from sam2.sam2_image_predictor import SAM2ImagePredictor
-
-    SAM2_AVAILABLE = True
-except ImportError:
-    torch = None
-    SAM2_AVAILABLE = False
-
+import torch
+from sam2.build_sam import build_sam2
+from sam2.sam2_image_predictor import SAM2ImagePredictor
 from services.segmenter.base_segmenter import BaseSegmenter, SegmentationResult
 
 
@@ -28,33 +20,39 @@ class SAM2Segmenter(BaseSegmenter):
 
     def __init__(
         self,
-        model_type: str = "small",
+        model_type: str = "tiny",
         checkpoint_path: Optional[str] = None,
         device: str = "cpu",
     ):
-        """Initialize the SAM2 predictor.
-
-        Raises:
-            ImportError: if the `sam2` package or `torch` is not available.
-            FileNotFoundError: if the checkpoint cannot be found.
-            RuntimeError: if the model fails to initialize.
         """
-        if not SAM2_AVAILABLE:
-            raise ImportError(
-                "SAM2 package is not installed in the environment."
-                " Install `segment-anything-2` or ensure `sam2` is importable."
-            )
+        Initialize the SAM2 predictor.
+        """
 
         self.model_type = model_type
         self.device = device
         self.predictor = None
 
         try:
-            self.device = (
-                device
-                if device == "cpu"
-                else ("cuda" if torch.cuda.is_available() else "cpu")
-            )
+            # Resolve device: if explicitly "cpu", use it; otherwise try the requested device
+            if device == "cpu":
+                self.device = "cpu"
+            else:
+                # Try the requested device (e.g., "cuda", "mps")
+                # Validate it's available before using
+                if device == "cuda" and torch.cuda.is_available():
+                    self.device = "cuda"
+                elif device == "mps":
+                    # MPS (Metal Performance Shaders on macOS)
+                    try:
+                        if torch.backends.mps.is_available():
+                            self.device = "mps"
+                        else:
+                            self.device = "cpu"
+                    except Exception:
+                        self.device = "cpu"
+                else:
+                    # Fallback to CPU if device not available
+                    self.device = "cpu"
 
             model_cfg = {
                 "tiny": "sam2_hiera_t.yaml",
@@ -112,8 +110,6 @@ class SAM2Segmenter(BaseSegmenter):
         Raises:
             RuntimeError: if prediction fails.
         """
-        if not SAM2_AVAILABLE or self.predictor is None:
-            raise RuntimeError("SAM2 predictor is not initialized.")
 
         def _to_numpy(x):
             # Convert either torch.Tensor or numpy-like outputs to numpy.ndarray
@@ -135,6 +131,23 @@ class SAM2Segmenter(BaseSegmenter):
 
             masks_list = []
             scores_list = []
+
+            # Clean up GPU memory BEFORE prediction to prevent cache accumulation.
+            # SAM2's internal image cache can grow over many frames without clearing,
+            # causing exponential slowdown. Clearing before set_image helps significantly.
+            try:
+                import torch as _torch
+
+                if _torch.cuda.is_available():
+                    _torch.cuda.empty_cache()
+                # Also try MPS (macOS GPU)
+                try:
+                    if hasattr(_torch, "mps") and _torch.mps.is_available():
+                        _torch.mps.empty_cache()
+                except Exception:
+                    pass
+            except Exception:
+                pass
 
             if boxes is not None and len(boxes) > 0:
                 boxes_tensor = torch.from_numpy(boxes).float().to(self.device)
@@ -176,6 +189,20 @@ class SAM2Segmenter(BaseSegmenter):
             )
         except Exception as e:
             raise RuntimeError(f"SAM2 prediction failed: {e}") from e
+        finally:
+            # Clean up after prediction to prevent memory fragmentation.
+            try:
+                import torch as _torch
+
+                if _torch.cuda.is_available():
+                    _torch.cuda.empty_cache()
+                try:
+                    if hasattr(_torch, "mps") and _torch.mps.is_available():
+                        _torch.mps.empty_cache()
+                except Exception:
+                    pass
+            except Exception:
+                pass
 
     def segment_from_detections(
         self,
