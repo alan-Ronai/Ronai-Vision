@@ -62,6 +62,7 @@ coverage.xml
 # Environment variables
 .env
 .env.*
+.venv-ronai/
 dev.env
 prod.env
 
@@ -73,6 +74,8 @@ logs/
 data/
 weights/
 models/
+output/
+config/camera_settings.json
 *.pt
 *.pth
 *.onnx

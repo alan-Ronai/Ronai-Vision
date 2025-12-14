@@ -45,6 +45,9 @@ def main():
         # Default to assets directory
         audio_file = "assets/test_audio.wav"
 
+    # Check for --sensitive-vad flag
+    sensitive_vad = "--sensitive-vad" in sys.argv or "-s" in sys.argv
+
     # Check if file exists
     if not os.path.exists(audio_file):
         print(f"❌ Error: Audio file not found: {audio_file}")
@@ -64,15 +67,24 @@ def main():
     # Initialize transcriber
     print("\n🔧 Initializing Hebrew Transcriber...")
     print("   (Model will load on first transcription)")
+    print("   🎯 Optimized parameters for quality")
+    print("   🔊 VAD enabled with default Whisper settings (works best)")
 
     transcriber = HebrewTranscriber(
         model_path="models/whisper-large-v3-hebrew-ct2",
         device="auto",
         compute_type="int8",  # int8 for fastest CPU inference
+        enable_preprocessing=False,  # Disabled - interferes with VAD
+        target_audio_level=-12.0,  # Only used if preprocessing enabled
     )
 
     # Transcribe audio file
     print("\n🎤 Transcribing audio...")
+    if sensitive_vad:
+        print("   🔊 SENSITIVE VAD MODE: Using lower threshold for quieter speech")
+        print("   💡 Good for speech 5-10 dB quieter than average")
+    else:
+        print("   💡 TIP: Add --sensitive-vad or -s flag to catch quieter speech")
     print("   This may take 30-60 seconds for a 42-second audio file...")
     print("   (First run loads the model, subsequent runs are faster)")
     print("   ⏳ Please wait...")
@@ -81,13 +93,27 @@ def main():
 
     start_time = time.time()
 
+    # Generate preprocessed audio filename
+    audio_filename = Path(audio_file).stem
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    preprocessed_output = (
+        f"output/transcriptions/{audio_filename}_preprocessed_{timestamp}.wav"
+    )
+
     try:
-        result = transcriber.transcribe_file(audio_file)
+        print(f"\n💾 Preprocessed audio will be saved to: {preprocessed_output}")
+
+        result = transcriber.transcribe_file(
+            audio_file,
+            save_preprocessed=preprocessed_output,
+            sensitive_vad=True,  # For now setting to true, sensitive_vad,
+        )
 
         end_time = time.time()
         processing_time = end_time - start_time
 
         print(f"\n✅ Transcription completed in {processing_time:.1f} seconds!")
+        print(f"✅ Preprocessed audio saved successfully!")
 
         print("\n" + "=" * 70)
         print("TRANSCRIPTION RESULTS")

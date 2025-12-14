@@ -14,6 +14,7 @@ from .command_processor import CommandProcessor, CommandMatch
 from .tts import HebrewTTS
 from .audio_pipeline import AudioPipeline
 from .rtp_sender import RTPAudioSender, RTPSenderConfig
+from .audio_preprocessor import AudioPreprocessor, normalize_audio
 
 __all__ = [
     "RTPAudioServer",
@@ -25,4 +26,6 @@ __all__ = [
     "AudioPipeline",
     "RTPAudioSender",
     "RTPSenderConfig",
+    "AudioPreprocessor",
+    "normalize_audio",
 ]
