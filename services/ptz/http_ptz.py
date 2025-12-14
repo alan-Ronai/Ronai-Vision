@@ -54,9 +54,13 @@ class HTTPPTZController:
         self.auth_digest = HTTPDigestAuth(username, password)
         self.auth_basic = HTTPBasicAuth(username, password)
 
-        logger.info(f"HTTP PTZ controller initialized for {brand} camera at {self.base_url}")
+        logger.info(
+            f"HTTP PTZ controller initialized for {brand} camera at {self.base_url}"
+        )
 
-    def _request(self, path: str, params: Optional[Dict] = None, method: str = "GET") -> Dict[str, Any]:
+    def _request(
+        self, path: str, params: Optional[Dict] = None, method: str = "GET"
+    ) -> Dict[str, Any]:
         """Make authenticated HTTP request to camera.
 
         Args:
@@ -72,21 +76,41 @@ class HTTPPTZController:
         try:
             # Try digest auth first
             if method == "GET":
-                response = requests.get(url, params=params, auth=self.auth_digest, timeout=5, verify=False)
+                response = requests.get(
+                    url, params=params, auth=self.auth_digest, timeout=5, verify=False
+                )
             else:
-                response = requests.post(url, data=params, auth=self.auth_digest, timeout=5, verify=False)
+                response = requests.post(
+                    url, data=params, auth=self.auth_digest, timeout=5, verify=False
+                )
 
             # If digest fails with 401, try basic auth
             if response.status_code == 401:
                 if method == "GET":
-                    response = requests.get(url, params=params, auth=self.auth_basic, timeout=5, verify=False)
+                    response = requests.get(
+                        url,
+                        params=params,
+                        auth=self.auth_basic,
+                        timeout=5,
+                        verify=False,
+                    )
                 else:
-                    response = requests.post(url, data=params, auth=self.auth_basic, timeout=5, verify=False)
+                    response = requests.post(
+                        url, data=params, auth=self.auth_basic, timeout=5, verify=False
+                    )
 
             if response.status_code == 200:
-                return {"ok": True, "status_code": response.status_code, "text": response.text}
+                return {
+                    "ok": True,
+                    "status_code": response.status_code,
+                    "text": response.text,
+                }
             else:
-                return {"ok": False, "status_code": response.status_code, "error": response.text}
+                return {
+                    "ok": False,
+                    "status_code": response.status_code,
+                    "error": response.text,
+                }
 
         except Exception as e:
             logger.error(f"HTTP request failed: {e}")
@@ -102,38 +126,83 @@ class HTTPPTZController:
         Returns:
             Response dictionary
         """
-        # Hikvision PTZ commands
-        cmd_map = {
-            "UP": "TILT_UP",
-            "DOWN": "TILT_DOWN",
-            "LEFT": "PAN_LEFT",
-            "RIGHT": "PAN_RIGHT",
-            "ZOOM_IN": "ZOOM_IN",
-            "ZOOM_OUT": "ZOOM_OUT",
-            "STOP": "ALL_STOP",
-        }
+        # Map commands to pan/tilt/zoom values
+        if command == "RIGHT":
+            pan, tilt, zoom = speed, 0, 0
+        elif command == "LEFT":
+            pan, tilt, zoom = -speed, 0, 0
+        elif command == "UP":
+            pan, tilt, zoom = 0, speed, 0
+        elif command == "DOWN":
+            pan, tilt, zoom = 0, -speed, 0
+        elif command == "ZOOM_IN":
+            pan, tilt, zoom = 0, 0, speed
+        elif command == "ZOOM_OUT":
+            pan, tilt, zoom = 0, 0, -speed
+        else:  # STOP
+            pan, tilt, zoom = 0, 0, 0
 
-        ptz_command = cmd_map.get(command, command)
-        path = f"/ISAPI/PTZCtrl/channels/1/continuous"
+        # Try multiple ISAPI endpoints (different channels, momentary vs continuous)
+        endpoints = [
+            "/ISAPI/PTZCtrl/channels/1/continuous",
+            "/ISAPI/PTZCtrl/channels/1/momentary",
+            "/ISAPI/System/Video/inputs/channels/1/PTZ/Continuous",
+        ]
 
-        # Hikvision uses XML payload
-        xml_data = f"""<?xml version="1.0" encoding="UTF-8"?>
+        last_error = None
+
+        for path in endpoints:
+            # Hikvision uses XML payload
+            xml_data = f"""<?xml version="1.0" encoding="UTF-8"?>
 <PTZData>
-    <pan>{speed if 'PAN' in ptz_command else 0}</pan>
-    <tilt>{speed if 'TILT' in ptz_command else 0}</tilt>
-    <zoom>{speed if 'ZOOM' in ptz_command else 0}</zoom>
+    <pan>{pan}</pan>
+    <tilt>{tilt}</tilt>
+    <zoom>{zoom}</zoom>
 </PTZData>"""
 
-        try:
-            url = urljoin(self.base_url, path)
-            response = requests.put(url, data=xml_data, auth=self.auth_digest, timeout=5, verify=False)
+            try:
+                url = urljoin(self.base_url, path)
 
-            if response.status_code in [200, 204]:
-                return {"ok": True, "action": command, "status_code": response.status_code}
-            else:
-                return {"ok": False, "error": f"Status {response.status_code}: {response.text}"}
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
+                # Try digest auth
+                response = requests.put(
+                    url, data=xml_data, auth=self.auth_digest, timeout=5, verify=False
+                )
+
+                # Try basic auth if digest fails
+                if response.status_code == 401:
+                    response = requests.put(
+                        url,
+                        data=xml_data,
+                        auth=self.auth_basic,
+                        timeout=5,
+                        verify=False,
+                    )
+
+                if response.status_code in [200, 204]:
+                    logger.info(
+                        f"Hikvision PTZ command sent via {path}: {command} (speed={speed})"
+                    )
+                    return {
+                        "ok": True,
+                        "action": command,
+                        "status_code": response.status_code,
+                        "endpoint": path,
+                    }
+                else:
+                    last_error = f"Status {response.status_code}: {response.text[:100]}"
+                    logger.debug(f"Failed endpoint {path}: {last_error}")
+
+            except Exception as e:
+                last_error = str(e)
+                logger.debug(f"Exception on endpoint {path}: {e}")
+                continue
+
+        # All endpoints failed
+        return {
+            "ok": False,
+            "error": last_error or "All ISAPI endpoints failed",
+            "tried_endpoints": endpoints,
+        }
 
     def _dahua_ptz(self, command: str, speed: int = 50) -> Dict[str, Any]:
         """Execute Dahua PTZ command.
@@ -205,7 +274,9 @@ class HTTPPTZController:
             Response dictionary
         """
         # Determine primary direction
-        if abs(pan_velocity) > abs(tilt_velocity) and abs(pan_velocity) > abs(zoom_velocity):
+        if abs(pan_velocity) > abs(tilt_velocity) and abs(pan_velocity) > abs(
+            zoom_velocity
+        ):
             command = "RIGHT" if pan_velocity > 0 else "LEFT"
             speed = int(abs(pan_velocity) * 100)
         elif abs(tilt_velocity) > abs(zoom_velocity):
@@ -227,11 +298,13 @@ class HTTPPTZController:
             result = self._generic_ptz(command, speed)
 
         if result.get("ok"):
-            result.update({
-                "pan_velocity": pan_velocity,
-                "tilt_velocity": tilt_velocity,
-                "zoom_velocity": zoom_velocity,
-            })
+            result.update(
+                {
+                    "pan_velocity": pan_velocity,
+                    "tilt_velocity": tilt_velocity,
+                    "zoom_velocity": zoom_velocity,
+                }
+            )
 
         return result
 
@@ -263,7 +336,7 @@ class HTTPPTZController:
                 "pan": None,
                 "tilt": None,
                 "zoom": None,
-            }
+            },
         }
 
     def goto_preset(self, preset_number: int) -> Dict[str, Any]:
@@ -280,7 +353,13 @@ class HTTPPTZController:
             return self._request(path, method="PUT")
         elif self.brand == "dahua":
             path = "/cgi-bin/ptz.cgi"
-            params = {"action": "start", "code": "GotoPreset", "arg1": 0, "arg2": preset_number, "arg3": 0}
+            params = {
+                "action": "start",
+                "code": "GotoPreset",
+                "arg1": 0,
+                "arg2": preset_number,
+                "arg3": 0,
+            }
             return self._request(path, params)
         else:
             return {"ok": False, "error": "Preset not supported for generic cameras"}
@@ -305,9 +384,15 @@ class HTTPPTZController:
 
             try:
                 url = urljoin(self.base_url, path)
-                response = requests.put(url, data=xml_data, auth=self.auth_digest, timeout=5, verify=False)
+                response = requests.put(
+                    url, data=xml_data, auth=self.auth_digest, timeout=5, verify=False
+                )
                 if response.status_code in [200, 201, 204]:
-                    return {"ok": True, "preset_number": preset_number, "preset_name": preset_name}
+                    return {
+                        "ok": True,
+                        "preset_number": preset_number,
+                        "preset_name": preset_name,
+                    }
                 else:
                     return {"ok": False, "error": f"Status {response.status_code}"}
             except Exception as e:
@@ -315,7 +400,13 @@ class HTTPPTZController:
 
         elif self.brand == "dahua":
             path = "/cgi-bin/ptz.cgi"
-            params = {"action": "start", "code": "SetPreset", "arg1": 0, "arg2": preset_number, "arg3": 0}
+            params = {
+                "action": "start",
+                "code": "SetPreset",
+                "arg1": 0,
+                "arg2": preset_number,
+                "arg3": 0,
+            }
             return self._request(path, params)
         else:
             return {"ok": False, "error": "Preset not supported for generic cameras"}
@@ -347,7 +438,7 @@ class HTTPPTZController:
         """
         return {
             "ok": False,
-            "error": "Absolute positioning not supported for HTTP PTZ cameras. Use continuous_move() or presets instead."
+            "error": "Absolute positioning not supported for HTTP PTZ cameras. Use continuous_move() or presets instead.",
         }
 
     def relative_move(
@@ -377,7 +468,7 @@ class HTTPPTZController:
         """
         return {
             "ok": False,
-            "error": "Relative positioning not supported for HTTP PTZ cameras. Use continuous_move() or presets instead."
+            "error": "Relative positioning not supported for HTTP PTZ cameras. Use continuous_move() or presets instead.",
         }
 
     def goto_home_position(self, speed: Optional[float] = None) -> Dict[str, Any]:
@@ -403,5 +494,5 @@ class HTTPPTZController:
         return {
             "ok": True,
             "presets": [],
-            "note": "HTTP PTZ cameras typically don't provide preset listing. Try preset numbers 0-99."
+            "note": "HTTP PTZ cameras typically don't provide preset listing. Try preset numbers 0-99.",
         }
