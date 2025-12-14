@@ -260,9 +260,18 @@ class RawRTPReceiver:
             # Add more as needed
         }
 
-        codec_name, codec_desc = codec_map.get(
-            payload_type, (self.default_codec, "Default")
-        )
+        # Handle dynamic payload types (96-127) - assume default codec
+        if 96 <= payload_type <= 127:
+            codec_name = self.default_codec
+            codec_desc = f"Dynamic PT {payload_type} (using {codec_name})"
+            logger.warning(
+                f"Dynamic payload type {payload_type} detected. "
+                f"Assuming {codec_name}. Specify correct codec if different."
+            )
+        else:
+            codec_name, codec_desc = codec_map.get(
+                payload_type, (self.default_codec, "Default")
+            )
 
         logger.info(f"Detected RTP payload type {payload_type}: {codec_desc}")
 

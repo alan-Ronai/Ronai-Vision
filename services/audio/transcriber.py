@@ -202,11 +202,11 @@ class HebrewTranscriber:
             if sensitive_vad and vad_filter:
                 # Very sensitive for quieter speech (5-10 dB below average)
                 vad_params = {
-                    "threshold": 0.04,  # Speech probability threshold (0.1 = very sensitive)
-                    "min_speech_duration_ms": 10,  # Current: Minimum 50ms to count as speech
-                    "min_silence_duration_ms": 60,  # Current: 300ms silence to split segments
-                    "speech_pad_ms": 300,  # NEW: Add padding around detected speech
-                    "max_speech_duration_s": 30.0,  # NEW: Max continuous speech before forcing split
+                    "threshold": 0.02,  # Speech probability threshold (0.1 = very sensitive)
+                    "min_speech_duration_ms": 7,  # Current: Minimum 50ms to count as speech
+                    "min_silence_duration_ms": 130,  # Current: 300ms silence to split segments
+                    "speech_pad_ms": 400,  # NEW: Add padding around detected speech
+                    "max_speech_duration_s": 20.0,  # NEW: Max continuous speech before forcing split
                 }
 
             segments_iter, info = self.model.transcribe(
