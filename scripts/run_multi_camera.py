@@ -224,7 +224,7 @@ def run_loop(
         agg_queue=agg_queue,
         trackers=trackers,
         stop_event=stop_event,
-        grace_period=5.0,  # 5s grace period before stopping inactive cameras (quick shutdown)
+        grace_period=30.0,  # 30s grace period before stopping inactive cameras
     )
 
     worker_manager.start()

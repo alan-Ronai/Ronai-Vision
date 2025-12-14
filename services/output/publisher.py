@@ -52,6 +52,7 @@ class OutputPublisher:
         self.stop_event = stop_event
         self._http_failed_count = {}  # Track consecutive failures per camera
         self._http_disabled = False  # Disable HTTP after too many failures
+        self._fps_tracker = {}  # Track FPS per camera {camera_id: {'last_time': time, 'frame_count': int, 'fps': float}}
 
         os.makedirs(output_dir, exist_ok=True)
 
@@ -77,11 +78,17 @@ class OutputPublisher:
         masks = process_result["masks"]
         class_names = process_result["class_names"]
 
+        # Update FPS calculation
+        fps = self._update_fps(camera_id)
+
         # Render masks
         out = self.renderer.render_masks(frame, masks)
 
         # Render tracks with class names and IDs
         out = self.renderer.render_tracks(out, tracks, class_names)
+
+        # Render FPS counter
+        out = self.renderer.render_fps(out, fps)
 
         # Publish to broadcaster (for MJPEG streaming)
         self._publish_to_broadcaster(out, camera_id)
@@ -95,6 +102,38 @@ class OutputPublisher:
             self._publish_to_http(out, camera_id)
 
         return out
+
+    def _update_fps(self, camera_id: str) -> float:
+        """Update and return current FPS for a camera.
+
+        Args:
+            camera_id: Camera identifier
+
+        Returns:
+            Current FPS value
+        """
+        import time
+
+        current_time = time.time()
+
+        if camera_id not in self._fps_tracker:
+            self._fps_tracker[camera_id] = {
+                "last_time": current_time,
+                "frame_count": 0,
+                "fps": 0.0,
+            }
+
+        tracker = self._fps_tracker[camera_id]
+        tracker["frame_count"] += 1
+
+        # Calculate FPS every second
+        time_diff = current_time - tracker["last_time"]
+        if time_diff >= 1.0:
+            tracker["fps"] = tracker["frame_count"] / time_diff
+            tracker["frame_count"] = 0
+            tracker["last_time"] = current_time
+
+        return tracker["fps"]
 
     def _is_shutting_down(self) -> bool:
         """Check if shutdown has been requested.

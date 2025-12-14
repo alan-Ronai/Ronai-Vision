@@ -3,11 +3,25 @@
 Usage:
     python scripts/test_whisper_transcription.py <audio_file>
     python scripts/test_whisper_transcription.py assets/test_audio.wav
+
+Model Information:
+    This script uses the Whisper Large v3 Hebrew model stored locally in
+    models/whisper-large-v3-hebrew/ directory.
+
+    The model should be the same as ivrit-ai/whisper-large-v3 from HuggingFace.
+    Note: ivrit-ai/whisper-large-v3-ct2 is a CTranslate2-optimized version
+    which is faster but requires the faster-whisper library instead of transformers.
 """
 
 import sys
 import os
 from pathlib import Path
+import warnings
+
+# Suppress warnings before importing other modules
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", message=".*torch_dtype.*")
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -52,9 +66,9 @@ def main():
     print("   (Model will load on first transcription)")
 
     transcriber = HebrewTranscriber(
-        model_path="models/whisper-large-v3-hebrew",
+        model_path="models/whisper-large-v3-hebrew-ct2",
         device="auto",
-        compute_type="float32",
+        compute_type="int8",  # int8 for fastest CPU inference
     )
 
     # Transcribe audio file
@@ -92,9 +106,10 @@ def main():
         output_dir = Path("output/transcriptions")
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Generate output filename based on input audio file
+        # Generate output filename with timestamp to avoid overwriting
         audio_filename = Path(audio_file).stem
-        output_file = output_dir / f"{audio_filename}_transcript.txt"
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        output_file = output_dir / f"{audio_filename}_transcript_{timestamp}.txt"
 
         with open(output_file, "w", encoding="utf-8") as f:
             f.write(f"Transcription of: {audio_file}\n")

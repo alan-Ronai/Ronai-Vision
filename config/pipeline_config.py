@@ -160,6 +160,14 @@ class PipelineConfig:
     DETECTION_SKIP: int = int(os.getenv("DETECTION_SKIP", "1"))
 
     # ========================================================================
+    # VISUALIZATION
+    # ========================================================================
+
+    # Show FPS counter on output video
+    # Override via env: SHOW_FPS=true
+    SHOW_FPS: bool = bool(os.getenv("SHOW_FPS", "true"))
+
+    # ========================================================================
     # CLASS FOR: Methods
     # ========================================================================
 

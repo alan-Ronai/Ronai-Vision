@@ -26,8 +26,9 @@ opuslib>=3.0.0
 pydub>=0.25.0
 soundfile>=0.12.0
 
-# Hebrew Audio Processing
-transformers>=4.30.0
+# Hebrew Audio Processing - faster-whisper with CTranslate2 (4-5x faster than transformers)
+faster-whisper>=1.0.0,<2.0.0
+ctranslate2
 pyttsx3>=2.90
 librosa>=0.10.0
 
@@ -38,7 +39,11 @@ requests>=2.31.0
 # Additional dependencies (used by imported packages)
 gdown>=4.7.0
 tensorboard>=2.14.0
+python-multipart>=0.0.6
 
 # Development (optional)
 pytest>=7.4.0
 pytest-asyncio>=0.21.0
+
+# SAM2 segmentation model
+sam2

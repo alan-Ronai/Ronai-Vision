@@ -17,6 +17,7 @@ class FrameRenderer:
         text_color: Tuple[int, int, int] = (255, 255, 255),
         text_bg_color: Tuple[int, int, int] = (0, 0, 0),
         show_masks: bool = False,
+        show_fps: bool = True,
     ):
         """
         Args:
@@ -25,6 +26,7 @@ class FrameRenderer:
             bbox_color: BGR color for bounding boxes
             text_color: BGR color for text
             text_bg_color: BGR color for text background
+            show_fps: Whether to display FPS counter
         """
         self.font_scale = font_scale
         self.thickness = thickness
@@ -33,6 +35,7 @@ class FrameRenderer:
         self.text_bg_color = text_bg_color
         # Whether to overlay segmentation masks by default. Keep False for clean box+ID output.
         self.show_masks = show_masks
+        self.show_fps = show_fps
 
     def render_detections(
         self,
@@ -192,3 +195,56 @@ class FrameRenderer:
             self.text_color,
             self.thickness,
         )
+
+    def render_fps(self, frame: np.ndarray, fps: float) -> np.ndarray:
+        """Draw FPS counter on frame.
+
+        Args:
+            frame: (H, W, 3) BGR numpy array
+            fps: Current FPS value
+
+        Returns:
+            Frame with FPS overlay
+        """
+        if not self.show_fps or fps is None:
+            return frame
+
+        output = frame.copy()
+
+        # FPS text in top-right corner
+        fps_text = f"FPS: {fps:.1f}"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.8
+        thickness = 2
+
+        # Get text size
+        (w, h), baseline = cv2.getTextSize(fps_text, font, font_scale, thickness)
+
+        # Position in top-right with padding
+        h_img, w_img = frame.shape[:2]
+        x = w_img - w - 15
+        y = h + 15
+
+        # Draw semi-transparent background
+        overlay = output.copy()
+        cv2.rectangle(
+            overlay,
+            (x - 5, y - h - baseline - 5),
+            (x + w + 5, y + baseline + 5),
+            (0, 0, 0),
+            -1,
+        )
+        cv2.addWeighted(overlay, 0.6, output, 0.4, 0, output)
+
+        # Draw FPS text in bright green
+        cv2.putText(
+            output,
+            fps_text,
+            (x, y),
+            font,
+            font_scale,
+            (0, 255, 0),  # Bright green
+            thickness,
+        )
+
+        return output
