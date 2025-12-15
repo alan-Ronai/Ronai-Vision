@@ -321,11 +321,6 @@ class SimpleRTPReceiver:
             # Matching Java code: System.arraycopy(data, 12, usA, 0, length-12)
             payload = data[12:length]
 
-            # Convert from big-endian (network byte order) to little-endian
-            # Military RTP devices use network byte order for 16-bit samples
-            samples = np.frombuffer(payload, dtype=">i2")  # big-endian int16
-            payload_corrected = samples.astype("<i2").tobytes()  # little-endian int16
-
             # Determine remote sampling rate based on payload type
             # Matching Java: payloadType == 4 ? AUDIO_SAMPLING_RATE_LOW : AUDIO_SAMPLING_RATE
             if payload_type == 4:
@@ -336,11 +331,11 @@ class SimpleRTPReceiver:
             # Handle sampling rate conversion if needed
             if self.target_sample_rate == remote_sample_rate:
                 # No conversion needed, write directly
-                output_data = payload_corrected
+                output_data = payload
             else:
                 # Upsample if needed
                 output_data = self._upsample(
-                    payload_corrected, remote_sample_rate, self.target_sample_rate
+                    payload, remote_sample_rate, self.target_sample_rate
                 )
 
             # Write to both WAV and PCM files
