@@ -14,6 +14,8 @@ from typing import Optional, Callable
 from datetime import datetime
 from pathlib import Path
 
+from .audio_writer import AudioWriter
+
 logger = logging.getLogger(__name__)
 
 
@@ -31,6 +33,7 @@ class SimpleRTPReceiver:
         target_sample_rate: int = 8000,
         storage_path: str = "audio_storage/recordings",
         audio_callback: Optional[Callable] = None,
+        inactivity_timeout: float = 3.0,
     ):
         """Initialize simple RTP receiver.
 
@@ -40,23 +43,29 @@ class SimpleRTPReceiver:
             target_sample_rate: Target sampling rate in Hz (default 8000)
             storage_path: Path to save audio files
             audio_callback: Optional callback(audio_data, sample_rate) for streaming
+            inactivity_timeout: Seconds of inactivity before saving files (default 3.0)
         """
         self.listen_host = listen_host
         self.listen_port = listen_port
         self.target_sample_rate = target_sample_rate
         self.storage_path = storage_path
         self.audio_callback = audio_callback
+        self.inactivity_timeout = inactivity_timeout
 
         # RTP socket
         self._socket: Optional[socket.socket] = None
         self._receive_thread: Optional[threading.Thread] = None
+        self._monitor_thread: Optional[threading.Thread] = None
 
         # State
         self._running = False
         self._session_id = None
         self._remote_address = None
-        self._output_file = None
-        self._output_path = None
+        self._audio_writer: Optional[AudioWriter] = None
+        self._pcm_file = None
+        self._pcm_path = None
+        self._last_packet_time = 0.0
+        self._files_lock = threading.Lock()
 
         # Statistics
         self._stats = {
@@ -100,14 +109,20 @@ class SimpleRTPReceiver:
         self._session_id = f"simple_rtp_{int(time.time())}"
         self._setup_output_file()
 
-        # Start thread
+        # Start threads
         self._running = True
         self._stats["start_time"] = datetime.now()
+        self._last_packet_time = time.time()
 
         self._receive_thread = threading.Thread(
             target=self._receive_loop, daemon=True, name="SimpleRTP-Receive"
         )
         self._receive_thread.start()
+
+        self._monitor_thread = threading.Thread(
+            target=self._monitor_loop, daemon=True, name="SimpleRTP-Monitor"
+        )
+        self._monitor_thread.start()
 
         logger.info("Simple RTP receiver started")
 
@@ -126,15 +141,14 @@ class SimpleRTPReceiver:
             except:
                 pass
 
-        # Wait for thread
+        # Wait for threads
         if self._receive_thread:
             self._receive_thread.join(timeout=2.0)
+        if self._monitor_thread:
+            self._monitor_thread.join(timeout=2.0)
 
-        # Close output file
-        if self._output_file:
-            self._output_file.close()
-            self._output_file = None
-            logger.info(f"Audio saved to: {self._output_path}")
+        # Close files
+        self._close_files()
 
         logger.info("Simple RTP receiver stopped")
         self._print_stats()
@@ -146,24 +160,74 @@ class SimpleRTPReceiver:
             "running": self._running,
             "session_id": self._session_id,
             "remote_address": self._remote_address,
-            "output_path": str(self._output_path) if self._output_path else None,
+            "wav_path": self._audio_writer.filepath if self._audio_writer else None,
+            "pcm_path": str(self._pcm_path) if self._pcm_path else None,
         }
 
     def _setup_output_file(self):
-        """Setup output file for raw audio data."""
+        """Setup both WAV and PCM file writers for audio data."""
         try:
-            # Create storage directory
-            storage_dir = Path(self.storage_path) / "sessions" / self._session_id
-            storage_dir.mkdir(parents=True, exist_ok=True)
+            # Create audio writer for WAV output
+            self._audio_writer = AudioWriter(
+                output_dir=self.storage_path,
+                session_id=self._session_id,
+                codec="rtp_pcm",
+                sample_rate=self.target_sample_rate,
+                channels=1,
+            )
+            self._audio_writer.open()
 
-            # Create raw audio file
-            self._output_path = storage_dir / "raw_audio.pcm"
-            self._output_file = open(self._output_path, "wb")
+            # Create PCM file
+            pcm_filename = self._audio_writer.filepath.replace(".wav", ".pcm")
+            self._pcm_path = Path(pcm_filename)
+            self._pcm_file = open(self._pcm_path, "wb")
 
-            logger.info(f"Output file created: {self._output_path}")
+            logger.info(f"WAV file created: {self._audio_writer.filepath}")
+            logger.info(f"PCM file created: {self._pcm_path}")
 
         except Exception as e:
-            logger.error(f"Failed to setup output file: {e}")
+            logger.error(f"Failed to setup audio files: {e}")
+
+    def _close_files(self):
+        """Close and save audio files."""
+        with self._files_lock:
+            # Close WAV file
+            if self._audio_writer:
+                self._audio_writer.close()
+                logger.info(f"WAV file saved: {self._audio_writer.filepath}")
+                self._audio_writer = None
+
+            # Close PCM file
+            if self._pcm_file:
+                self._pcm_file.close()
+                logger.info(f"PCM file saved: {self._pcm_path}")
+                self._pcm_file = None
+
+    def _monitor_loop(self):
+        """Monitor for inactivity and auto-save files."""
+        logger.info("Monitor loop started")
+
+        while self._running:
+            try:
+                time.sleep(0.5)  # Check every 500ms
+
+                # Check if we have active files and if there's been inactivity
+                if self._audio_writer and self._last_packet_time > 0:
+                    elapsed = time.time() - self._last_packet_time
+
+                    if elapsed > self.inactivity_timeout:
+                        logger.info(f"No packets for {elapsed:.1f}s, saving files...")
+                        self._close_files()
+                        # Reset for next session
+                        self._session_id = f"simple_rtp_{int(time.time())}"
+                        self._setup_output_file()
+                        self._last_packet_time = 0.0
+
+            except Exception as e:
+                if self._running:
+                    logger.error(f"Monitor error: {e}", exc_info=True)
+
+        logger.info("Monitor loop stopped")
 
     def _receive_loop(self):
         """Main receive loop."""
@@ -179,10 +243,11 @@ class SimpleRTPReceiver:
                     self._remote_address = addr
                     logger.info(f"Detected RTP source: {addr}")
 
-                # Update stats
+                # Update stats and packet time
                 self._stats["packets_received"] += 1
                 self._stats["bytes_received"] += len(data)
                 self._stats["last_packet_time"] = datetime.now()
+                self._last_packet_time = time.time()
 
                 # Process packet
                 self._process_packet(data)
@@ -257,11 +322,18 @@ class SimpleRTPReceiver:
                     payload, remote_sample_rate, self.target_sample_rate
                 )
 
-            # Write to output file
-            if self._output_file:
-                self._output_file.write(output_data)
-                self._output_file.flush()
-                self._stats["payload_bytes_written"] += len(output_data)
+            # Write to both WAV and PCM files
+            with self._files_lock:
+                if self._audio_writer:
+                    # Convert bytes to numpy array for AudioWriter (WAV)
+                    audio_array = np.frombuffer(output_data, dtype=np.int16)
+                    self._audio_writer.write(audio_array)
+                    self._stats["payload_bytes_written"] += len(output_data)
+
+                # Write raw PCM data
+                if self._pcm_file:
+                    self._pcm_file.write(output_data)
+                    self._pcm_file.flush()
 
             # Call streaming callback if provided
             if self.audio_callback:
