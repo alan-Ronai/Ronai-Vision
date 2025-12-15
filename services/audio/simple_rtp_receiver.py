@@ -79,17 +79,27 @@ class SimpleRTPReceiver:
         self._last_packet_time = 0.0
         self._files_lock = threading.Lock()
 
-        # Try to initialize G.729 decoder
+        # Try to initialize G.729 decoder - try multiple implementations
         self._g729_decoder = None
-        try:
-            import g729
+        self._g729_available = False
 
-            self._g729_decoder = g729.Decoder()
-            logger.info("G.729 decoder initialized")
+        # Try pygn729
+        try:
+            import pygn729
+
+            self._g729_decoder = pygn729.G729Decoder()
+            self._g729_available = True
+            logger.info("G.729 decoder initialized (pygn729)")
         except ImportError:
-            logger.warning(
-                "G.729 decoder not available (install with: pip install g729)"
+            pass
+
+        # If that didn't work, log that G.729 is not available
+        if not self._g729_available:
+            logger.warning("G.729 decoder not available")
+            logger.info(
+                "Note: G.729 is a proprietary codec with limited Python support"
             )
+            logger.info("Alternatives: Install pygn729 or use ffmpeg with subprocess")
 
         # Statistics
         self._stats = {
@@ -330,6 +340,21 @@ class SimpleRTPReceiver:
                 logger.info(
                     f"Payload type: {payload_type}, payload size: {payload_size}"
                 )
+
+                # Save first packet raw for analysis
+                try:
+                    raw_sample_dir = Path(self.storage_path)
+                    raw_sample_dir.mkdir(parents=True, exist_ok=True)
+                    raw_sample_path = (
+                        raw_sample_dir
+                        / f"raw_sample_pt{payload_type}_{int(time.time())}.bin"
+                    )
+                    with open(raw_sample_path, "wb") as f:
+                        f.write(data[12:length][: min(1000, payload_size)])
+                    logger.info(f"Saved raw payload sample to: {raw_sample_path}")
+                except Exception as e:
+                    logger.warning(f"Could not save raw sample: {e}")
+
                 self._setup_output_file()
 
             # Extract payload (skip 12-byte header)
@@ -350,15 +375,22 @@ class SimpleRTPReceiver:
                 logger.info("Decoding as G.711 A-law (PCMA)")
                 output_data = audioop.alaw2lin(payload, 2)
             elif payload_type == 5:
-                # Try G.729 decoding for payload type 5
-                if self._g729_decoder:
-                    logger.info("Payload type 5: attempting G.729 decoding")
-                    output_data = self._decode_g729(payload)
-                else:
-                    logger.warning(
-                        "Payload type 5: G.729 decoder not available, treating as raw PCM"
-                    )
-                    output_data = payload
+                # Payload type 5 - could be DVI4 (IMA ADPCM) or custom
+                # Since G.729 decoder isn't available, let's try treating as:
+                # 1. Raw 16-bit PCM
+                # 2. 8-bit unsigned PCM (convert to 16-bit signed)
+                logger.info("Payload type 5: analyzing format...")
+
+                # Try as raw 16-bit PCM first
+                output_data = payload
+
+                # Alternative: if it sounds wrong, uncomment to try 8-bit conversion:
+                # Convert 8-bit unsigned to 16-bit signed PCM
+                # audio_8bit = np.frombuffer(payload, dtype=np.uint8)
+                # audio_16bit = ((audio_8bit.astype(np.int16) - 128) * 256)
+                # output_data = audio_16bit.tobytes()
+
+                logger.info(f"Using raw PCM (payload size: {len(payload)} bytes)")
             elif payload_type == 18 and self._g729_decoder:
                 # G.729 compressed audio
                 logger.info("Decoding as G.729")
