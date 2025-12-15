@@ -317,25 +317,26 @@ class SimpleRTPReceiver:
                 logger.info("First packet received, creating audio files...")
                 self._setup_output_file()
 
-            # Extract payload (skip 12-byte header)
+            # Extract payload (skip 12-byte header) - raw PCM data
+            # Matching Java code: System.arraycopy(data, 12, usA, 0, length-12)
             payload = data[12:length]
 
-            # Decode based on payload type
-            # Payload type 0 = G.711 μ-law, 8 = G.711 A-law
-            if payload_type == 0:
-                # G.711 μ-law (standard for most RTP audio)
-                pcm_bytes = audioop.ulaw2lin(payload, 2)  # Decode to 16-bit PCM
-                output_data = pcm_bytes
-            elif payload_type == 8:
-                # G.711 A-law
-                pcm_bytes = audioop.alaw2lin(payload, 2)  # Decode to 16-bit PCM
-                output_data = pcm_bytes
+            # Determine remote sampling rate based on payload type
+            # Matching Java: payloadType == 4 ? AUDIO_SAMPLING_RATE_LOW : AUDIO_SAMPLING_RATE
+            if payload_type == 4:
+                remote_sample_rate = 8000  # Low sample rate
             else:
-                # Unknown payload type, treat as raw PCM
-                logger.warning(
-                    f"Unknown payload type {payload_type}, treating as raw PCM"
-                )
+                remote_sample_rate = self.target_sample_rate  # Standard rate
+
+            # Handle sampling rate conversion if needed
+            if self.target_sample_rate == remote_sample_rate:
+                # No conversion needed, write directly
                 output_data = payload
+            else:
+                # Upsample if needed
+                output_data = self._upsample(
+                    payload, remote_sample_rate, self.target_sample_rate
+                )
 
             # Write to both WAV and PCM files
             with self._files_lock:
