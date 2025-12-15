@@ -11,6 +11,7 @@ import time
 import numpy as np
 import logging
 import sys
+import audioop
 from typing import Optional, Callable
 from datetime import datetime
 from pathlib import Path
@@ -116,9 +117,8 @@ class SimpleRTPReceiver:
             logger.error(f"Failed to bind socket: {e}")
             raise
 
-        # Initialize session
+        # Initialize session (files will be created on first packet)
         self._session_id = f"simple_rtp_{int(time.time())}"
-        self._setup_output_file()
 
         # Start threads
         self._running = True
@@ -229,9 +229,8 @@ class SimpleRTPReceiver:
                     if elapsed > self.inactivity_timeout:
                         logger.info(f"No packets for {elapsed:.1f}s, saving files...")
                         self._close_files()
-                        # Reset for next session
+                        # Reset for next session (files will be created on next packet)
                         self._session_id = f"simple_rtp_{int(time.time())}"
-                        self._setup_output_file()
                         self._last_packet_time = 0.0
 
             except Exception as e:
@@ -313,25 +312,30 @@ class SimpleRTPReceiver:
                     f"ts={timestamp}, ssrc={ssrc}, size={payload_size} bytes"
                 )
 
-            # Determine remote sampling rate based on payload type
-            # Payload type 4 typically means lower sample rate
-            if payload_type == 4:
-                remote_sample_rate = 8000  # AUDIO_SAMPLING_RATE_LOW
-            else:
-                remote_sample_rate = self.target_sample_rate
+            # Create files on first packet if not already created
+            if self._audio_writer is None:
+                logger.info("First packet received, creating audio files...")
+                self._setup_output_file()
 
             # Extract payload (skip 12-byte header)
             payload = data[12:length]
 
-            # Handle sampling rate conversion
-            if remote_sample_rate == self.target_sample_rate:
-                # No conversion needed, write directly
-                output_data = payload
+            # Decode based on payload type
+            # Payload type 0 = G.711 μ-law, 8 = G.711 A-law
+            if payload_type == 0:
+                # G.711 μ-law (standard for most RTP audio)
+                pcm_bytes = audioop.ulaw2lin(payload, 2)  # Decode to 16-bit PCM
+                output_data = pcm_bytes
+            elif payload_type == 8:
+                # G.711 A-law
+                pcm_bytes = audioop.alaw2lin(payload, 2)  # Decode to 16-bit PCM
+                output_data = pcm_bytes
             else:
-                # Upsample if needed
-                output_data = self._upsample(
-                    payload, remote_sample_rate, self.target_sample_rate
+                # Unknown payload type, treat as raw PCM
+                logger.warning(
+                    f"Unknown payload type {payload_type}, treating as raw PCM"
                 )
+                output_data = payload
 
             # Write to both WAV and PCM files
             with self._files_lock:
