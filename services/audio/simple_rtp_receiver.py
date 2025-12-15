@@ -10,11 +10,22 @@ import threading
 import time
 import numpy as np
 import logging
+import sys
 from typing import Optional, Callable
 from datetime import datetime
 from pathlib import Path
 
-from .audio_writer import AudioWriter
+# Handle imports for both module and standalone execution
+try:
+    from services.audio.audio_writer import AudioWriter
+except ImportError:
+    # Try relative import if running as part of package
+    try:
+        from .audio_writer import AudioWriter
+    except ImportError:
+        # Add parent directory to path for standalone execution
+        sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+        from services.audio.audio_writer import AudioWriter
 
 logger = logging.getLogger(__name__)
 
