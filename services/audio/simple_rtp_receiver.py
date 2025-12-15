@@ -79,6 +79,18 @@ class SimpleRTPReceiver:
         self._last_packet_time = 0.0
         self._files_lock = threading.Lock()
 
+        # Try to initialize G.729 decoder
+        self._g729_decoder = None
+        try:
+            import g729
+
+            self._g729_decoder = g729.Decoder()
+            logger.info("G.729 decoder initialized")
+        except ImportError:
+            logger.warning(
+                "G.729 decoder not available (install with: pip install g729)"
+            )
+
         # Statistics
         self._stats = {
             "packets_received": 0,
@@ -315,39 +327,52 @@ class SimpleRTPReceiver:
             # Create files on first packet if not already created
             if self._audio_writer is None:
                 logger.info("First packet received, creating audio files...")
+                logger.info(
+                    f"Payload type: {payload_type}, payload size: {payload_size}"
+                )
                 self._setup_output_file()
 
             # Extract payload (skip 12-byte header)
             payload = data[12:length]
 
-            # Decode audio based on payload type
-            # Standard RTP payload types: 0=PCMU (μ-law), 5=DVI4, 8=PCMA (A-law)
-            # Most PTT systems use G.711 μ-law even with custom payload types
-            try:
-                if payload_type == 0:
-                    # PCMU (G.711 μ-law) - standard
-                    pcm_bytes = audioop.ulaw2lin(payload, 2)
-                    logger.info(f"Decoding as G.711 μ-law (PT={payload_type})")
-                elif payload_type == 8:
-                    # PCMA (G.711 A-law)
-                    pcm_bytes = audioop.alaw2lin(payload, 2)
-                    logger.info(f"Decoding as G.711 A-law (PT={payload_type})")
+            # Decode based on RTP payload type (RFC 3551)
+            # 0 = PCMU (G.711 μ-law)
+            # 8 = PCMA (G.711 A-law)
+            # 18 = G.729
+            # 5 = Trying G.729 (custom implementation)
+
+            if payload_type == 0:
+                # G.711 μ-law - 8-bit compressed to 16-bit linear PCM
+                logger.info("Decoding as G.711 μ-law (PCMU)")
+                output_data = audioop.ulaw2lin(payload, 2)
+            elif payload_type == 8:
+                # G.711 A-law - 8-bit compressed to 16-bit linear PCM
+                logger.info("Decoding as G.711 A-law (PCMA)")
+                output_data = audioop.alaw2lin(payload, 2)
+            elif payload_type == 5:
+                # Try G.729 decoding for payload type 5
+                if self._g729_decoder:
+                    logger.info("Payload type 5: attempting G.729 decoding")
+                    output_data = self._decode_g729(payload)
                 else:
-                    # Unknown payload type - try μ-law decoding (most common)
-                    logger.info(
-                        f"Payload type {payload_type} - attempting G.711 μ-law decode"
+                    logger.warning(
+                        "Payload type 5: G.729 decoder not available, treating as raw PCM"
                     )
-                    pcm_bytes = audioop.ulaw2lin(payload, 2)
-
-                output_data = pcm_bytes
-
-            except Exception as decode_error:
-                logger.warning(f"Decode failed, trying raw PCM: {decode_error}")
-                # If decode fails, treat as raw 16-bit PCM
+                    output_data = payload
+            elif payload_type == 18 and self._g729_decoder:
+                # G.729 compressed audio
+                logger.info("Decoding as G.729")
+                output_data = self._decode_g729(payload)
+            elif payload_type == 4:
+                # Payload type 4 - treat as raw PCM
+                logger.info(
+                    f"Payload type {payload_type}: treating as raw PCM (no decoding)"
+                )
                 output_data = payload
-
-            # Write to both WAV and PCM files
-            with self._files_lock:
+            else:
+                # Unknown payload type - treat as raw 16-bit PCM
+                logger.info(f"Payload type {payload_type}: treating as raw 16-bit PCM")
+                output_data = payload
                 if self._audio_writer:
                     # Convert bytes to numpy array for AudioWriter (WAV)
                     audio_array = np.frombuffer(output_data, dtype=np.int16)
@@ -368,6 +393,35 @@ class SimpleRTPReceiver:
 
         except Exception as e:
             logger.error(f"Packet processing error: {e}", exc_info=True)
+
+    def _decode_g729(self, payload: bytes) -> bytes:
+        """Decode G.729 compressed audio to PCM.
+
+        Args:
+            payload: G.729 encoded bytes
+
+        Returns:
+            16-bit PCM audio bytes
+        """
+        try:
+            if self._g729_decoder:
+                # G.729 frames are 10 bytes (8 kbps, 10ms frame)
+                pcm_samples = []
+                for i in range(0, len(payload), 10):
+                    frame = payload[i : i + 10]
+                    if len(frame) == 10:
+                        decoded = self._g729_decoder.decode(frame)
+                        pcm_samples.extend(decoded)
+
+                # Convert to bytes
+                pcm_array = np.array(pcm_samples, dtype=np.int16)
+                return pcm_array.tobytes()
+            else:
+                logger.warning("G.729 decoder not available")
+                return payload
+        except Exception as e:
+            logger.error(f"G.729 decode error: {e}")
+            return payload
 
     def _upsample(self, audio_data: bytes, from_rate: int, to_rate: int) -> bytes:
         """Upsample audio data from one sample rate to another.
