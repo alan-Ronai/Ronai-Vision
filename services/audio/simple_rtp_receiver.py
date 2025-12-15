@@ -79,28 +79,6 @@ class SimpleRTPReceiver:
         self._last_packet_time = 0.0
         self._files_lock = threading.Lock()
 
-        # Try to initialize G.729 decoder - try multiple implementations
-        self._g729_decoder = None
-        self._g729_available = False
-
-        # Try pygn729
-        try:
-            import pygn729
-
-            self._g729_decoder = pygn729.G729Decoder()
-            self._g729_available = True
-            logger.info("G.729 decoder initialized (pygn729)")
-        except ImportError:
-            pass
-
-        # If that didn't work, log that G.729 is not available
-        if not self._g729_available:
-            logger.warning("G.729 decoder not available")
-            logger.info(
-                "Note: G.729 is a proprietary codec with limited Python support"
-            )
-            logger.info("Alternatives: Install pygn729 or use ffmpeg with subprocess")
-
         # Statistics
         self._stats = {
             "packets_received": 0,
@@ -337,74 +315,31 @@ class SimpleRTPReceiver:
             # Create files on first packet if not already created
             if self._audio_writer is None:
                 logger.info("First packet received, creating audio files...")
-                logger.info(
-                    f"Payload type: {payload_type}, payload size: {payload_size}"
-                )
-
-                # Save first packet raw for analysis
-                try:
-                    raw_sample_dir = Path(self.storage_path)
-                    raw_sample_dir.mkdir(parents=True, exist_ok=True)
-                    raw_sample_path = (
-                        raw_sample_dir
-                        / f"raw_sample_pt{payload_type}_{int(time.time())}.bin"
-                    )
-                    with open(raw_sample_path, "wb") as f:
-                        f.write(data[12:length][: min(1000, payload_size)])
-                    logger.info(f"Saved raw payload sample to: {raw_sample_path}")
-                except Exception as e:
-                    logger.warning(f"Could not save raw sample: {e}")
-
                 self._setup_output_file()
 
-            # Extract payload (skip 12-byte header)
+            # Extract payload (skip 12-byte header) - raw PCM data
+            # Matching Java code: System.arraycopy(data, 12, usA, 0, length-12)
             payload = data[12:length]
 
-            # Decode based on RTP payload type (RFC 3551)
-            # 0 = PCMU (G.711 μ-law)
-            # 8 = PCMA (G.711 A-law)
-            # 18 = G.729
-            # 5 = Trying G.729 (custom implementation)
+            # Determine remote sampling rate based on payload type
+            # Matching Java: payloadType == 4 ? AUDIO_SAMPLING_RATE_LOW : AUDIO_SAMPLING_RATE
+            if payload_type == 4:
+                remote_sample_rate = 8000  # Low sample rate
+            else:
+                remote_sample_rate = self.target_sample_rate  # Standard rate
 
-            if payload_type == 0:
-                # G.711 μ-law - 8-bit compressed to 16-bit linear PCM
-                logger.info("Decoding as G.711 μ-law (PCMU)")
-                output_data = audioop.ulaw2lin(payload, 2)
-            elif payload_type == 8:
-                # G.711 A-law - 8-bit compressed to 16-bit linear PCM
-                logger.info("Decoding as G.711 A-law (PCMA)")
-                output_data = audioop.alaw2lin(payload, 2)
-            elif payload_type == 5:
-                # Payload type 5 - could be DVI4 (IMA ADPCM) or custom
-                # Since G.729 decoder isn't available, let's try treating as:
-                # 1. Raw 16-bit PCM
-                # 2. 8-bit unsigned PCM (convert to 16-bit signed)
-                logger.info("Payload type 5: analyzing format...")
-
-                # Try as raw 16-bit PCM first
-                output_data = payload
-
-                # Alternative: if it sounds wrong, uncomment to try 8-bit conversion:
-                # Convert 8-bit unsigned to 16-bit signed PCM
-                # audio_8bit = np.frombuffer(payload, dtype=np.uint8)
-                # audio_16bit = ((audio_8bit.astype(np.int16) - 128) * 256)
-                # output_data = audio_16bit.tobytes()
-
-                logger.info(f"Using raw PCM (payload size: {len(payload)} bytes)")
-            elif payload_type == 18 and self._g729_decoder:
-                # G.729 compressed audio
-                logger.info("Decoding as G.729")
-                output_data = self._decode_g729(payload)
-            elif payload_type == 4:
-                # Payload type 4 - treat as raw PCM
-                logger.info(
-                    f"Payload type {payload_type}: treating as raw PCM (no decoding)"
-                )
+            # Handle sampling rate conversion if needed
+            if self.target_sample_rate == remote_sample_rate:
+                # No conversion needed, write directly
                 output_data = payload
             else:
-                # Unknown payload type - treat as raw 16-bit PCM
-                logger.info(f"Payload type {payload_type}: treating as raw 16-bit PCM")
-                output_data = payload
+                # Upsample if needed
+                output_data = self._upsample(
+                    payload, remote_sample_rate, self.target_sample_rate
+                )
+
+            # Write to both WAV and PCM files
+            with self._files_lock:
                 if self._audio_writer:
                     # Convert bytes to numpy array for AudioWriter (WAV)
                     audio_array = np.frombuffer(output_data, dtype=np.int16)
@@ -425,35 +360,6 @@ class SimpleRTPReceiver:
 
         except Exception as e:
             logger.error(f"Packet processing error: {e}", exc_info=True)
-
-    def _decode_g729(self, payload: bytes) -> bytes:
-        """Decode G.729 compressed audio to PCM.
-
-        Args:
-            payload: G.729 encoded bytes
-
-        Returns:
-            16-bit PCM audio bytes
-        """
-        try:
-            if self._g729_decoder:
-                # G.729 frames are 10 bytes (8 kbps, 10ms frame)
-                pcm_samples = []
-                for i in range(0, len(payload), 10):
-                    frame = payload[i : i + 10]
-                    if len(frame) == 10:
-                        decoded = self._g729_decoder.decode(frame)
-                        pcm_samples.extend(decoded)
-
-                # Convert to bytes
-                pcm_array = np.array(pcm_samples, dtype=np.int16)
-                return pcm_array.tobytes()
-            else:
-                logger.warning("G.729 decoder not available")
-                return payload
-        except Exception as e:
-            logger.error(f"G.729 decode error: {e}")
-            return payload
 
     def _upsample(self, audio_data: bytes, from_rate: int, to_rate: int) -> bytes:
         """Upsample audio data from one sample rate to another.
