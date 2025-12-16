@@ -16,7 +16,6 @@ Each test creates both a .wav and .pcm file for comparison.
 """
 
 import socket
-import struct
 import threading
 import time
 import numpy as np
@@ -167,7 +166,7 @@ class SimpleRTPReceiver:
         if self._socket:
             try:
                 self._socket.close()
-            except:
+            except Exception:
                 pass
 
         # Wait for threads
@@ -218,18 +217,18 @@ class SimpleRTPReceiver:
             logger.info(f"Creating {len(test_configs)} test output files...")
 
             for config_name, description in test_configs:
-                # Create AudioWriter for WAV
+                # Create AudioWriter for WAV with config_name as codec for clear filenames
                 writer = AudioWriter(
                     output_dir=self.storage_path,
-                    session_id=f"{self._session_id}_{config_name}",
-                    codec="rtp_pcm",
+                    session_id=self._session_id,
+                    codec=config_name,  # Use config_name as codec for clear filename
                     sample_rate=self.target_sample_rate,
                     channels=1,
                 )
                 writer.open()
                 self._test_writers[config_name] = writer
 
-                # Create PCM file
+                # Create PCM file with clear naming
                 pcm_filename = writer.filepath.replace(".wav", ".pcm")
                 pcm_path = Path(pcm_filename)
                 self._test_files[config_name] = open(pcm_path, "wb")
@@ -294,6 +293,11 @@ class SimpleRTPReceiver:
 
         while self._running:
             try:
+                # Check socket is valid
+                if self._socket is None:
+                    logger.error("Socket is None in receive loop")
+                    break
+
                 # Receive packet (buffer size 32000 like Java code)
                 data, addr = self._socket.recvfrom(32000)
 
@@ -336,7 +340,6 @@ class SimpleRTPReceiver:
         try:
             # Parse RTP header (simplified, matching Java code)
             version = (data[0] >> 6) & 0x03
-            is_first_or_last = (data[1] & 0x80) == 0x80  # Marker bit
             payload_type = data[1] & 0x7F
             sequence_number = ((data[2] & 0xFF) << 8) | (data[3] & 0xFF)
             timestamp = (
@@ -511,7 +514,7 @@ class SimpleRTPReceiver:
         """Print session statistics."""
         if self._stats["start_time"]:
             duration = (datetime.now() - self._stats["start_time"]).total_seconds()
-            logger.info(f"Session statistics:")
+            logger.info("Session statistics:")
             logger.info(f"  Duration: {duration:.1f}s")
             logger.info(f"  Packets received: {self._stats['packets_received']}")
             logger.info(f"  Bytes received: {self._stats['bytes_received']}")
