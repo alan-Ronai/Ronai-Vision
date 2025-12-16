@@ -1,0 +1,49 @@
+{
+  "expo": {
+    "name": "אפליקציית לוחם",
+    "slug": "hamal-soldier-app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#111827"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.hamal.soldier",
+      "infoPlist": {
+        "NSCameraUsageDescription": "אפליקציה זו זקוקה לגישה למצלמה לצילום והעלאת סרטונים לחמ\"ל"
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#111827"
+      },
+      "package": "com.hamal.soldier",
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "scheme": "hamal-soldier",
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "אפליקציה זו זקוקה לגישה למצלמה",
+          "microphonePermission": "אפליקציה זו זקוקה לגישה למיקרופון"
+        }
+      ]
+    ]
+  }
+}

@@ -102,7 +102,7 @@ person_only_config() {
 
 # PRESET: Vehicle tracking only
 vehicle_only_config() {
-    export YOLO_CONFIDENCE=0.35
+    export YOLO_CONFIDENCE=0.50
     export ALLOWED_CLASSES=car,truck,motorcycle,bus,van
     export DEVICE=mps
     export PARALLEL=true

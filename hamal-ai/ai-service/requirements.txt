@@ -1,0 +1,31 @@
+# FastAPI and server
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.9
+
+# AI/ML
+ultralytics>=8.3.0
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.24.0
+opencv-python-headless>=4.8.0
+pillow>=10.0.0
+
+# ReID Tracking
+deep-sort-realtime>=1.3.2
+
+# Google Services
+google-generativeai>=0.3.0
+google-cloud-texttospeech>=2.16.0
+google-cloud-speech>=2.26.0
+
+# TTS fallback (if Google Cloud not configured)
+gtts>=2.5.0
+pyttsx3>=2.90
+
+# HTTP client
+httpx>=0.25.0
+aiohttp>=3.9.0
+
+# Utilities
+python-dotenv>=1.0.0

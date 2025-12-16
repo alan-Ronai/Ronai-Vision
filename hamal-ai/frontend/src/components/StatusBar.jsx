@@ -1,0 +1,75 @@
+import { useApp } from '../context/AppContext';
+
+export default function StatusBar() {
+  const { connected, cameras, events, isEmergency } = useApp();
+
+  const onlineCameras = cameras.filter(c => c.status === 'online').length;
+  const criticalEvents = events.filter(e => e.severity === 'critical' && !e.acknowledged).length;
+  const warningEvents = events.filter(e => e.severity === 'warning' && !e.acknowledged).length;
+
+  const currentTime = new Date().toLocaleTimeString('he-IL', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  });
+
+  const currentDate = new Date().toLocaleDateString('he-IL', {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric'
+  });
+
+  return (
+    <div className={`
+      flex items-center justify-between px-4 py-2
+      ${isEmergency ? 'bg-red-900/50' : 'bg-gray-800'}
+      border-b border-gray-700 flex-shrink-0
+    `}>
+      {/* Logo and title */}
+      <div className="flex items-center gap-3">
+        <div className="text-2xl">🛡️</div>
+        <div>
+          <h1 className="text-lg font-bold">חמ"ל AI</h1>
+          <p className="text-xs text-gray-400">מרכז שליטה ובקרה</p>
+        </div>
+      </div>
+
+      {/* Status indicators */}
+      <div className="flex items-center gap-6">
+        {/* Connection status */}
+        <div className="flex items-center gap-2">
+          <div className={`w-3 h-3 rounded-full ${connected ? 'bg-green-500' : 'bg-red-500'}`}></div>
+          <span className="text-sm">{connected ? 'מחובר' : 'מנותק'}</span>
+        </div>
+
+        {/* Cameras online */}
+        <div className="flex items-center gap-2">
+          <span className="text-gray-400">📹</span>
+          <span className="text-sm">{onlineCameras}/{cameras.length} מצלמות</span>
+        </div>
+
+        {/* Alert counts */}
+        {criticalEvents > 0 && (
+          <div className="flex items-center gap-2 bg-red-600 px-2 py-1 rounded animate-pulse">
+            <span>🚨</span>
+            <span className="text-sm font-bold">{criticalEvents} קריטי</span>
+          </div>
+        )}
+
+        {warningEvents > 0 && (
+          <div className="flex items-center gap-2 bg-yellow-600 px-2 py-1 rounded">
+            <span>⚠️</span>
+            <span className="text-sm">{warningEvents} אזהרות</span>
+          </div>
+        )}
+      </div>
+
+      {/* Date and time */}
+      <div className="text-left">
+        <div className="text-xl font-mono">{currentTime}</div>
+        <div className="text-xs text-gray-400">{currentDate}</div>
+      </div>
+    </div>
+  );
+}
