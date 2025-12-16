@@ -65,6 +65,7 @@ coverage.xml
 .venv-ronai/
 dev.env
 prod.env
+*.zip
 
 # Logs
 logs/

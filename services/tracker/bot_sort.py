@@ -10,8 +10,10 @@ Full BoT-SORT implementation combining:
 from typing import List, Dict, Optional, Tuple
 import numpy as np
 from scipy.optimize import linear_sum_assignment
+import time
 
 from services.tracker.base_tracker import BaseTracker, Track
+from services.tracker.metadata_manager import get_metadata_manager
 
 
 class KalmanBoxTracker:
@@ -198,6 +200,7 @@ class BoTSortTracker(BaseTracker):
         iou_threshold: IoU threshold for initial association
         lambda_app: Weight for appearance cost (0=motion only, 1=appearance only)
         max_cost: Maximum cost threshold for assignment
+        class_names: Dict mapping class_id to class name for auto-tagging
         min_confidence_history: Minimum average confidence to keep track (default: 0.25)
     """
 
@@ -209,6 +212,7 @@ class BoTSortTracker(BaseTracker):
         lambda_app: float = 0.7,
         max_cost: float = 0.9,
         min_confidence_history: float = 0.25,
+        class_names: Optional[Dict[int, str]] = None,
     ):
         self.max_lost = max_lost
         self.min_hits = min_hits
@@ -216,6 +220,7 @@ class BoTSortTracker(BaseTracker):
         self.lambda_app = lambda_app
         self.max_cost = max_cost
         self.min_confidence_history = min_confidence_history
+        self.class_names = class_names or {}  # class_id -> name mapping
 
         self.next_id = 1
         self.tracks: Dict[int, Track] = {}
@@ -337,6 +342,9 @@ class BoTSortTracker(BaseTracker):
             self.tracks[tid].update_confidence(float(confidences[c]))
             self.tracks[tid].hits += 1
 
+            # Update metadata timestamp
+            self.tracks[tid].metadata["updated_at"] = time.time()
+
             # Update appearance feature
             if features is not None and len(features) > c and features[c] is not None:
                 self.track_features[tid] = features[c]
@@ -347,6 +355,12 @@ class BoTSortTracker(BaseTracker):
 
             # Reset low confidence counter on successful match
             self.low_confidence_frames[tid] = 0
+
+            # Sync metadata with manager for ALL active tracks
+            metadata_manager = get_metadata_manager()
+            metadata_manager.update_track_metadata(
+                tid, int(class_ids[c]), self.tracks[tid].get_metadata_summary()
+            )
 
             matched_tracks.add(tid)
             matched_dets.add(c)
@@ -415,6 +429,8 @@ class BoTSortTracker(BaseTracker):
         det_idx: int,
     ):
         """Create a new tentative track."""
+        import time
+
         tid = self.next_id
         self.next_id += 1
 
@@ -426,6 +442,16 @@ class BoTSortTracker(BaseTracker):
             confidence=float(confidence),
         )
         track.update_confidence(float(confidence))  # Initialize confidence history
+
+        # Initialize metadata timestamps
+        track.metadata["created_at"] = time.time()
+        track.metadata["updated_at"] = time.time()
+
+        # Automatically tag with class name if available
+        if int(class_id) in self.class_names:
+            class_name = self.class_names[int(class_id)]
+            track.add_tag(class_name)
+
         self.tracks[tid] = track
 
         # Initialize Kalman filter
@@ -442,6 +468,12 @@ class BoTSortTracker(BaseTracker):
         # Start as tentative
         self.track_states[tid] = "tentative"
         self.low_confidence_frames[tid] = 0  # Initialize low confidence counter
+
+        # Sync initial metadata to manager (will update when promoted to confirmed)
+        metadata_manager = get_metadata_manager()
+        metadata_manager.update_track_metadata(
+            tid, int(class_id), track.get_metadata_summary()
+        )
 
     def get_active_tracks(self) -> List[Track]:
         """Return all confirmed tracks."""

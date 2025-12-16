@@ -30,7 +30,7 @@ os.environ.setdefault(
 from config.pipeline_config import PipelineConfig
 from services.camera.manager import CameraManager
 from services.camera.frame_reader import CameraFrameReader
-from services.detector import YOLODetector
+from services.detector import create_detector, get_detector_info
 from services.segmenter.sam2_segmenter import SAM2Segmenter
 from services.reid import get_multi_class_reid
 from services.reid.cross_camera import CrossCameraReID
@@ -104,7 +104,16 @@ def run_loop(
     )
     print(f"[INFO] Using device: {device}")
 
-    detector = YOLODetector(model_name=PipelineConfig.YOLO_MODEL, device=device)
+    # Create detector (single or multi based on config)
+    detector = create_detector(device=device)
+    detector_info = get_detector_info(detector)
+    print(f"[INFO] Detector type: {detector_info['type']}")
+    if detector_info["weapon_detection_enabled"]:
+        print(f"[INFO] Weapon detection: ENABLED")
+        print(f"[INFO] Active detectors: {', '.join(detector_info['detectors'])}")
+    else:
+        print(f"[INFO] Weapon detection: DISABLED")
+
     segmenter = SAM2Segmenter(model_type=PipelineConfig.SAM2_MODEL, device=device)
     reid = get_multi_class_reid(device=device)
 

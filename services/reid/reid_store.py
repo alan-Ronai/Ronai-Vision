@@ -39,6 +39,10 @@ class ReIDStore:
         embeddings: (N, D) float32 L2-normalized
         meta: list of metadata dict (camera_id, track_id, timestamp)
         """
+        import logging
+
+        logger = logging.getLogger(__name__)
+
         if embeddings is None or len(embeddings) == 0:
             return []
 
@@ -65,6 +69,9 @@ class ReIDStore:
                 }
                 self.index_to_gid.append(gid)
                 gids.append(gid)
+            logger.info(
+                f"ReIDStore: Initial insert of {N} embeddings, assigned GIDs: {gids}"
+            )
             return gids
 
         # Search for nearest neighbors
@@ -233,3 +240,25 @@ class ReIDStore:
         self.index = faiss.IndexFlatL2(stacked.shape[1])
         self.index.add(stacked)
         self.index_to_gid = gids_to_keep
+
+
+# Global singleton instance
+_reid_store_instance: Optional[ReIDStore] = None
+
+
+def get_reid_store() -> ReIDStore:
+    """Get or create global ReIDStore singleton.
+
+    Returns:
+        ReIDStore instance (shared across all modules)
+    """
+    global _reid_store_instance
+    if _reid_store_instance is None:
+        _reid_store_instance = ReIDStore()
+    return _reid_store_instance
+
+
+def reset_reid_store():
+    """Reset global ReIDStore singleton (for testing)."""
+    global _reid_store_instance
+    _reid_store_instance = None

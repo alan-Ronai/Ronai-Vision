@@ -109,6 +109,23 @@ class PipelineConfig:
     SAM2_MODEL: str = os.getenv("SAM2_MODEL", "tiny")
 
     # ========================================================================
+    # WEAPON DETECTION CONFIGURATION
+    # ========================================================================
+
+    # Enable weapon detection (firearms/guns)
+    # Override via env: ENABLE_WEAPON_DETECTION=true
+    ENABLE_WEAPON_DETECTION: bool = bool(os.getenv("ENABLE_WEAPON_DETECTION", "true"))
+    # Weapon detector model path
+    WEAPON_MODEL: str = os.getenv("WEAPON_MODEL", "models/firearm-yolov8n.pt")
+
+    # Weapon detection confidence threshold
+    WEAPON_CONFIDENCE: float = float(os.getenv("WEAPON_CONFIDENCE", "0.2"))
+
+    # Enable ReID tracking for weapons (track individual weapons across frames)
+    # Default is False - weapons are detected but not tracked with ReID
+    WEAPON_REID_TRACKING: bool = bool(os.getenv("WEAPON_REID_TRACKING", "false"))
+
+    # ========================================================================
     # REID CONFIGURATION
     # ========================================================================
 
@@ -189,6 +206,9 @@ class PipelineConfig:
             "CAMERA_CONFIG": cls.CAMERA_CONFIG,
             "YOLO_MODEL": cls.YOLO_MODEL,
             "SAM2_MODEL": cls.SAM2_MODEL,
+            "ENABLE_WEAPON_DETECTION": cls.ENABLE_WEAPON_DETECTION,
+            "WEAPON_MODEL": cls.WEAPON_MODEL,
+            "WEAPON_CONFIDENCE": cls.WEAPON_CONFIDENCE,
             "REID_PERSON_ONLY": cls.REID_PERSON_ONLY,
             "REID_RECOVERY": cls.REID_RECOVERY,
             "RECOVERY_CONFIDENCE": cls.RECOVERY_CONFIDENCE,

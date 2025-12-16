@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 
 from services.camera.simulator import LocalCameraSimulator
-from services.detector import YOLODetector
+from services.detector import create_detector, get_detector_info
 from services.segmenter.sam2_segmenter import SAM2Segmenter
 from services.tracker.centroid_tracker import CentroidTracker
 from services.reid.histogram_reid import HistogramReID
@@ -19,7 +19,13 @@ def main():
 
     device = choose_device()
     print(f"[INFO] Using device: {device}")
-    detector = YOLODetector(model_name="yolo12n.pt", device=device)
+
+    detector = create_detector(device=device)
+    detector_info = get_detector_info(detector)
+    print(f"[INFO] Detector type: {detector_info['type']}")
+    if detector_info["weapon_detection_enabled"]:
+        print(f"[INFO] Weapon detection: ENABLED")
+
     segmenter = SAM2Segmenter(model_type="tiny", device=device)
     tracker = CentroidTracker()
     reid = HistogramReID()

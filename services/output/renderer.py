@@ -100,14 +100,24 @@ class FrameRenderer:
                 else "unknown"
             )
 
+            # Check if track is armed - use red box instead of green
+            is_armed = "armed" in track.metadata.get("tags", [])
+            box_color = (
+                (0, 0, 255) if is_armed else self.bbox_color
+            )  # Red for armed, green otherwise
+
             # Show global ID if available, otherwise show local track ID
             if hasattr(track, "global_id") and track.global_id is not None:
                 label = f"GID:{track.global_id} {class_name} {track.confidence:.2f}"
             else:
                 label = f"ID:{track.track_id} {class_name} {track.confidence:.2f}"
 
+            # Add [ARMED] indicator to label
+            if is_armed:
+                label = f"[ARMED] {label}"
+
             # Draw box
-            cv2.rectangle(output, (x1, y1), (x2, y2), self.bbox_color, self.thickness)
+            cv2.rectangle(output, (x1, y1), (x2, y2), box_color, self.thickness)
 
             # Draw label with background
             self._draw_label(output, label, (x1, y1 - 5))
@@ -115,7 +125,7 @@ class FrameRenderer:
             # Draw centroid
             cx = int((x1 + x2) / 2)
             cy = int((y1 + y2) / 2)
-            cv2.circle(output, (cx, cy), 4, self.bbox_color, -1)
+            cv2.circle(output, (cx, cy), 4, box_color, -1)
 
         return output
 

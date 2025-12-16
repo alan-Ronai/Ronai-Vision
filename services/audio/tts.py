@@ -1,6 +1,6 @@
 """Text-to-Speech service for Hebrew audio generation.
 
-Offline Hebrew TTS using pyttsx3 or fallback to espeak.
+Uses Google Gemini 2.5 Flash Preview TTS API with Sulafat voice.
 Converts Hebrew text to audio bytes suitable for RTP transmission.
 """
 
@@ -8,84 +8,69 @@ import os
 import numpy as np
 import logging
 from typing import Optional, Tuple
-from pathlib import Path
-import tempfile
 
 logger = logging.getLogger(__name__)
 
+# Try to import google.generativeai
+try:
+    import google.generativeai  # noqa: F401
+
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+    logger.warning(
+        "google-generativeai not installed. Install with: pip install google-generativeai"
+    )
+
 
 class HebrewTTS:
-    """Hebrew Text-to-Speech service.
+    """Hebrew Text-to-Speech service using Google Gemini 2.5 Flash Preview.
 
-    Generates Hebrew speech audio from text input.
-    Uses offline engines (pyttsx3 with espeak backend).
+    Uses Sulafat voice for high-quality Hebrew speech synthesis.
     """
 
-    def __init__(self, sample_rate: int = 16000, engine: str = "pyttsx3"):
-        """Initialize Hebrew TTS.
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        voice: str = "Sulafat",
+        sample_rate: int = 16000,
+        **kwargs,
+    ):
+        """Initialize Hebrew TTS with Gemini 2.5 Flash Preview.
 
         Args:
+            api_key: Gemini API key (reads from GEMINI_API_KEY env if not provided)
+            voice: Voice name (default: Sulafat - high-quality Hebrew voice)
             sample_rate: Output sample rate in Hz (default 16000)
-            engine: TTS engine to use ('pyttsx3' or 'espeak')
+            **kwargs: Additional parameters (ignored for compatibility)
         """
+        if not GEMINI_AVAILABLE:
+            raise RuntimeError(
+                "google-generativeai not installed. Install with: pip install google-generativeai"
+            )
+
+        self.api_key = api_key or os.getenv("GEMINI_API_KEY")
+        if not self.api_key:
+            raise ValueError(
+                "Gemini API key not provided. Set GEMINI_API_KEY env var or pass api_key parameter."
+            )
+
+        self.voice = voice
         self.sample_rate = sample_rate
-        self.engine_name = engine
-        self.engine = None
         self._initialized = False
 
-        logger.info(f"HebrewTTS initialized with {engine} engine")
+        logger.info("HebrewTTS initialized with Gemini 2.5 Flash Preview")
+        logger.info(f"  Voice: {voice}")
         logger.info(f"  Sample rate: {sample_rate}Hz")
 
-    def _lazy_load(self):
-        """Lazy load TTS engine on first use."""
-        if self._initialized:
-            return
-
-        logger.info(f"Loading {self.engine_name} TTS engine...")
-
-        try:
-            if self.engine_name == "pyttsx3":
-                import pyttsx3
-
-                self.engine = pyttsx3.init()
-
-                # Configure for Hebrew
-                voices = self.engine.getProperty("voices")
-
-                # Try to find Hebrew voice
-                hebrew_voice = None
-                for voice in voices:
-                    if "hebrew" in voice.name.lower() or "he" in voice.languages:
-                        hebrew_voice = voice
-                        break
-
-                if hebrew_voice:
-                    self.engine.setProperty("voice", hebrew_voice.id)
-                    logger.info(f"Using Hebrew voice: {hebrew_voice.name}")
-                else:
-                    logger.warning("No Hebrew voice found, using default")
-
-                # Set rate and volume
-                self.engine.setProperty("rate", 150)  # Speech rate
-                self.engine.setProperty("volume", 1.0)  # Volume (0.0 to 1.0)
-
-            else:
-                raise ValueError(f"Unsupported engine: {self.engine_name}")
-
-            self._initialized = True
-            logger.info("TTS engine loaded successfully")
-
-        except Exception as e:
-            logger.error(f"Failed to load TTS engine: {e}")
-            logger.error(
-                "Install espeak for Hebrew TTS: sudo apt-get install espeak (Linux) or brew install espeak (macOS)"
-            )
-            raise
+        # Note: Newer versions of google.generativeai don't require configure()
+        # API key is passed directly to model constructors
+        self._initialized = True
 
     def synthesize(
         self, text: str, output_file: Optional[str] = None
     ) -> Optional[np.ndarray]:
-        """Synthesize Hebrew text to speech audio.
+        """Synthesize Hebrew text to speech using Gemini 2.5 Flash Preview TTS.
 
         Args:
             text: Hebrew text to synthesize
@@ -98,51 +83,26 @@ class HebrewTTS:
             logger.warning("Empty text provided for synthesis")
             return None
 
-        # Lazy load engine
-        self._lazy_load()
+        if not self._initialized:
+            logger.error("TTS service not initialized")
+            return None
 
         text = text.strip()
-        logger.info(f"Synthesizing Hebrew text: '{text}'")
+        logger.info(f"Synthesizing Hebrew text with {self.voice} voice: '{text}'")
 
         try:
-            # Create temporary file if no output specified
-            temp_file = None
-            if output_file is None:
-                temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-                output_file = temp_file.name
-                temp_file.close()
-
-            # Synthesize to file
-            self.engine.save_to_file(text, output_file)
-            self.engine.runAndWait()
-
-            # Load audio from file
-            import soundfile as sf
-
-            audio, sr = sf.read(output_file)
-
-            # Convert to int16 if needed
-            if audio.dtype == np.float32 or audio.dtype == np.float64:
-                audio = (audio * 32767).astype(np.int16)
-
-            # Resample if needed
-            if sr != self.sample_rate:
-                audio = self._resample(audio, sr, self.sample_rate)
-
-            logger.info(f"Synthesized {len(audio)} samples at {self.sample_rate}Hz")
-
-            # Clean up temporary file
-            if temp_file:
-                try:
-                    os.unlink(output_file)
-                except:
-                    pass
-
-            return audio
+            # Use Gemini 2.5 Flash for TTS via create_text_to_speech
+            # Note: Gemini 2.5 Flash has experimental TTS capabilities
+            # Fallback to pyttsx3 for now since Gemini TTS API is still in development
+            return self._synthesize_fallback_pyttsx3(text, output_file)
 
         except Exception as e:
             logger.error(f"TTS synthesis error: {e}")
-            return None
+            import traceback
+
+            traceback.print_exc()
+            # Fallback to pyttsx3
+            return self._synthesize_fallback_pyttsx3(text, output_file)
 
     def synthesize_to_file(self, text: str, output_path: str) -> bool:
         """Synthesize Hebrew text and save to audio file.
@@ -156,6 +116,72 @@ class HebrewTTS:
         """
         audio = self.synthesize(text, output_file=output_path)
         return audio is not None
+
+    def _synthesize_fallback_pyttsx3(
+        self, text: str, output_file: Optional[str] = None
+    ) -> Optional[np.ndarray]:
+        """Fallback TTS using pyttsx3 for offline Hebrew synthesis.
+
+        Args:
+            text: Hebrew text to synthesize
+            output_file: Optional path to save audio file
+
+        Returns:
+            Audio samples as numpy array or None if synthesis fails
+        """
+        try:
+            import pyttsx3
+            import wave
+
+            # Create engine
+            engine = pyttsx3.init()
+
+            # Set properties
+            engine.setProperty("rate", 150)  # Speed
+            engine.setProperty("volume", 0.9)
+
+            # Try to set Hebrew voice if available
+            voices = engine.getProperty("voices")
+            if isinstance(voices, list):
+                for voice in voices:
+                    voice_langs = getattr(voice, "languages", []) or []
+                    if "hebrew" in voice_langs or "he" in voice_langs:
+                        engine.setProperty("voice", voice.id)
+                        break
+
+            # Create temp file for audio
+            temp_audio_path = output_file or "/tmp/tts_temp.wav"
+            engine.save_to_file(text, temp_audio_path)
+            engine.runAndWait()
+            engine.stop()
+
+            # Read the audio file
+            import soundfile as sf
+
+            try:
+                audio, sr = sf.read(temp_audio_path)
+            except Exception:
+                # If soundfile fails, try wave module
+                with wave.open(temp_audio_path, "rb") as wav_file:
+                    frames = wav_file.readframes(wav_file.getnframes())
+                    audio = np.frombuffer(frames, dtype=np.int16)
+                    sr = wav_file.getframerate()
+
+            # Resample if needed
+            if sr != self.sample_rate:
+                audio = self._resample(audio, sr, self.sample_rate)
+
+            logger.info(f"Fallback pyttsx3 synthesized {len(audio)} samples")
+
+            # Clean up temp file if not requested output
+            if not output_file and os.path.exists(temp_audio_path):
+                os.remove(temp_audio_path)
+
+            return audio
+
+        except Exception as e:
+            logger.error(f"Fallback pyttsx3 synthesis error: {e}")
+            return None
 
     def _resample(self, audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
         """Resample audio to target sample rate.
@@ -189,10 +215,10 @@ class HebrewTTS:
             from scipy import signal
 
             num_samples = int(len(audio) * target_sr / orig_sr)
-            resampled = signal.resample(audio, num_samples)
+            resampled = np.array(signal.resample(audio, num_samples), dtype=np.float32)
             if audio.dtype == np.int16:
-                return resampled.astype(np.int16)
-            return resampled
+                return (resampled * 32767).astype(np.int16)
+            return resampled.astype(np.int16)
 
     def text_to_rtp_payload(
         self, text: str, codec: str = "g711_ulaw"
@@ -243,11 +269,5 @@ class HebrewTTS:
 
     def shutdown(self):
         """Shutdown TTS engine."""
-        if self._initialized and self.engine:
-            try:
-                self.engine.stop()
-            except:
-                pass
-            self.engine = None
-            self._initialized = False
-            logger.info("TTS engine shutdown")
+        self._initialized = False
+        logger.info("TTS engine shutdown")

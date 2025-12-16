@@ -26,6 +26,55 @@ def _iou(box1: np.ndarray, box2: np.ndarray) -> float:
     return inter / (union + 1e-6)
 
 
+def _associate_weapons_with_persons(
+    person_boxes: np.ndarray,
+    weapon_boxes: np.ndarray,
+    weapon_class_names: List[str],
+    iou_threshold: float = 0.05,
+) -> Dict[int, List[Dict]]:
+    """Associate weapon detections with person detections using spatial overlap.
+
+    Args:
+        person_boxes: (N, 4) array of person bounding boxes [x1, y1, x2, y2]
+        weapon_boxes: (M, 4) array of weapon bounding boxes [x1, y1, x2, y2]
+        weapon_class_names: List of weapon class names for each weapon box
+        iou_threshold: Minimum IoU to consider association (low threshold since weapons may be small)
+
+    Returns:
+        Dict mapping person_index -> list of associated weapon dicts with 'box' and 'class' keys
+    """
+    associations = {}
+
+    if len(person_boxes) == 0 or len(weapon_boxes) == 0:
+        return associations
+
+    # For each weapon, find the person with highest overlap
+    for weapon_idx, weapon_box in enumerate(weapon_boxes):
+        best_iou = 0.0
+        best_person_idx = -1
+
+        for person_idx, person_box in enumerate(person_boxes):
+            iou = _iou(person_box, weapon_box)
+            if iou > best_iou:
+                best_iou = iou
+                best_person_idx = person_idx
+
+        # Associate if IoU exceeds threshold
+        if best_iou >= iou_threshold and best_person_idx >= 0:
+            if best_person_idx not in associations:
+                associations[best_person_idx] = []
+
+            associations[best_person_idx].append(
+                {
+                    "box": weapon_box,
+                    "class": weapon_class_names[weapon_idx],
+                    "iou": best_iou,
+                }
+            )
+
+    return associations
+
+
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     """Compute cosine similarity between two feature vectors."""
     if a is None or b is None:
@@ -57,6 +106,7 @@ class FrameProcessor:
         recovery_iou_thresh: float = 0.5,
         recovery_reid_thresh: float = 0.7,
         recovery_min_track_confidence: float = 0.28,
+        recovery_fullframe_every_n: int = 3,
     ):
         """Initialize processor with models and configuration.
 
@@ -85,6 +135,7 @@ class FrameProcessor:
         self.recovery_reid_thresh = recovery_reid_thresh
         self.recovery_min_track_confidence = recovery_min_track_confidence
         self._frame_counter = 0  # Track frames for detection skipping
+        self.recovery_fullframe_every_n = max(1, int(recovery_fullframe_every_n))
 
     def process_frame(
         self, frame: np.ndarray, force_detect: bool = False
@@ -130,7 +181,14 @@ class FrameProcessor:
             # Run full detection
             with profiler.profile("yolo_detection"):
                 det = self.detector.predict(frame, confidence=self.yolo_confidence)
-
+            # Get class_names from detection result or detector
+            class_names = getattr(det, "class_names", None)
+            if not class_names:
+                class_names = (
+                    self.detector.get_class_names()
+                    if hasattr(self.detector, "get_class_names")
+                    else []
+                )
             boxes = det.boxes
             scores = det.scores
             class_ids = det.class_ids
@@ -139,6 +197,12 @@ class FrameProcessor:
             boxes = np.array([], dtype=np.float32).reshape(0, 4)
             scores = np.array([], dtype=np.float32)
             class_ids = np.array([], dtype=np.int32)
+            # Get class_names from detector for empty detection
+            class_names = (
+                self.detector.get_class_names()
+                if hasattr(self.detector, "get_class_names")
+                else []
+            )
             # Create minimal detection result for class names
             det = type(
                 "obj",
@@ -147,7 +211,7 @@ class FrameProcessor:
                     "boxes": boxes,
                     "scores": scores,
                     "class_ids": class_ids,
-                    "class_names": self.detector.model.names,
+                    "class_names": class_names,
                 },
             )()
 
@@ -199,17 +263,17 @@ class FrameProcessor:
 
         timing["detect"] = time.time() - t0
 
+        # Store UNFILTERED boxes for weapon association (before class filter removes weapons)
+        unfiltered_boxes = boxes.copy()
+        unfiltered_class_ids = class_ids.copy()
+
         # ====================================================================
         # CLASS FILTERING (optional)
         # ====================================================================
         if self.allowed_classes is not None:
             class_mask = np.isin(
                 class_ids,
-                [
-                    i
-                    for i, cn in enumerate(det.class_names)
-                    if cn in self.allowed_classes
-                ],
+                [i for i, cn in enumerate(class_names) if cn in self.allowed_classes],
             )
             filtered_boxes = boxes[class_mask]
             filtered_class_ids = class_ids[class_mask]
@@ -238,7 +302,7 @@ class FrameProcessor:
                         frame,
                         boxes=filtered_boxes,
                         class_ids=filtered_class_ids,
-                        class_names=det.class_names,
+                        class_names=class_names,
                         allowed_class_names=self.allowed_classes,
                     )
                 else:
@@ -259,7 +323,7 @@ class FrameProcessor:
         if len(filtered_boxes) > 0:
             # Find person-class detections only
             person_class_idx = None
-            for idx, name in enumerate(det.class_names):
+            for idx, name in enumerate(class_names):
                 if name == "person":
                     person_class_idx = idx
                     break
@@ -277,7 +341,7 @@ class FrameProcessor:
                             frame,
                             person_boxes,
                             np.array([person_class_idx] * len(person_boxes)),
-                            det.class_names,
+                            class_names,
                         )
 
                     if reid_results is not None:
@@ -308,6 +372,17 @@ class FrameProcessor:
             )
         timing["track"] = time.time() - t0
 
+        # ====================================================================
+        # WEAPON-PERSON ASSOCIATION
+        # ====================================================================
+        # Associate weapon detections with person tracks and add alerts
+        # Use UNFILTERED boxes to include weapons that may have been filtered out
+        t0 = time.time()
+        self._associate_weapons_and_alert(
+            tracks, unfiltered_boxes, unfiltered_class_ids, class_names
+        )
+        timing["weapon_association"] = time.time() - t0
+
         return {
             "tracks": tracks,
             "masks": masks,
@@ -315,8 +390,113 @@ class FrameProcessor:
             "filtered_class_ids": filtered_class_ids,
             "filtered_scores": filtered_scores,
             "features": feats,
-            "class_names": det.class_names,
+            "class_names": class_names,
         }, timing
+
+    def _associate_weapons_and_alert(
+        self,
+        tracks: List,
+        boxes: np.ndarray,
+        class_ids: np.ndarray,
+        class_names: List[str],
+    ):
+        """Associate weapons with person tracks and emit modular actions.
+
+        Args:
+            tracks: List of Track objects from tracker
+            boxes: All detection boxes
+            class_ids: All detection class IDs
+            class_names: List of class names
+        """
+        from services.tracker.metadata_manager import get_metadata_manager
+
+        # Identify weapon and person classes
+        weapon_keywords = ["pistol", "rifle", "gun", "knife", "weapon", "firearm"]
+        weapon_indices = []
+        weapon_boxes = []
+        weapon_names = []
+
+        person_class_id = None
+        for idx, name in enumerate(class_names):
+            if name == "person":
+                person_class_id = idx
+                break
+
+        # Collect weapon detections
+        for i, (box, class_id) in enumerate(zip(boxes, class_ids)):
+            class_name = (
+                class_names[int(class_id)] if int(class_id) < len(class_names) else ""
+            )
+            if any(keyword in class_name.lower() for keyword in weapon_keywords):
+                weapon_indices.append(i)
+                weapon_boxes.append(box)
+                weapon_names.append(class_name)
+
+        if len(weapon_boxes) == 0 or person_class_id is None:
+            return  # No weapons or no person class defined
+
+        weapon_boxes = np.array(weapon_boxes)
+
+        # Get person tracks and their boxes
+        person_tracks = [t for t in tracks if t.class_id == person_class_id]
+        if len(person_tracks) == 0:
+            return
+
+        person_boxes = np.array([t.box for t in person_tracks])
+
+        # Associate weapons with persons
+        associations = _associate_weapons_with_persons(
+            person_boxes,
+            weapon_boxes,
+            weapon_names,
+            iou_threshold=0.05,  # Low threshold since weapons can be small
+        )
+
+        # Dispatch modular actions via ActionDispatcher
+        # Fallback to old behavior if dispatcher not available
+        manager = get_metadata_manager()
+        try:
+            from services.actions.dispatcher import get_dispatcher
+
+            dispatcher = get_dispatcher()
+        except Exception:
+            dispatcher = None
+
+        for person_idx, weapons in associations.items():
+            track = person_tracks[person_idx]
+
+            # Avoid re-triggering if already armed
+            if "armed" in track.metadata.get("tags", []):
+                continue
+
+            weapon_types = [w["class"] for w in weapons]
+            weapon_desc = ", ".join(set(weapon_types))
+
+            event = {
+                "type": "armed_person_detected",
+                "camera_id": getattr(track, "camera_id", None),
+                "track_id": track.track_id,
+                "class_id": track.class_id,
+                "weapon_types": weapon_types,
+                "weapon_desc": weapon_desc,
+                "timestamp": time.time(),
+            }
+
+            if dispatcher is not None:
+                dispatcher.dispatch(event_type=event["type"], event=event, track=track)
+            else:
+                # Minimal fallback: tag and alert as before
+                track.add_tag("armed")
+                track.add_alert(
+                    alert_type="armed_person",
+                    message=f"Person armed with: {weapon_desc}",
+                    severity="critical",
+                )
+                track.set_attribute("weapons_detected", weapon_types)
+                track.set_attribute("weapon_detection_count", len(weapons))
+                manager.update_track_metadata(
+                    track.track_id, track.class_id, track.get_metadata_summary()
+                )
 
     def _recover_missing_detections(
         self,
@@ -326,167 +506,173 @@ class FrameProcessor:
         primary_class_ids: np.ndarray,
         primary_scores: np.ndarray,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Recover missed detections using ReID matching with tracked objects.
+        """Recover missed detections using ONE full-frame low-threshold pass + batched ReID.
 
-        For each active track, searches lower-confidence detections in a cropped region:
-        1. Crop frame around Kalman prediction (with padding for PTZ motion)
-        2. Run detection on crop at lower confidence
-        3. Match appearance with ReID embedding
-        4. Transform coordinates back to full frame
+        This replaces the per-track cropped detection (O(tracks) detector calls)
+        with a single detector call and vectorized matching, cutting CPU/GPU usage.
 
-        Args:
-            frame: Original frame
-            det_result: Primary detection result
-            primary_boxes: Boxes detected at primary confidence
-            primary_class_ids: Class IDs from primary detection
-            primary_scores: Scores from primary detection
-
-        Returns:
-            Tuple of (recovered_boxes, recovered_scores, recovered_class_ids)
+        Steps:
+          1. Run a single full-frame detection at `recovery_confidence`.
+          2. Remove candidates that overlap primary detections (IoU > 0.5).
+          3. Gate candidates per track using IoU with Kalman prediction.
+          4. For person class, batch-extract ReID features and match by cosine similarity.
+          5. Greedily assign best candidate per track (each candidate used once).
         """
-        recovered_boxes = []
-        recovered_scores = []
-        recovered_class_ids = []
+        # Throttle recovery frequency to reduce overhead
+        if (self._frame_counter % self.recovery_fullframe_every_n) != 0:
+            return np.array([]), np.array([]), np.array([])
 
-        # Get active tracks with features
+        recovered_boxes: List[np.ndarray] = []
+        recovered_scores: List[float] = []
+        recovered_class_ids: List[int] = []
+
+        # Collect active tracks with features/predictions
         active_tracks = []
         for tid in self.tracker.kalman_filters.keys():
             track = self.tracker.tracks[tid]
-
-            # Validate track confidence before recovery
-            # Don't recover for tracks with low average confidence (likely false positives)
             avg_conf = track.get_avg_confidence()
             if avg_conf < self.recovery_min_track_confidence:
-                continue  # Skip recovery for low-confidence tracks
-
-            if (
-                tid in self.tracker.track_features
-                and self.tracker.track_features[tid] is not None
-            ):
-                predicted_box = self.tracker.kalman_filters[tid].get_state()
-                track_class = track.class_id
-                track_feat = self.tracker.track_features[tid]
-                active_tracks.append((tid, predicted_box, track_class, track_feat))
-
-        if len(active_tracks) == 0:
-            return (
-                np.array(recovered_boxes),
-                np.array(recovered_scores),
-                np.array(recovered_class_ids),
-            )
-
-        frame_h, frame_w = frame.shape[:2]
-
-        # Process each track independently with cropped detection
-        for tid, pred_box, track_class, track_feat in active_tracks:
-            # Calculate crop region with PTZ-aware padding
-            # Larger padding accounts for camera motion between frames
-            x1, y1, x2, y2 = pred_box
-            box_w = x2 - x1
-            box_h = y2 - y1
-
-            # PTZ-aware padding: 2x box size for potential camera pan/tilt
-            # If camera moved, object could be 1-2 box widths away
-            pad_x = box_w * 2.0
-            pad_y = box_h * 2.0
-
-            crop_x1 = int(max(0, x1 - pad_x))
-            crop_y1 = int(max(0, y1 - pad_y))
-            crop_x2 = int(min(frame_w, x2 + pad_x))
-            crop_y2 = int(min(frame_h, y2 + pad_y))
-
-            # Skip if crop is too small
-            if crop_x2 - crop_x1 < 32 or crop_y2 - crop_y1 < 32:
                 continue
-
-            # Crop frame to search region
-            crop = frame[crop_y1:crop_y2, crop_x1:crop_x2]
-
-            # Run detection on crop at lower confidence
-            try:
-                crop_det = self.detector.predict(
-                    crop, confidence=self.recovery_confidence
+            if tid in self.tracker.track_features:
+                pred_box = self.tracker.kalman_filters[tid].get_state()
+                active_tracks.append(
+                    (
+                        tid,
+                        pred_box,
+                        track.class_id,
+                        self.tracker.track_features.get(tid, None),
+                    )
                 )
-            except Exception:
-                # Detection failed on crop, skip
-                continue
 
-            if len(crop_det.boxes) == 0:
-                continue
+        if not active_tracks:
+            return np.array([]), np.array([]), np.array([])
 
-            # Transform crop coordinates back to full frame
-            crop_boxes_full = crop_det.boxes.copy()
-            crop_boxes_full[:, [0, 2]] += crop_x1  # x coordinates
-            crop_boxes_full[:, [1, 3]] += crop_y1  # y coordinates
+        # One full-frame low-threshold detection
+        try:
+            low_det = self.detector.predict(frame, confidence=self.recovery_confidence)
+        except Exception:
+            return np.array([]), np.array([]), np.array([])
 
-            # Check each detection in crop
-            for i, (crop_box, crop_score, crop_class) in enumerate(
-                zip(crop_boxes_full, crop_det.scores, crop_det.class_ids)
+        cand_boxes = low_det.boxes
+        cand_scores = low_det.scores
+        cand_class_ids = low_det.class_ids
+        if len(cand_boxes) == 0:
+            return np.array([]), np.array([]), np.array([])
+
+        # Filter out candidates that overlap with primary detections
+        keep_mask = []
+        for cb in cand_boxes:
+            dup = False
+            for pb in primary_boxes:
+                if _iou(cb, pb) > 0.5:
+                    dup = True
+                    break
+            keep_mask.append(not dup)
+        if not any(keep_mask):
+            return np.array([]), np.array([]), np.array([])
+
+        cand_boxes = cand_boxes[np.array(keep_mask)]
+        cand_scores = cand_scores[np.array(keep_mask)]
+        cand_class_ids = cand_class_ids[np.array(keep_mask)]
+
+        # Identify indices for person class
+        person_class_idx = None
+        for idx, name in enumerate(det_result.class_names):
+            if name == "person":
+                person_class_idx = idx
+                break
+
+        # Prepare person candidate features (batch extraction)
+        person_indices = (
+            np.where(cand_class_ids == person_class_idx)[0]
+            if person_class_idx is not None
+            else np.array([], dtype=int)
+        )
+        person_feats_by_idx: Dict[int, np.ndarray] = {}
+        if person_indices.size > 0:
+            person_boxes = cand_boxes[person_indices]
+            with profiler.profile("reid_recovery_batch_features"):
+                reid_res = self.reid.extract_features(
+                    frame,
+                    person_boxes,
+                    np.array([person_class_idx] * len(person_boxes)),
+                    det_result.class_names,
+                )
+            if reid_res is not None:
+                # reid_res is a dict per class; aggregate (pos, feat) pairs
+                features_accum: List[Tuple[int, np.ndarray]] = []
+                for class_result in reid_res.values():
+                    # features are aligned to input order by 'indices'
+                    idxs = list(class_result.get("indices", []))
+                    feats = class_result.get("features", None)
+                    if feats is None:
+                        continue
+                    # Map indices to features
+                    for pos, feat in zip(idxs, feats):
+                        features_accum.append((int(pos), feat))
+                # Assign back to candidate indices
+                for pos, feat in features_accum:
+                    global_idx = int(person_indices[pos])
+                    person_feats_by_idx[global_idx] = feat
+
+        # Build candidate list per track with scores
+        assignments: List[Tuple[int, int, float]] = []  # (track_id, cand_idx, score)
+        for tid, pred_box, track_class, track_feat in active_tracks:
+            best_idx = -1
+            best_score = -1.0
+
+            for ci, (cbox, cscore, cclass) in enumerate(
+                zip(cand_boxes, cand_scores, cand_class_ids)
             ):
                 # Must match class
-                if int(crop_class) != int(track_class):
+                if int(cclass) != int(track_class):
                     continue
 
-                # Skip if already detected at primary confidence
-                already_detected = False
-                for prim_box in primary_boxes:
-                    if _iou(crop_box, prim_box) > 0.7:
-                        already_detected = True
-                        break
-
-                if already_detected:
+                # Spatial gate
+                iou = _iou(cbox, pred_box)
+                if iou < self.recovery_iou_thresh:
                     continue
 
-                # Must overlap with Kalman prediction
-                spatial_match = _iou(crop_box, pred_box) > self.recovery_iou_thresh
-                if not spatial_match:
-                    continue
+                score = float(iou)
 
-                # ReID matching for person class
-                person_class_idx = None
-                for idx, name in enumerate(det_result.class_names):
-                    if name == "person":
-                        person_class_idx = idx
-                        break
+                # If person, require appearance match
+                if person_class_idx is not None and int(cclass) == person_class_idx:
+                    cand_feat = person_feats_by_idx.get(ci)
+                    if cand_feat is None or track_feat is None:
+                        continue
+                    sim = _cosine_similarity(track_feat, cand_feat)
+                    if sim < self.recovery_reid_thresh:
+                        continue
+                    # Combine similarity and detector score (weighted)
+                    score = 0.7 * sim + 0.3 * float(cscore)
 
-                if person_class_idx is not None and int(crop_class) == person_class_idx:
-                    try:
-                        # Extract ReID on FULL frame (better context)
-                        reid_results = self.reid.extract_features(
-                            frame,
-                            np.array([crop_box]),
-                            np.array([person_class_idx]),
-                            det_result.class_names,
-                        )
+                if score > best_score:
+                    best_score = score
+                    best_idx = ci
 
-                        if reid_results is not None:
-                            for class_result in reid_results.values():
-                                if len(class_result["features"]) > 0:
-                                    det_feat = class_result["features"][0]
-                                    similarity = _cosine_similarity(
-                                        track_feat, det_feat
-                                    )
+            if best_idx >= 0:
+                assignments.append((tid, best_idx, best_score))
 
-                                    if similarity > self.recovery_reid_thresh:
-                                        recovered_boxes.append(crop_box)
-                                        recovered_scores.append(crop_score)
-                                        recovered_class_ids.append(crop_class)
-                                        break
-                    except Exception:
-                        pass
-                else:
-                    # Non-person: spatial match is sufficient
-                    # (No ReID available, rely on motion prediction)
-                    if spatial_match:
-                        recovered_boxes.append(crop_box)
-                        recovered_scores.append(crop_score)
-                        recovered_class_ids.append(crop_class)
+        if not assignments:
+            return np.array([]), np.array([]), np.array([])
 
-        if len(recovered_boxes) > 0:
+        # Greedy resolution: highest score first, each candidate used once
+        assignments.sort(key=lambda x: x[2], reverse=True)
+        used_cands = set()
+        used_tracks = set()
+        for tid, ci, sc in assignments:
+            if ci in used_cands or tid in used_tracks:
+                continue
+            used_cands.add(ci)
+            used_tracks.add(tid)
+            recovered_boxes.append(cand_boxes[ci])
+            recovered_scores.append(cand_scores[ci])
+            recovered_class_ids.append(cand_class_ids[ci])
+
+        if recovered_boxes:
             return (
                 np.array(recovered_boxes),
                 np.array(recovered_scores),
                 np.array(recovered_class_ids),
             )
-        else:
-            return np.array([]), np.array([]), np.array([])
+        return np.array([]), np.array([]), np.array([])

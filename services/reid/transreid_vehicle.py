@@ -78,39 +78,82 @@ class TransReIDVehicle(BaseReID):
                 state_dict = checkpoint
 
             # Build TransReID model using timm's DeiT architecture
-            # The downloaded model is DeiT-small-based TransReID
+            # The downloaded model is DeiT-base-based TransReID (768 dim)
             import timm
 
-            # Create DeiT-small backbone (TransReID is built on DeiT)
+            # Create DeiT-base backbone (TransReID is built on DeiT-base)
             self.model = timm.create_model(
-                "deit_small_patch16_224",
+                "deit_base_patch16_224",  # base model (768 dim), not small (384 dim)
                 pretrained=False,
                 num_classes=0,  # Remove classification head, keep features only
             )
 
             # Load the TransReID weights
-            # Remove 'module.' prefix if present (from DataParallel training)
+            # TransReID wraps DeiT in a 'base' module: keys are 'module.base.xxx'
+            # Remove 'module.base.' prefix to match timm's DeiT architecture
             cleaned_state_dict = {}
             for k, v in state_dict.items():
-                if k.startswith("module."):
-                    cleaned_state_dict[k[7:]] = v
+                # Remove 'module.base.' prefix (from TransReID wrapper + DataParallel)
+                if k.startswith("module.base."):
+                    new_key = k[12:]  # Remove 'module.base.'
+                    cleaned_state_dict[new_key] = v
+                # Also handle plain 'module.' prefix
+                elif k.startswith("module."):
+                    new_key = k[7:]  # Remove 'module.'
+                    cleaned_state_dict[new_key] = v
+                # Handle 'base.' prefix
+                elif k.startswith("base."):
+                    new_key = k[5:]  # Remove 'base.'
+                    cleaned_state_dict[new_key] = v
                 else:
                     cleaned_state_dict[k] = v
+
+            # Handle position embedding size mismatch
+            # TransReID uses 442 tokens (196 patches + 1 CLS + camera/SIE tokens)
+            # Standard DeiT uses 197 tokens (196 patches + 1 CLS)
+            # We need to interpolate/trim the position embeddings
+            if "pos_embed" in cleaned_state_dict:
+                pretrained_pos_embed = cleaned_state_dict["pos_embed"]  # [1, 442, 768]
+                model_pos_embed = self.model.pos_embed  # [1, 197, 768]
+
+                # If sizes don't match, use only the relevant tokens
+                if pretrained_pos_embed.shape[1] != model_pos_embed.shape[1]:
+                    # Take CLS token + first 196 patch tokens (ignore camera/SIE tokens)
+                    cleaned_state_dict["pos_embed"] = pretrained_pos_embed[:, :197, :]
+                    print(
+                        f"[INFO] Resized pos_embed from {pretrained_pos_embed.shape} to {cleaned_state_dict['pos_embed'].shape}"
+                    )
+
+            # Remove SIE embeddings and other TransReID-specific layers not in standard DeiT
+            keys_to_remove = [
+                k
+                for k in cleaned_state_dict.keys()
+                if "sie" in k.lower() or "camera" in k.lower()
+            ]
+            for k in keys_to_remove:
+                del cleaned_state_dict[k]
 
             # Load state dict (strict=False to ignore classifier layers)
             missing_keys, unexpected_keys = self.model.load_state_dict(
                 cleaned_state_dict, strict=False
             )
 
-            # Note: Missing keys are expected (classifier layers, position embeddings, etc.)
-            # Only fail if ALL keys are missing (wrong checkpoint entirely)
-            if len(missing_keys) == len(self.model.state_dict()):
+            # Check if at least some keys matched
+            total_keys = len(self.model.state_dict())
+            matched_keys = total_keys - len(missing_keys)
+            match_ratio = matched_keys / total_keys if total_keys > 0 else 0
+
+            if match_ratio < 0.5:  # Less than 50% keys matched
                 raise RuntimeError(
-                    f"Failed to load TransReID checkpoint: No keys matched. "
+                    f"Failed to load TransReID checkpoint: Only {matched_keys}/{total_keys} keys matched ({match_ratio:.1%}). "
                     f"Ensure deit_transreid_vehicleID.pth is the correct TransReID model."
                 )
 
-            self.feature_dim = 384  # DeiT-small feature dimension
+            print(
+                f"[INFO] TransReID loaded: {matched_keys}/{total_keys} keys matched ({match_ratio:.1%})"
+            )
+
+            self.feature_dim = 768  # DeiT-base feature dimension
 
             self.model = self.model.to(self.device)
             self.model.eval()

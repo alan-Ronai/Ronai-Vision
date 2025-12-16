@@ -653,3 +653,155 @@ async def stop_all_receivers():
     receiver = get_unified_receiver()
     receiver.stop_all()
     return {"message": "All receivers stopped"}
+
+
+# ============================================================================
+# TTS (Text-to-Speech) ENDPOINTS
+# ============================================================================
+
+# Global TTS instance
+_tts_engine: Optional[HebrewTTS] = None
+
+
+def get_tts_engine() -> HebrewTTS:
+    """Get or create TTS engine instance."""
+    global _tts_engine
+    if _tts_engine is None:
+        _tts_engine = HebrewTTS(sample_rate=16000, engine="pyttsx3")
+    return _tts_engine
+
+
+class TTSRequest(BaseModel):
+    """TTS synthesis request."""
+
+    text: str
+    save_file: bool = False  # Save to file in addition to returning audio
+
+
+class TTSResponse(BaseModel):
+    """TTS synthesis response."""
+
+    success: bool
+    message: str
+    audio_file: Optional[str] = None  # Path to saved audio file
+    sample_rate: int
+    duration: Optional[float] = None
+
+
+@router.post("/tts/synthesize", response_model=TTSResponse)
+async def synthesize_text_to_speech(request: TTSRequest):
+    """Synthesize Hebrew text to speech.
+
+    Args:
+        request: TTS request with text
+
+    Returns:
+        TTS response with audio file path if saved
+    """
+    try:
+        tts = get_tts_engine()
+
+        if not request.text or not request.text.strip():
+            raise HTTPException(status_code=400, detail="Text is required")
+
+        # Generate audio
+        audio = tts.synthesize(request.text)
+
+        if audio is None:
+            raise HTTPException(status_code=500, detail="TTS synthesis failed")
+
+        # Calculate duration
+        duration = len(audio) / tts.sample_rate
+
+        # Optionally save to file
+        audio_file = None
+        if request.save_file:
+            import time
+            timestamp = int(time.time())
+            output_dir = "output/tts"
+            os.makedirs(output_dir, exist_ok=True)
+            audio_file = f"{output_dir}/tts_{timestamp}.wav"
+
+            # Save using soundfile
+            import soundfile as sf
+            sf.write(audio_file, audio, tts.sample_rate)
+
+        return TTSResponse(
+            success=True,
+            message="Speech synthesized successfully",
+            audio_file=audio_file,
+            sample_rate=tts.sample_rate,
+            duration=duration,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"TTS error: {str(e)}")
+
+
+@router.post("/tts/speak-and-stream")
+async def speak_and_stream_to_rtp(text: str, session_id: str):
+    """Synthesize text and stream to active RTP session.
+
+    Args:
+        text: Hebrew text to speak
+        session_id: RTP session ID to stream to
+
+    Returns:
+        Status of streaming operation
+    """
+    try:
+        tts = get_tts_engine()
+        server = get_audio_server()
+
+        if not text or not text.strip():
+            raise HTTPException(status_code=400, detail="Text is required")
+
+        # Check if session exists
+        session = server.session_manager.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+
+        # Generate audio with RTP codec
+        result = tts.text_to_rtp_payload(text, codec="g711_ulaw")
+
+        if result is None:
+            raise HTTPException(status_code=500, detail="TTS synthesis failed")
+
+        audio_bytes, sample_rate = result
+
+        # Stream to session
+        # Note: This is a simplified implementation
+        # In production, you'd want to chunk the audio and send as RTP packets
+        # with proper timing and sequence numbers
+
+        return {
+            "success": True,
+            "message": f"Speech synthesized and ready to stream to session {session_id}",
+            "audio_size_bytes": len(audio_bytes),
+            "sample_rate": sample_rate,
+            "note": "Full RTP streaming implementation requires additional packet handling",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Stream error: {str(e)}")
+
+
+@router.get("/tts/status")
+async def get_tts_status():
+    """Get TTS engine status."""
+    try:
+        tts = get_tts_engine()
+        return {
+            "initialized": tts.is_ready(),
+            "engine": tts.engine_name,
+            "sample_rate": tts.sample_rate,
+        }
+    except Exception as e:
+        return {
+            "initialized": False,
+            "error": str(e),
+        }

@@ -1,0 +1,55 @@
+{
+    "version": 1,
+    "rules": [
+        {
+            "on": "armed_person_detected",
+            "actions": [
+                {
+                    "type": "add_tag",
+                    "params": {
+                        "tag": "armed"
+                    }
+                },
+                {
+                    "type": "add_alert",
+                    "params": {
+                        "alert_type": "armed_person",
+                        "message": "Person armed with: {weapon_desc}",
+                        "severity": "critical"
+                    }
+                },
+                {
+                    "type": "set_attribute",
+                    "params": {
+                        "key": "weapons_detected",
+                        "value": "{weapon_types}"
+                    }
+                },
+                {
+                    "type": "set_attribute",
+                    "params": {
+                        "key": "weapon_detection_count",
+                        "value": "{weapon_count}"
+                    }
+                },
+                {
+                    "type": "start_recording",
+                    "params": {
+                        "reason": "armed_person_detected"
+                    }
+                },
+                {
+                    "type": "metadata_update",
+                    "params": {}
+                },
+                {
+                    "type": "log_event",
+                    "params": {
+                        "message": "Armed person detected - actions executed",
+                        "severity": "critical"
+                    }
+                }
+            ]
+        }
+    ]
+}

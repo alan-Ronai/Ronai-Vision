@@ -40,6 +40,10 @@ requests>=2.31.0
 gdown>=4.7.0
 tensorboard>=2.14.0
 python-multipart>=0.0.6
+transformers
+
+# Gemini AI for detailed analysis (optional)
+google-generativeai>=0.3.0
 
 # Development (optional)
 pytest>=7.4.0
@@ -47,3 +51,5 @@ pytest-asyncio>=0.21.0
 
 # SAM2 segmentation model
 sam2
+
+google-generativeai

@@ -7,7 +7,7 @@ matching and deduplication.
 import numpy as np
 from typing import List, Dict, Optional
 
-from services.reid.reid_store import ReIDStore
+from services.reid.reid_store import get_reid_store
 
 
 class CrossCameraReID:
@@ -18,8 +18,9 @@ class CrossCameraReID:
     """
 
     def __init__(self):
-        """Initialize global ReID store."""
-        self.store = ReIDStore()
+        """Initialize global ReID store (uses singleton instance)."""
+        # Use the global singleton store so both API and worker share the same data
+        self.store = get_reid_store()
         self.global_id_map = {}  # Maps (camera_id, local_track_id) -> global_id
 
     def upsert_tracks(
@@ -40,9 +41,14 @@ class CrossCameraReID:
         Returns:
             Dict mapping local_track_id -> global_track_id
         """
+        import logging
+
+        logger = logging.getLogger(__name__)
+
         local_to_global = {}
 
         if features is None or len(features) == 0:
+            logger.debug(f"[{camera_id}] No features to upsert (features={features})")
             return local_to_global
 
         # Extract embeddings for each track
@@ -79,11 +85,21 @@ class CrossCameraReID:
         if emb_list:
             emb_array = np.vstack(emb_list).astype(np.float32)
             global_ids = self.store.upsert(emb_array, meta_list)
+            logger.info(
+                f"[{camera_id}] Upserted {len(emb_list)} embeddings -> global_ids: {global_ids}"
+            )
+            logger.info(
+                f"[{camera_id}] ReIDStore now has {len(self.store.id_to_meta)} total GIDs"
+            )
 
             # Build mapping
             for local_id, global_id in zip(local_ids, global_ids):
                 self.global_id_map[(camera_id, local_id)] = global_id
                 local_to_global[local_id] = global_id
+        else:
+            logger.debug(
+                f"[{camera_id}] No valid embeddings to upsert (checked {len(tracks)} tracks)"
+            )
 
         return local_to_global
 
