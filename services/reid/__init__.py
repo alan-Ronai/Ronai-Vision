@@ -11,7 +11,6 @@ The pipeline dynamically selects the right encoder based on detected class.
 import os
 from typing import Dict, Optional
 
-from services.reid.base_reid import BaseReID
 from services.reid.osnet_reid import OSNetReID
 from services.reid.transreid_vehicle import TransReIDVehicle
 from services.reid.universal_reid import UniversalReID
