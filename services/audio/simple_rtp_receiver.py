@@ -28,15 +28,12 @@ from pathlib import Path
 
 # Handle imports for both module and standalone execution
 try:
-    from services.audio.audio_writer import AudioWriter
+    # Try relative import first (when running as module)
+    from .audio_writer import AudioWriter
 except ImportError:
-    # Try relative import if running as part of package
-    try:
-        from .audio_writer import AudioWriter
-    except ImportError:
-        # Add parent directory to path for standalone execution
-        sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-        from services.audio.audio_writer import AudioWriter
+    # Add parent directory to path for standalone execution
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+    from services.audio.audio_writer import AudioWriter
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +196,10 @@ class SimpleRTPReceiver:
     def _setup_output_file(self):
         """Setup multiple test WAV and PCM files for different decoding strategies."""
         try:
+            # Ensure session_id is set
+            if self._session_id is None:
+                self._session_id = f"simple_rtp_{int(time.time())}"
+
             # Create base output directory
             base_dir = Path(self.storage_path)
             base_dir.mkdir(parents=True, exist_ok=True)
