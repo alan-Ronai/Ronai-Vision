@@ -60,13 +60,13 @@ class GeminiAnalyzer:
 """
 
     def __init__(
-        self, api_key: Optional[str] = None, model_name: str = "gemini-1.5-flash-latest"
+        self, api_key: Optional[str] = None, model_name: str = "gemini-2.5-flash"
     ):
         """Initialize Gemini analyzer.
 
         Args:
             api_key: Gemini API key (reads from GEMINI_API_KEY env if not provided)
-            model_name: Model to use (default: gemini-1.5-flash-latest)
+            model_name: Model to use (default: gemini-2.5-flash)
         """
         if not GEMINI_AVAILABLE or genai is None:
             raise RuntimeError(
@@ -82,27 +82,45 @@ class GeminiAnalyzer:
         # Configure the API key
         genai.configure(api_key=self.api_key)  # type: ignore
 
-        # Initialize model - try gemini-1.5-flash-latest first, fallback to others
+        # Initialize model - try models that support vision
+        # Updated model names as of Dec 2024 - Gemini 1.5 has been replaced with 2.x
         self.model_name = model_name
-        try:
-            self.model = genai.GenerativeModel(model_name=model_name)  # type: ignore
-            logger.info(f"GeminiAnalyzer initialized with model: {model_name}")
-        except Exception as e:
-            # Try alternative model names
-            logger.warning(f"Failed to load {model_name}: {e}, trying alternatives...")
-            for alt_model in ["gemini-1.5-flash", "gemini-pro-vision", "gemini-pro"]:
-                try:
-                    self.model = genai.GenerativeModel(model_name=alt_model)  # type: ignore
-                    self.model_name = alt_model
-                    logger.info(
-                        f"GeminiAnalyzer initialized with fallback model: {alt_model}"
-                    )
-                    break
-                except Exception as e2:
-                    logger.warning(f"Failed to load {alt_model}: {e2}")
-                    continue
-            else:
-                raise RuntimeError(f"Failed to initialize any Gemini model: {e}")
+
+        # Try models in order of preference (all support vision)
+        model_candidates = [
+            "gemini-2.5-flash",  # Current stable vision model (Dec 2024)
+            "gemini-flash-latest",  # Alias to latest flash model
+            "gemini-2.5-pro",  # More capable vision model
+            "gemini-pro-latest",  # Alias to latest pro model
+        ]
+
+        # If user specified a model, try it first
+        if model_name not in model_candidates:
+            model_candidates.insert(0, model_name)
+
+        last_error = None
+        for model_to_try in model_candidates:
+            try:
+                self.model = genai.GenerativeModel(  # type: ignore
+                    model_name=model_to_try,
+                    generation_config={  # type: ignore
+                        "temperature": 0.4,
+                        "top_p": 1,
+                        "top_k": 32,
+                        "max_output_tokens": 2048,
+                    },
+                )
+                self.model_name = model_to_try
+                logger.info(f"GeminiAnalyzer initialized with model: {model_to_try}")
+                break
+            except Exception as e:
+                logger.warning(f"Failed to load {model_to_try}: {e}")
+                last_error = e
+                continue
+        else:
+            raise RuntimeError(
+                f"Failed to initialize any Gemini model. Last error: {last_error}"
+            )
 
         # Rate limiting tracking
         self._last_request_time = 0.0
@@ -224,28 +242,24 @@ class GeminiAnalyzer:
                 "error": str(e),
             }
 
-    def _prepare_image(self, image: np.ndarray) -> Dict:
+    def _prepare_image(self, image: np.ndarray):
         """Prepare image for Gemini API.
 
         Args:
             image: (H, W, 3) BGR uint8 numpy array
 
         Returns:
-            Dictionary compatible with Gemini API
+            PIL Image object that Gemini SDK can process
         """
+        from PIL import Image
+
         # Convert BGR to RGB
         rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-        # Encode as JPEG
-        success, buffer = cv2.imencode(".jpg", rgb)
-        if not success:
-            raise ValueError("Failed to encode image as JPEG")
+        # Convert to PIL Image (this is what the Python SDK expects)
+        pil_image = Image.fromarray(rgb)
 
-        # Convert to base64
-        jpg_bytes = buffer.tobytes()
-
-        # Return in format expected by Gemini
-        return {"mime_type": "image/jpeg", "data": jpg_bytes}
+        return pil_image
 
     def _parse_json_response(self, response_text: str) -> Dict:
         """Parse JSON response from Gemini.
@@ -287,13 +301,13 @@ _gemini_analyzer: Optional[GeminiAnalyzer] = None
 
 
 def get_gemini_analyzer(
-    api_key: Optional[str] = None, model_name: str = "gemini-1.5-flash"
+    api_key: Optional[str] = None, model_name: str = "gemini-2.5-flash"
 ) -> Optional[GeminiAnalyzer]:
     """Get or create global Gemini analyzer instance.
 
     Args:
         api_key: Optional API key (only used on first call)
-        model_name: Model name (only used on first call)
+        model_name: Model name (only used on first call, default: gemini-2.5-flash)
 
     Returns:
         GeminiAnalyzer instance or None if not available
