@@ -1,7 +1,18 @@
-"""Simple Raw UDP/RTP receiver with payload extraction.
+"""Simple Raw UDP/RTP receiver with payload extraction and multi-format testing.
 
 Receives RTP packets directly on UDP port, extracts audio payload,
-and handles sampling rate conversion similar to PTT protocol.
+and saves multiple test files with different decoding strategies:
+
+Test files created:
+1. raw_payload - No decoding (raw RTP payload)
+2. adpcm_decoded - DVI4/IMA ADPCM decoded (PT 5)
+3. g711_mulaw - G.711 mu-law decoded (PT 0)
+4. g711_alaw - G.711 A-law decoded (PT 8)
+5. raw_pcm_16bit_le - Raw 16-bit PCM little-endian
+6. raw_pcm_16bit_be - Raw 16-bit PCM big-endian (byte-swapped)
+7. raw_pcm_8bit - 8-bit PCM converted to 16-bit
+
+Each test creates both a .wav and .pcm file for comparison.
 """
 
 import socket
@@ -78,6 +89,13 @@ class SimpleRTPReceiver:
         self._pcm_path = None
         self._last_packet_time = 0.0
         self._files_lock = threading.Lock()
+
+        # ADPCM decoder state (needed for stateful decoding)
+        self._adpcm_state = None
+
+        # Multiple test output files
+        self._test_writers = {}
+        self._test_files = {}
 
         # Statistics
         self._stats = {
@@ -166,53 +184,83 @@ class SimpleRTPReceiver:
 
     def get_stats(self) -> dict:
         """Get receiver statistics."""
+        test_files_info = {}
+        for config_name, writer in self._test_writers.items():
+            if writer:
+                test_files_info[config_name] = writer.filepath
+
         return {
             **self._stats,
             "running": self._running,
             "session_id": self._session_id,
             "remote_address": self._remote_address,
-            "wav_path": self._audio_writer.filepath if self._audio_writer else None,
-            "pcm_path": str(self._pcm_path) if self._pcm_path else None,
+            "test_files": test_files_info,
         }
 
     def _setup_output_file(self):
-        """Setup both WAV and PCM file writers for audio data."""
+        """Setup multiple test WAV and PCM files for different decoding strategies."""
         try:
-            # Create audio writer for WAV output
-            self._audio_writer = AudioWriter(
-                output_dir=self.storage_path,
-                session_id=self._session_id,
-                codec="rtp_pcm",
-                sample_rate=self.target_sample_rate,
-                channels=1,
-            )
-            self._audio_writer.open()
+            # Create base output directory
+            base_dir = Path(self.storage_path)
+            base_dir.mkdir(parents=True, exist_ok=True)
 
-            # Create PCM file
-            pcm_filename = self._audio_writer.filepath.replace(".wav", ".pcm")
-            self._pcm_path = Path(pcm_filename)
-            self._pcm_file = open(self._pcm_path, "wb")
+            # Define all test configurations
+            test_configs = [
+                ("raw_payload", "Raw payload (no decoding)"),
+                ("adpcm_decoded", "ADPCM decoded (DVI4)"),
+                ("g711_mulaw", "G.711 mu-law decoded"),
+                ("g711_alaw", "G.711 A-law decoded"),
+                ("raw_pcm_16bit_le", "Raw 16-bit PCM little-endian"),
+                ("raw_pcm_16bit_be", "Raw 16-bit PCM big-endian"),
+                ("raw_pcm_8bit", "Raw 8-bit PCM"),
+            ]
 
-            logger.info(f"WAV file created: {self._audio_writer.filepath}")
-            logger.info(f"PCM file created: {self._pcm_path}")
+            logger.info(f"Creating {len(test_configs)} test output files...")
+
+            for config_name, description in test_configs:
+                # Create AudioWriter for WAV
+                writer = AudioWriter(
+                    output_dir=self.storage_path,
+                    session_id=f"{self._session_id}_{config_name}",
+                    codec="rtp_pcm",
+                    sample_rate=self.target_sample_rate,
+                    channels=1,
+                )
+                writer.open()
+                self._test_writers[config_name] = writer
+
+                # Create PCM file
+                pcm_filename = writer.filepath.replace(".wav", ".pcm")
+                pcm_path = Path(pcm_filename)
+                self._test_files[config_name] = open(pcm_path, "wb")
+
+                logger.info(f"  [{config_name}] {description}")
+                logger.info(f"    WAV: {writer.filepath}")
+                logger.info(f"    PCM: {pcm_path}")
 
         except Exception as e:
             logger.error(f"Failed to setup audio files: {e}")
 
     def _close_files(self):
-        """Close and save audio files."""
+        """Close and save all test audio files."""
         with self._files_lock:
-            # Close WAV file
-            if self._audio_writer:
-                self._audio_writer.close()
-                logger.info(f"WAV file saved: {self._audio_writer.filepath}")
-                self._audio_writer = None
+            logger.info("Closing and saving test audio files...")
 
-            # Close PCM file
-            if self._pcm_file:
-                self._pcm_file.close()
-                logger.info(f"PCM file saved: {self._pcm_path}")
-                self._pcm_file = None
+            # Close all test WAV writers
+            for config_name, writer in self._test_writers.items():
+                if writer:
+                    writer.close()
+                    logger.info(f"  [{config_name}] WAV saved: {writer.filepath}")
+
+            # Close all test PCM files
+            for config_name, pcm_file in self._test_files.items():
+                if pcm_file:
+                    pcm_file.close()
+                    logger.info(f"  [{config_name}] PCM saved")
+
+            # Clear dictionaries
+            self._test_writers = {}
+            self._test_files = {}
 
     def _monitor_loop(self):
         """Monitor for inactivity and auto-save files."""
@@ -223,7 +271,7 @@ class SimpleRTPReceiver:
                 time.sleep(0.5)  # Check every 500ms
 
                 # Check if we have active files and if there's been inactivity
-                if self._audio_writer and self._last_packet_time > 0:
+                if len(self._test_writers) > 0 and self._last_packet_time > 0:
                     elapsed = time.time() - self._last_packet_time
 
                     if elapsed > self.inactivity_timeout:
@@ -232,6 +280,7 @@ class SimpleRTPReceiver:
                         # Reset for next session (files will be created on next packet)
                         self._session_id = f"simple_rtp_{int(time.time())}"
                         self._last_packet_time = 0.0
+                        self._adpcm_state = None  # Reset decoder state
 
             except Exception as e:
                 if self._running:
@@ -307,54 +356,113 @@ class SimpleRTPReceiver:
 
             # Log packet info (similar to Java printf)
             if self._stats["packets_received"] % 100 == 0:  # Log every 100 packets
+                codec_name = {
+                    0: "PCMU (G.711 mu-law)",
+                    5: "DVI4 (IMA ADPCM)",
+                    8: "PCMA (G.711 A-law)",
+                }.get(payload_type, "Unknown/Raw PCM")
                 logger.info(
-                    f"RTP Packet: ver={version}, pt={payload_type}, seq={sequence_number}, "
+                    f"RTP Packet: ver={version}, pt={payload_type} ({codec_name}), seq={sequence_number}, "
                     f"ts={timestamp}, ssrc={ssrc}, size={payload_size} bytes"
                 )
 
             # Create files on first packet if not already created
-            if self._audio_writer is None:
+            if len(self._test_writers) == 0:
                 logger.info("First packet received, creating audio files...")
                 self._setup_output_file()
 
-            # Extract payload (skip 12-byte header) - raw PCM data
+            # Extract payload (skip 12-byte header)
             # Matching Java code: System.arraycopy(data, 12, usA, 0, length-12)
             payload = data[12:length]
 
-            # Determine remote sampling rate based on payload type
-            # Matching Java: payloadType == 4 ? AUDIO_SAMPLING_RATE_LOW : AUDIO_SAMPLING_RATE
-            if payload_type == 4:
-                remote_sample_rate = 8000  # Low sample rate
-            else:
-                remote_sample_rate = self.target_sample_rate  # Standard rate
+            # Prepare all decoding variants for testing
+            test_outputs = {}
 
-            # Handle sampling rate conversion if needed
-            if self.target_sample_rate == remote_sample_rate:
-                # No conversion needed, write directly
-                output_data = payload
-            else:
-                # Upsample if needed
-                output_data = self._upsample(
-                    payload, remote_sample_rate, self.target_sample_rate
+            # 1. Raw payload (no decoding at all)
+            test_outputs["raw_payload"] = payload
+
+            # 2. ADPCM decoded (DVI4) - PT 5
+            try:
+                decoded_adpcm, self._adpcm_state = audioop.adpcm2lin(
+                    payload, 2, self._adpcm_state
                 )
+                test_outputs["adpcm_decoded"] = decoded_adpcm
+            except Exception as e:
+                logger.warning(f"ADPCM decode failed: {e}")
+                test_outputs["adpcm_decoded"] = payload
 
-            # Write to both WAV and PCM files
+            # 3. G.711 mu-law decoded - PT 0
+            try:
+                decoded_mulaw = audioop.ulaw2lin(payload, 2)
+                test_outputs["g711_mulaw"] = decoded_mulaw
+            except Exception as e:
+                logger.warning(f"G.711 mu-law decode failed: {e}")
+                test_outputs["g711_mulaw"] = payload
+
+            # 4. G.711 A-law decoded - PT 8
+            try:
+                decoded_alaw = audioop.alaw2lin(payload, 2)
+                test_outputs["g711_alaw"] = decoded_alaw
+            except Exception as e:
+                logger.warning(f"G.711 A-law decode failed: {e}")
+                test_outputs["g711_alaw"] = payload
+
+            # 5. Raw 16-bit PCM little-endian (assume it's already PCM)
+            test_outputs["raw_pcm_16bit_le"] = payload
+
+            # 6. Raw 16-bit PCM big-endian (swap byte order)
+            try:
+                # Convert to numpy array and swap byte order
+                pcm_array = np.frombuffer(payload, dtype=np.int16)
+                pcm_array_be = pcm_array.byteswap()
+                test_outputs["raw_pcm_16bit_be"] = pcm_array_be.tobytes()
+            except Exception as e:
+                logger.warning(f"Big-endian conversion failed: {e}")
+                test_outputs["raw_pcm_16bit_be"] = payload
+
+            # 7. Raw 8-bit PCM (convert to 16-bit by expanding)
+            try:
+                # Treat as 8-bit unsigned, convert to 16-bit signed
+                pcm_8bit = np.frombuffer(payload, dtype=np.uint8)
+                # Convert 0-255 to -32768 to 32767
+                pcm_16bit = ((pcm_8bit.astype(np.int32) - 128) * 256).astype(np.int16)
+                test_outputs["raw_pcm_8bit"] = pcm_16bit.tobytes()
+            except Exception as e:
+                logger.warning(f"8-bit PCM conversion failed: {e}")
+                test_outputs["raw_pcm_8bit"] = payload
+
+            # Write all variants to their respective files
             with self._files_lock:
-                if self._audio_writer:
-                    # Convert bytes to numpy array for AudioWriter (WAV)
-                    audio_array = np.frombuffer(output_data, dtype=np.int16)
-                    self._audio_writer.write(audio_array)
-                    self._stats["payload_bytes_written"] += len(output_data)
+                for config_name, audio_data in test_outputs.items():
+                    try:
+                        writer = self._test_writers.get(config_name)
+                        pcm_file = self._test_files.get(config_name)
 
-                # Write raw PCM data
-                if self._pcm_file:
-                    self._pcm_file.write(output_data)
-                    self._pcm_file.flush()
+                        if writer and pcm_file:
+                            # Ensure data is 16-bit PCM for WAV writer
+                            try:
+                                audio_array = np.frombuffer(audio_data, dtype=np.int16)
+                            except Exception:
+                                # If conversion fails, pad or truncate to make it valid
+                                if len(audio_data) % 2 != 0:
+                                    audio_data = audio_data + b'\x00'
+                                audio_array = np.frombuffer(audio_data, dtype=np.int16)
 
-            # Call streaming callback if provided
+                            writer.write(audio_array)
+                            pcm_file.write(audio_data)
+                            pcm_file.flush()
+
+                    except Exception as e:
+                        logger.error(f"Error writing {config_name}: {e}")
+
+                self._stats["payload_bytes_written"] += len(payload)
+
+            # Call streaming callback with ADPCM decoded version (most likely correct)
             if self.audio_callback:
                 try:
-                    self.audio_callback(output_data, self.target_sample_rate)
+                    self.audio_callback(
+                        test_outputs["adpcm_decoded"], self.target_sample_rate
+                    )
                 except Exception as e:
                     logger.error(f"Audio callback error: {e}")
 
