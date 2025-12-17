@@ -29,10 +29,15 @@ from .detection import get_bot_sort_tracker, Detection, Track
 logger = logging.getLogger(__name__)
 
 # Detection Recovery Configuration
-RECOVERY_CONFIDENCE = 0.15  # Very low threshold for recovery pass
+RECOVERY_CONFIDENCE = 0.20  # Low threshold for recovery pass (raised from 0.15 to reduce noise)
 RECOVERY_IOU_THRESH = 0.3  # Minimum IoU with Kalman prediction (lowered for better recovery)
 RECOVERY_REID_THRESH = 0.5  # Minimum ReID similarity (for persons) (lowered for better recovery)
 RECOVERY_MIN_TRACK_CONFIDENCE = 0.25  # Only recover tracks with decent history
+RECOVERY_EVERY_N_FRAMES = 3  # Run recovery every N frames (throttle for performance)
+
+# Class Filtering Configuration
+ALLOWED_CLASSES = {"person", "car", "truck", "bus", "motorcycle", "bicycle"}
+MIN_BOX_AREA = 500  # Minimum pixels squared to filter noise
 
 
 @dataclass
@@ -301,6 +306,9 @@ class DetectionLoop:
             "gemini_calls": 0,
         }
 
+        # Recovery throttling
+        self._recovery_counter = 0
+
     def on_frame(self, camera_id: str, frame: np.ndarray):
         """Callback when frame received from RTSP reader."""
         try:
@@ -410,9 +418,10 @@ class DetectionLoop:
             yolo_results = self.yolo(
                 frame,
                 verbose=False,
-                conf=0.55,       # Confidence threshold (higher = fewer false positives)
-                iou=0.5,         # NMS IoU threshold
-                max_det=30       # Max detections per image
+                conf=0.35,           # Lower threshold - let tracker filter over time
+                iou=0.4,             # Stricter NMS to prevent overlaps
+                max_det=50,          # Allow more detections
+                agnostic_nms=True    # Merge overlapping boxes across classes
             )[0]
 
             # Separate detections by class
@@ -426,9 +435,18 @@ class DetectionLoop:
                 label = yolo_results.names[cls]
                 xyxy = box.xyxy[0].tolist()
 
+                # FILTER 1: Skip classes not in allowed list
+                if label not in ALLOWED_CLASSES:
+                    continue
+
                 # Convert from xyxy to xywh format
                 x1, y1, x2, y2 = xyxy
                 bbox = (x1, y1, x2 - x1, y2 - y1)
+
+                # FILTER 2: Skip tiny boxes (noise)
+                box_area = (x2 - x1) * (y2 - y1)
+                if box_area < MIN_BOX_AREA:
+                    continue
 
                 # Extract ReID feature for persons (if tracker available)
                 feature = None
@@ -457,50 +475,43 @@ class DetectionLoop:
                 person_detections
             )
 
-            # STEP 2: Update BoT-SORT tracker
+            # STEP 2: Run detection recovery BEFORE tracker update (if enabled)
+            # This avoids double Kalman prediction
+            if self.bot_sort and self.config.use_reid_recovery:
+                # Get current active tracks to identify lost tracks
+                current_vehicles = self.bot_sort.get_active_tracks("vehicle")
+                current_persons = self.bot_sort.get_active_tracks("person")
+
+                # Recover vehicles using IoU matching
+                recovered_vehicles = self._recover_missing_detections(
+                    frame, current_vehicles, "vehicle", [d.bbox for d in vehicle_detections]
+                )
+                if recovered_vehicles:
+                    logger.info(f"Recovered {len(recovered_vehicles)} vehicle detections")
+                    vehicle_detections.extend(recovered_vehicles)
+
+                # Recover persons using IoU + ReID matching
+                recovered_persons = self._recover_missing_detections(
+                    frame, current_persons, "person", [d.bbox for d in person_detections]
+                )
+                if recovered_persons:
+                    logger.info(f"Recovered {len(recovered_persons)} person detections")
+                    person_detections.extend(recovered_persons)
+
+            # STEP 3: Single BoT-SORT tracker update with merged detections
             tracked_vehicles = []
             tracked_persons = []
             new_vehicles = []
             new_persons = []
 
             if self.bot_sort:
-                # Update BoT-SORT tracker with detections
+                # Update BoT-SORT tracker with merged detections (primary + recovered)
                 all_vehicles, new_vehicle_tracks = self.bot_sort.update(
                     vehicle_detections, "vehicle", dt=1 / self.config.detection_fps
                 )
                 all_persons, new_person_tracks = self.bot_sort.update(
                     person_detections, "person", dt=1 / self.config.detection_fps
                 )
-
-                # STEP 3: Run detection recovery for lost tracks (if enabled)
-                if self.config.use_reid_recovery:
-                    # Recover vehicles using IoU matching
-                    recovered_vehicles = self._recover_missing_detections(
-                        frame, all_vehicles, "vehicle"
-                    )
-                    if recovered_vehicles:
-                        logger.debug(f"Recovering {len(recovered_vehicles)} vehicles")
-                        _, _ = self.bot_sort.update(
-                            recovered_vehicles,
-                            "vehicle",
-                            dt=1 / self.config.detection_fps,
-                        )
-                        # Refresh track list
-                        all_vehicles = self.bot_sort.get_active_tracks("vehicle")
-
-                    # Recover persons using IoU + ReID matching
-                    recovered_persons = self._recover_missing_detections(
-                        frame, all_persons, "person"
-                    )
-                    if recovered_persons:
-                        logger.debug(f"Recovering {len(recovered_persons)} persons")
-                        _, _ = self.bot_sort.update(
-                            recovered_persons,
-                            "person",
-                            dt=1 / self.config.detection_fps,
-                        )
-                        # Refresh track list
-                        all_persons = self.bot_sort.get_active_tracks("person")
 
                 # Convert Track objects to dicts for compatibility with rest of pipeline
                 tracked_vehicles = [self._track_to_dict(t) for t in all_vehicles]
@@ -664,13 +675,14 @@ class DetectionLoop:
         }
 
     def _recover_missing_detections(
-        self, frame: np.ndarray, active_tracks: List[Track], object_type: str
+        self, frame: np.ndarray, active_tracks: List[Track], object_type: str,
+        primary_bboxes: List[Tuple[float, float, float, float]] = None
     ) -> List[Detection]:
         """Recover missed detections for lost tracks using ReID matching.
 
         This is the CRITICAL FEATURE for robust tracking. When a track loses detection
         due to momentary occlusion or YOLO failure, we:
-        1. Run a low-threshold YOLO pass (conf=0.15)
+        1. Run a low-threshold YOLO pass (conf=0.20)
         2. Match candidates using ReID similarity (for persons) or IoU (for vehicles)
         3. Only accept matches that align with Kalman predictions
 
@@ -678,11 +690,17 @@ class DetectionLoop:
             frame: Current frame
             active_tracks: All active tracks for this object type
             object_type: 'person' or 'vehicle'
+            primary_bboxes: List of primary detection bboxes to avoid duplicates
 
         Returns:
             List of recovered Detection objects
         """
         try:
+            # Throttle recovery to run every N frames for performance
+            self._recovery_counter += 1
+            if self._recovery_counter % RECOVERY_EVERY_N_FRAMES != 0:
+                return []
+
             # STEP 1: Identify tracks that need recovery
             lost_tracks = [
                 t
@@ -705,8 +723,9 @@ class DetectionLoop:
                 frame,
                 verbose=False,
                 conf=RECOVERY_CONFIDENCE,
-                iou=0.45,  # NMS IoU threshold
-                max_det=30  # Limit recovery detections
+                iou=0.4,           # Stricter NMS
+                max_det=30,        # Limit recovery detections
+                agnostic_nms=True  # Merge across classes
             )[0]
 
             recovery_candidates = []
@@ -748,19 +767,26 @@ class DetectionLoop:
             if not recovery_candidates:
                 return []
 
-            # STEP 3: Filter out candidates that overlap with recently detected tracks
+            # STEP 3: Filter out candidates that overlap with primary detections or active tracks
             # (to prevent duplicates)
-            active_detected_bboxes = [
+            all_existing_bboxes = []
+
+            # Add primary detection bboxes
+            if primary_bboxes:
+                all_existing_bboxes.extend(primary_bboxes)
+
+            # Add recently detected track bboxes
+            all_existing_bboxes.extend([
                 t.bbox for t in active_tracks
                 if t.time_since_update == 0  # Recently detected
-            ]
+            ])
 
             filtered_candidates = []
             for candidate in recovery_candidates:
-                # Check if this candidate overlaps significantly with any detected track
+                # Check if this candidate overlaps significantly with any existing detection
                 is_duplicate = False
-                for detected_bbox in active_detected_bboxes:
-                    if self._calculate_iou(candidate["bbox"], detected_bbox) > 0.5:
+                for existing_bbox in all_existing_bboxes:
+                    if self._calculate_iou(candidate["bbox"], existing_bbox) > 0.5:
                         is_duplicate = True
                         break
 
