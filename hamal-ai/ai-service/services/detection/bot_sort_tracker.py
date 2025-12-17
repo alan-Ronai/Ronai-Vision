@@ -22,10 +22,10 @@ logger = logging.getLogger(__name__)
 
 
 # Configuration Constants
-MIN_HITS = 3  # Detections needed to confirm track
+MIN_HITS = 2  # Detections needed to confirm track (lowered from 3 for faster confirmation)
 MAX_LOST = 15  # Frames before deletion (reduced from 30 for faster ghost cleanup = 1 second at 15fps)
 LAMBDA_APP = 0.7  # Appearance weight in cost matrix (only used when features exist)
-MAX_COST = 0.8  # Maximum cost for assignment (increased from 0.7 for better tolerance)
+MAX_COST = 0.85  # Maximum cost for assignment (increased for moving object tolerance)
 MIN_IOU_THRESHOLD = 0.2  # Minimum IoU for matching (lowered from 0.3 for walking persons)
 
 # Low confidence deletion (more tolerant to prevent premature ID switching)
@@ -185,6 +185,11 @@ class Track:
         self.kalman = KalmanBoxTracker(detection.bbox)
         self.bbox = detection.bbox
 
+        # CRITICAL: Store last actual detection position for matching
+        # This solves the Kalman velocity lag problem where predictions
+        # don't move on the first few frames because velocity = 0
+        self.last_detection_bbox = detection.bbox
+
         # ReID feature (for person class)
         self.feature = detection.feature
 
@@ -219,6 +224,10 @@ class Track:
         # Update Kalman filter
         self.kalman.update(detection.bbox)
         self.bbox = detection.bbox
+
+        # CRITICAL: Store last actual detection position for next frame's matching
+        # This ensures we match against real observed position, not Kalman prediction
+        self.last_detection_bbox = detection.bbox
 
         # Update camera tracking (for cross-camera filtering)
         if camera_id:
@@ -412,16 +421,21 @@ class BoTSORTTracker:
 
         for i, track in enumerate(track_list):
             for j, det in enumerate(detections):
+                # CRITICAL: Use last_detection_bbox instead of track.bbox (Kalman prediction)
+                # This solves the velocity lag problem where Kalman has velocity=0 initially
+                # and predictions don't move, causing IoU failures for moving objects
+                match_bbox = track.last_detection_bbox
+
                 # Motion cost (1 - IoU)
-                iou = self._calculate_iou(track.bbox, det.bbox)
+                iou = self._calculate_iou(match_bbox, det.bbox)
                 motion_cost = 1.0 - iou
 
                 # FALLBACK: If IoU is low, use center distance
                 # This helps when box sizes differ but centers are close (e.g., perspective change)
                 if iou < 0.3:
-                    center_dist = self._center_distance(track.bbox, det.bbox)
+                    center_dist = self._center_distance(match_bbox, det.bbox)
                     # Normalize by average box diagonal
-                    avg_diag = (self._box_diagonal(track.bbox) + self._box_diagonal(det.bbox)) / 2
+                    avg_diag = (self._box_diagonal(match_bbox) + self._box_diagonal(det.bbox)) / 2
                     normalized_dist = center_dist / (avg_diag + 1e-6)
 
                     # If centers are very close (< 30% of diagonal), give it a lower cost
@@ -436,9 +450,23 @@ class BoTSORTTracker:
                     similarity = self._cosine_similarity(track.feature, det.feature)
                     app_cost = 1.0 - similarity
                     cost_matrix[i, j] = (1 - LAMBDA_APP) * motion_cost + LAMBDA_APP * app_cost
+
+                    # Log ReID usage
+                    logger.debug(
+                        f"ReID matching: track {track.track_id} similarity={similarity:.3f}, "
+                        f"motion_cost={motion_cost:.3f}, combined_cost={cost_matrix[i, j]:.3f}"
+                    )
                 else:
                     # NO features - use ONLY motion cost (critical for walking persons!)
                     cost_matrix[i, j] = motion_cost
+
+                    # Log when features are missing
+                    if object_type == 'person':
+                        logger.debug(
+                            f"No ReID features for track {track.track_id}: "
+                            f"track.feature={track.feature is not None}, "
+                            f"det.feature={det.feature is not None}"
+                        )
 
         return cost_matrix
 

@@ -25,6 +25,7 @@ from queue import Queue, Empty
 import threading
 
 from .detection import get_bot_sort_tracker, Detection, Track
+from .osnet_reid import OSNetReID
 
 logger = logging.getLogger(__name__)
 
@@ -281,10 +282,19 @@ class DetectionLoop:
         config: Optional[LoopConfig] = None,
     ):
         self.yolo = yolo_model
-        self.reid_tracker = reid_tracker  # Used for ReID feature extraction
+        self.reid_tracker = reid_tracker  # Kept for metadata storage
         self.gemini = gemini_analyzer
         self.config = config or LoopConfig()
         self.drawer = BBoxDrawer()
+
+        # CRITICAL: Initialize OSNet for ReID feature extraction
+        # The reid_tracker is just a DeepSort wrapper - doesn't have OSNet
+        self.osnet = None
+        try:
+            self.osnet = OSNetReID()
+            logger.info("✅ OSNet ReID encoder initialized for feature extraction")
+        except Exception as e:
+            logger.warning(f"⚠️ OSNet initialization failed: {e} - ReID features disabled")
 
         # Use BoT-SORT tracker for advanced tracking
         self.bot_sort = get_bot_sort_tracker() if self.config.use_bot_sort else None
@@ -683,17 +693,18 @@ class DetectionLoop:
     def _extract_reid_feature(
         self, frame: np.ndarray, xyxy: List[float]
     ) -> Optional[np.ndarray]:
-        """Extract ReID feature vector from person crop.
+        """Extract ReID feature vector from person crop using OSNet.
 
         Args:
-            frame: Full frame image
+            frame: Full frame image (BGR format)
             xyxy: Bounding box in [x1, y1, x2, y2] format
 
         Returns:
-            ReID feature vector (normalized) or None if extraction fails
+            ReID feature vector (512-dim, L2-normalized) or None if extraction fails
         """
         try:
-            if not self.reid_tracker:
+            # CRITICAL: Use OSNet encoder, not reid_tracker (which is DeepSort wrapper)
+            if self.osnet is None:
                 return None
 
             x1, y1, x2, y2 = [int(v) for v in xyxy]
@@ -706,19 +717,24 @@ class DetectionLoop:
             if x2 <= x1 or y2 <= y1:
                 return None
 
-            # Crop person
-            crop = frame[y1:y2, x1:x2]
+            # OSNet expects boxes in [x1, y1, x2, y2] format as numpy array
+            boxes = np.array([[x1, y1, x2, y2]])
 
-            # Use ReID tracker to extract feature (assuming it has embedding method)
-            # This is a placeholder - adapt to your actual ReID tracker interface
-            if hasattr(self.reid_tracker, "extract_features"):
-                feature = self.reid_tracker.extract_features(crop)
-                # Normalize
-                if feature is not None and len(feature) > 0:
-                    norm = np.linalg.norm(feature)
-                    if norm > 0:
-                        return feature / norm
+            # Extract features using OSNet (returns L2-normalized features)
+            features = self.osnet.extract_features(frame, boxes)
 
+            if features is not None and len(features) > 0:
+                feature = features[0]  # Get first (only) feature vector
+
+                # Log successful extraction
+                logger.debug(
+                    f"✅ Extracted ReID feature: shape={feature.shape}, "
+                    f"norm={np.linalg.norm(feature):.3f}"
+                )
+
+                return feature
+
+            logger.debug("❌ ReID feature extraction returned None")
             return None
         except Exception as e:
             logger.debug(f"ReID feature extraction error: {e}")
