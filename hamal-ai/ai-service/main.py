@@ -112,14 +112,21 @@ if yolo is None:
 
 # Optional: Load weapon detection model
 weapon_detector = None
-weapon_model_path = os.getenv("WEAPON_MODEL", "models/weapon_yolov8.pt")
-if os.path.exists(weapon_model_path):
-    try:
-        weapon_detector = YOLO(weapon_model_path)
-        weapon_detector.to(DEVICE)
-        logger.info(f"✅ Weapon detector loaded")
-    except Exception as e:
-        logger.warning(f"Could not load weapon detector: {e}")
+weapon_model_path = os.getenv("WEAPON_MODEL", "models/firearm-yolov8n.pt")
+weapon_model_locations = [
+    weapon_model_path,
+    f"../../{weapon_model_path}",  # From ai-service to Ronai-Vision root
+]
+
+for wm_path in weapon_model_locations:
+    if os.path.exists(wm_path):
+        try:
+            weapon_detector = YOLO(wm_path)
+            weapon_detector.to(DEVICE)
+            logger.info(f"✅ Weapon detector loaded from: {wm_path}")
+            break
+        except Exception as e:
+            logger.warning(f"Could not load weapon detector from {wm_path}: {e}")
 
 # Initialize services
 tracker = ReIDTracker(max_age=30, n_init=3)
@@ -1193,15 +1200,31 @@ async def startup_event():
 ╚════════════════════════════════════════════════════════╝
     """)
 
-    # Initialize detection loop
+    # Initialize detection loop with env configuration
+    detection_fps = int(os.getenv("DETECTION_FPS", "15"))
+    stream_fps = int(os.getenv("STREAM_FPS", "15"))
+    use_reid_recovery = os.getenv("USE_REID_RECOVERY", "false").lower() == "true"
+
+    # Confidence thresholds
+    yolo_confidence = float(os.getenv("YOLO_CONFIDENCE", "0.35"))
+    weapon_confidence = float(os.getenv("WEAPON_CONFIDENCE", "0.40"))
+    recovery_confidence = float(os.getenv("RECOVERY_CONFIDENCE", "0.20"))
+
     loop_config = LoopConfig(
         backend_url=BACKEND_URL,
-        detection_fps=15,  # Process all frames (15 FPS) for continuous analysis
-        stream_fps=15,     # Stream at 15 fps for smooth viewing
+        detection_fps=detection_fps,
+        stream_fps=stream_fps,
         draw_bboxes=True,
-        send_events=True
+        send_events=True,
+        use_reid_recovery=use_reid_recovery,
+        weapon_detector=weapon_detector,
+        yolo_confidence=yolo_confidence,
+        weapon_confidence=weapon_confidence,
+        recovery_confidence=recovery_confidence
     )
 
+    logger.info(f"Detection loop config: detection_fps={detection_fps}, stream_fps={stream_fps}, reid_recovery={use_reid_recovery}")
+    logger.info(f"Confidence thresholds: yolo={yolo_confidence}, weapon={weapon_confidence}, recovery={recovery_confidence}")
     detection_loop = init_detection_loop(yolo, tracker, gemini, loop_config)
 
     # Start detection loop
@@ -1361,6 +1384,118 @@ async def stop_camera_detection(camera_id: str):
     """Stop detection for a specific camera."""
     get_rtsp_manager().remove_camera(camera_id)
     return {"status": "stopped", "camera_id": camera_id}
+
+
+@app.get("/detection/config")
+async def get_detection_config():
+    """Get current detection configuration (FPS, ReID recovery, confidence thresholds, etc.)."""
+    detection_loop = get_detection_loop()
+    if not detection_loop:
+        return {"error": "Detection loop not initialized"}
+
+    return {
+        "detection_fps": detection_loop.config.detection_fps,
+        "stream_fps": detection_loop.config.stream_fps,
+        "use_reid_recovery": detection_loop.config.use_reid_recovery,
+        "use_bot_sort": detection_loop.config.use_bot_sort,
+        "draw_bboxes": detection_loop.config.draw_bboxes,
+        "send_events": detection_loop.config.send_events,
+        "yolo_confidence": detection_loop.config.yolo_confidence,
+        "weapon_confidence": detection_loop.config.weapon_confidence,
+        "recovery_confidence": detection_loop.config.recovery_confidence,
+    }
+
+
+@app.post("/detection/config/fps")
+async def set_detection_fps(
+    detection_fps: Optional[int] = Query(None, description="Detection FPS (1-30)", ge=1, le=30),
+    stream_fps: Optional[int] = Query(None, description="Stream FPS (1-30)", ge=1, le=30)
+):
+    """Change FPS settings dynamically.
+
+    Note: Changes take effect immediately. Frontend streams may need to reconnect
+    with new FPS parameter to see the change.
+
+    Args:
+        detection_fps: New detection processing FPS (1-30)
+        stream_fps: New streaming FPS (1-30)
+    """
+    detection_loop = get_detection_loop()
+    if not detection_loop:
+        raise HTTPException(503, "Detection loop not running")
+
+    if detection_fps is None and stream_fps is None:
+        raise HTTPException(400, "Must provide at least one FPS value")
+
+    detection_loop.set_fps(detection_fps, stream_fps)
+
+    return {
+        "message": "FPS settings updated",
+        "detection_fps": detection_loop.config.detection_fps,
+        "stream_fps": detection_loop.config.stream_fps,
+        "note": "Frontend streams should reconnect to see changes"
+    }
+
+
+@app.post("/detection/config/reid-recovery")
+async def set_reid_recovery(enabled: bool = Query(..., description="Enable/disable ReID recovery")):
+    """Toggle ReID-based detection recovery on/off.
+
+    ReID recovery helps maintain tracking when objects are temporarily occluded,
+    but may impact performance.
+
+    Args:
+        enabled: True to enable, False to disable
+    """
+    detection_loop = get_detection_loop()
+    if not detection_loop:
+        raise HTTPException(503, "Detection loop not running")
+
+    detection_loop.set_reid_recovery(enabled)
+
+    return {
+        "message": f"ReID recovery {'enabled' if enabled else 'disabled'}",
+        "use_reid_recovery": detection_loop.config.use_reid_recovery
+    }
+
+
+@app.post("/detection/config/confidence")
+async def set_confidence_thresholds(
+    yolo_confidence: Optional[float] = Query(None, description="YOLO confidence (0.0-1.0)", ge=0.0, le=1.0),
+    weapon_confidence: Optional[float] = Query(None, description="Weapon confidence (0.0-1.0)", ge=0.0, le=1.0),
+    recovery_confidence: Optional[float] = Query(None, description="Recovery confidence (0.0-1.0)", ge=0.0, le=1.0)
+):
+    """Change confidence thresholds dynamically.
+
+    Lower thresholds = more detections (more false positives)
+    Higher thresholds = fewer detections (more false negatives)
+
+    Recommended ranges:
+    - YOLO: 0.25-0.50 (default: 0.35)
+    - Weapon: 0.30-0.60 (default: 0.40)
+    - Recovery: 0.15-0.30 (default: 0.20)
+
+    Args:
+        yolo_confidence: Main YOLO detection confidence
+        weapon_confidence: Weapon detection confidence
+        recovery_confidence: Low-confidence recovery pass
+    """
+    detection_loop = get_detection_loop()
+    if not detection_loop:
+        raise HTTPException(503, "Detection loop not running")
+
+    if yolo_confidence is None and weapon_confidence is None and recovery_confidence is None:
+        raise HTTPException(400, "Must provide at least one confidence value")
+
+    detection_loop.set_confidence(yolo_confidence, weapon_confidence, recovery_confidence)
+
+    return {
+        "message": "Confidence thresholds updated",
+        "yolo_confidence": detection_loop.config.yolo_confidence,
+        "weapon_confidence": detection_loop.config.weapon_confidence,
+        "recovery_confidence": detection_loop.config.recovery_confidence,
+        "note": "Changes take effect immediately on next frame"
+    }
 
 
 # ============== RADIO ENDPOINTS ==============

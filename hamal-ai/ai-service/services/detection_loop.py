@@ -253,6 +253,12 @@ class LoopConfig:
     send_events: bool = True
     use_bot_sort: bool = True  # Use BoT-SORT tracker with full Kalman filter
     use_reid_recovery: bool = False  # Enable ReID-based detection recovery (DISABLED for now)
+    weapon_detector: Optional[Any] = None  # Weapon detection YOLO model
+
+    # Confidence thresholds
+    yolo_confidence: float = 0.35  # Main YOLO detection confidence
+    weapon_confidence: float = 0.40  # Weapon detection confidence
+    recovery_confidence: float = 0.20  # Low-confidence recovery pass
 
 
 class DetectionLoop:
@@ -282,6 +288,11 @@ class DetectionLoop:
 
         # Use BoT-SORT tracker for advanced tracking
         self.bot_sort = get_bot_sort_tracker() if self.config.use_bot_sort else None
+
+        # CRITICAL: Reset tracker on startup to clear ghost tracks from previous runs
+        if self.bot_sort:
+            self.bot_sort.reset()
+            logger.info("✅ BoT-SORT tracker reset on startup - cleared ghost tracks")
 
         self._running = False
         self._frame_queue: Queue = Queue(maxsize=50)
@@ -418,7 +429,7 @@ class DetectionLoop:
             yolo_results = self.yolo(
                 frame,
                 verbose=False,
-                conf=0.35,           # Lower threshold - let tracker filter over time
+                conf=self.config.yolo_confidence,  # Configurable threshold
                 iou=0.4,             # Stricter NMS to prevent overlaps
                 max_det=50,          # Allow more detections
                 agnostic_nms=True    # Merge overlapping boxes across classes
@@ -478,9 +489,9 @@ class DetectionLoop:
             # STEP 2: Run detection recovery BEFORE tracker update (if enabled)
             # This avoids double Kalman prediction
             if self.bot_sort and self.config.use_reid_recovery:
-                # Get current active tracks to identify lost tracks
-                current_vehicles = self.bot_sort.get_active_tracks("vehicle")
-                current_persons = self.bot_sort.get_active_tracks("person")
+                # Get current active tracks to identify lost tracks (filtered by camera)
+                current_vehicles = self.bot_sort.get_active_tracks("vehicle", camera_id=camera_id)
+                current_persons = self.bot_sort.get_active_tracks("person", camera_id=camera_id)
 
                 # Recover vehicles using IoU matching
                 recovered_vehicles = self._recover_missing_detections(
@@ -506,12 +517,20 @@ class DetectionLoop:
 
             if self.bot_sort:
                 # Update BoT-SORT tracker with merged detections (primary + recovered)
+                # CRITICAL: Pass camera_id to associate tracks with specific camera
                 all_vehicles, new_vehicle_tracks = self.bot_sort.update(
-                    vehicle_detections, "vehicle", dt=1 / self.config.detection_fps
+                    vehicle_detections, "vehicle", dt=1 / self.config.detection_fps, camera_id=camera_id
                 )
                 all_persons, new_person_tracks = self.bot_sort.update(
-                    person_detections, "person", dt=1 / self.config.detection_fps
+                    person_detections, "person", dt=1 / self.config.detection_fps, camera_id=camera_id
                 )
+
+                # CRITICAL: Filter tracks by camera to prevent cross-contamination
+                # Only show tracks that were last seen on THIS camera
+                all_vehicles = [t for t in all_vehicles if t.last_seen_camera == camera_id]
+                all_persons = [t for t in all_persons if t.last_seen_camera == camera_id]
+                new_vehicle_tracks = [t for t in new_vehicle_tracks if t.last_seen_camera == camera_id]
+                new_person_tracks = [t for t in new_person_tracks if t.last_seen_camera == camera_id]
 
                 # Convert Track objects to dicts for compatibility with rest of pipeline
                 tracked_vehicles = [self._track_to_dict(t) for t in all_vehicles]
@@ -533,6 +552,67 @@ class DetectionLoop:
                 new_vehicles = tracked_vehicles.copy()
                 new_persons = tracked_persons.copy()
 
+            # STEP 4: Weapon Detection - detect firearms and mark nearby persons as armed
+            detected_weapons = []
+            if self.config.weapon_detector is not None:
+                try:
+                    weapon_results = self.config.weapon_detector(
+                        frame,
+                        verbose=False,
+                        conf=self.config.weapon_confidence,  # Configurable weapon confidence
+                        iou=0.4
+                    )[0]
+
+                    for box in weapon_results.boxes:
+                        weapon_bbox = box.xyxy[0].tolist()  # [x1, y1, x2, y2]
+                        weapon_conf = float(box.conf[0])
+                        weapon_class = weapon_results.names[int(box.cls[0])]
+
+                        detected_weapons.append({
+                            "bbox": weapon_bbox,
+                            "confidence": weapon_conf,
+                            "class": weapon_class
+                        })
+
+                        logger.warning(f"⚠️ WEAPON DETECTED: {weapon_class} (conf: {weapon_conf:.2f})")
+
+                        # Find persons near this weapon
+                        for person in tracked_persons:
+                            person_bbox = person.get("bbox", [])
+                            if len(person_bbox) >= 4:
+                                # Check if weapon is near person (using IoU or proximity)
+                                if self._is_weapon_near_person(weapon_bbox, person_bbox):
+                                    # Mark person as armed
+                                    person_meta = person.get("metadata", {})
+                                    if not isinstance(person_meta, dict):
+                                        person_meta = {}
+
+                                    person_meta["armed"] = True
+                                    person_meta["חמוש"] = True
+                                    person_meta["weaponType"] = weapon_class
+                                    person_meta["סוג_נשק"] = weapon_class
+                                    person_meta["weapon_confidence"] = weapon_conf
+                                    person_meta["detection_method"] = "yolo_weapon_detector"
+
+                                    person["metadata"] = person_meta
+
+                                    # Update tracker metadata if using BoT-SORT
+                                    if self.bot_sort:
+                                        track_id = person.get("track_id")
+                                        # Filter by camera when updating metadata
+                                        for track in self.bot_sort.get_active_tracks("person", camera_id=camera_id):
+                                            if track.track_id == track_id:
+                                                track.metadata.update(person_meta)
+                                                break
+
+                                    logger.warning(
+                                        f"🚨 ARMED PERSON: Track {person.get('track_id')} "
+                                        f"detected with {weapon_class}"
+                                    )
+
+                except Exception as e:
+                    logger.error(f"Weapon detection error: {e}")
+
             # Check for armed persons
             armed_persons = []
             for p in tracked_persons:
@@ -545,6 +625,25 @@ class DetectionLoop:
             annotated_frame = None
             if self.config.draw_bboxes:
                 annotated_frame = frame.copy()
+
+                # Draw weapons (highlight in red)
+                if detected_weapons:
+                    for weapon in detected_weapons:
+                        w_bbox = weapon["bbox"]
+                        x1, y1, x2, y2 = [int(v) for v in w_bbox]
+                        # Draw weapon box in bright red
+                        cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
+                        # Label
+                        label = f"⚠️ {weapon['class']} {weapon['confidence']:.0%}"
+                        cv2.putText(
+                            annotated_frame,
+                            label,
+                            (x1, y1 - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.7,
+                            (0, 0, 255),
+                            2,
+                        )
 
                 # Draw vehicles
                 annotated_frame = self.drawer.draw_detections(
@@ -722,7 +821,7 @@ class DetectionLoop:
             low_conf_results = self.yolo(
                 frame,
                 verbose=False,
-                conf=RECOVERY_CONFIDENCE,
+                conf=self.config.recovery_confidence,  # Configurable recovery confidence
                 iou=0.4,           # Stricter NMS
                 max_det=30,        # Limit recovery detections
                 agnostic_nms=True  # Merge across classes
@@ -906,6 +1005,43 @@ class DetectionLoop:
 
         return intersection / union if union > 0 else 0.0
 
+    @staticmethod
+    def _is_weapon_near_person(
+        weapon_bbox: List[float], person_bbox: List[float], proximity_threshold: float = 100
+    ) -> bool:
+        """Check if weapon is near a person.
+
+        Args:
+            weapon_bbox: Weapon bounding box in [x1, y1, x2, y2] format
+            person_bbox: Person bounding box in [x1, y1, x2, y2] format
+            proximity_threshold: Maximum distance in pixels for weapon to be considered "near"
+
+        Returns:
+            True if weapon is inside person bbox or within proximity threshold
+        """
+        # Get weapon center
+        w_x1, w_y1, w_x2, w_y2 = weapon_bbox
+        weapon_center_x = (w_x1 + w_x2) / 2
+        weapon_center_y = (w_y1 + w_y2) / 2
+
+        # Get person bbox
+        p_x1, p_y1, p_x2, p_y2 = person_bbox
+
+        # Check if weapon center is inside person bbox
+        if p_x1 <= weapon_center_x <= p_x2 and p_y1 <= weapon_center_y <= p_y2:
+            return True
+
+        # Check proximity - find closest point on person bbox to weapon center
+        closest_x = max(p_x1, min(weapon_center_x, p_x2))
+        closest_y = max(p_y1, min(weapon_center_y, p_y2))
+
+        # Calculate distance
+        distance = np.sqrt(
+            (weapon_center_x - closest_x) ** 2 + (weapon_center_y - closest_y) ** 2
+        )
+
+        return distance <= proximity_threshold
+
     async def _handle_results(self):
         """Handle detection results asynchronously."""
         logger.info("Result handler started")
@@ -957,8 +1093,8 @@ class DetectionLoop:
 
                 # Update tracker with metadata
                 if self.bot_sort:
-                    # Find track and update metadata
-                    for track in self.bot_sort.get_active_tracks("vehicle"):
+                    # Find track and update metadata (filter by camera)
+                    for track in self.bot_sort.get_active_tracks("vehicle", camera_id=result.camera_id):
                         if track.track_id == track_id:
                             track.metadata.update(metadata)
                             break
@@ -991,8 +1127,8 @@ class DetectionLoop:
 
                 # Update tracker with metadata
                 if self.bot_sort:
-                    # Find track and update metadata
-                    for track in self.bot_sort.get_active_tracks("person"):
+                    # Find track and update metadata (filter by camera)
+                    for track in self.bot_sort.get_active_tracks("person", camera_id=result.camera_id):
                         if track.track_id == track_id:
                             track.metadata.update(metadata)
                             break
@@ -1095,14 +1231,15 @@ class DetectionLoop:
         """Generate Hebrew title."""
         parts = []
 
+        # Weapon detection is highest priority
+        if result.armed_persons:
+            weapon_count = len(result.armed_persons)
+            parts.append(f"⚠️ {weapon_count} חשודים חמושים - נשק זוהה!")
+        elif result.new_persons:
+            parts.append(f"{len(result.new_persons)} אנשים")
+
         if result.new_vehicles:
             parts.append(f"{len(result.new_vehicles)} רכבים חדשים")
-
-        if result.new_persons:
-            if result.armed_persons:
-                parts.append(f"{len(result.armed_persons)} חשודים חמושים!")
-            else:
-                parts.append(f"{len(result.new_persons)} אנשים")
 
         return "זוהו: " + ", ".join(parts) if parts else "זיהוי חדש"
 
@@ -1114,6 +1251,14 @@ class DetectionLoop:
             "frame_queue_size": self._frame_queue.qsize(),
             "result_queue_size": self._result_queue.qsize(),
             "active_cameras": list(self._annotated_frames.keys()),
+            "config": {
+                "detection_fps": self.config.detection_fps,
+                "stream_fps": self.config.stream_fps,
+                "use_reid_recovery": self.config.use_reid_recovery,
+                "yolo_confidence": self.config.yolo_confidence,
+                "weapon_confidence": self.config.weapon_confidence,
+                "recovery_confidence": self.config.recovery_confidence,
+            }
         }
 
         # Include BoT-SORT tracker stats
@@ -1121,6 +1266,60 @@ class DetectionLoop:
             stats["bot_sort"] = self.bot_sort.get_stats()
 
         return stats
+
+    def set_fps(self, detection_fps: Optional[int] = None, stream_fps: Optional[int] = None):
+        """Change FPS settings dynamically.
+
+        Args:
+            detection_fps: New detection FPS (1-30)
+            stream_fps: New stream FPS (1-30)
+        """
+        if detection_fps is not None:
+            detection_fps = max(1, min(30, detection_fps))
+            self.config.detection_fps = detection_fps
+            logger.info(f"Detection FPS changed to: {detection_fps}")
+
+        if stream_fps is not None:
+            stream_fps = max(1, min(30, stream_fps))
+            self.config.stream_fps = stream_fps
+            logger.info(f"Stream FPS changed to: {stream_fps}")
+
+    def set_reid_recovery(self, enabled: bool):
+        """Toggle ReID recovery on/off.
+
+        Args:
+            enabled: True to enable, False to disable
+        """
+        self.config.use_reid_recovery = enabled
+        logger.info(f"ReID recovery {'enabled' if enabled else 'disabled'}")
+
+    def set_confidence(
+        self,
+        yolo_confidence: Optional[float] = None,
+        weapon_confidence: Optional[float] = None,
+        recovery_confidence: Optional[float] = None
+    ):
+        """Change confidence thresholds dynamically.
+
+        Args:
+            yolo_confidence: Main YOLO confidence (0.0-1.0)
+            weapon_confidence: Weapon detection confidence (0.0-1.0)
+            recovery_confidence: Recovery pass confidence (0.0-1.0)
+        """
+        if yolo_confidence is not None:
+            yolo_confidence = max(0.0, min(1.0, yolo_confidence))
+            self.config.yolo_confidence = yolo_confidence
+            logger.info(f"YOLO confidence changed to: {yolo_confidence}")
+
+        if weapon_confidence is not None:
+            weapon_confidence = max(0.0, min(1.0, weapon_confidence))
+            self.config.weapon_confidence = weapon_confidence
+            logger.info(f"Weapon confidence changed to: {weapon_confidence}")
+
+        if recovery_confidence is not None:
+            recovery_confidence = max(0.0, min(1.0, recovery_confidence))
+            self.config.recovery_confidence = recovery_confidence
+            logger.info(f"Recovery confidence changed to: {recovery_confidence}")
 
 
 # Global instance

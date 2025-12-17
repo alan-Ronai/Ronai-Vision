@@ -24,9 +24,9 @@ logger = logging.getLogger(__name__)
 # Configuration Constants
 MIN_HITS = 3  # Detections needed to confirm track
 MAX_LOST = 30  # Frames before deletion
-LAMBDA_APP = 0.7  # Appearance weight in cost matrix
-MAX_COST = 0.85  # Maximum cost for assignment (balanced)
-MIN_IOU_THRESHOLD = 0.3  # Minimum IoU for matching
+LAMBDA_APP = 0.7  # Appearance weight in cost matrix (only used when features exist)
+MAX_COST = 0.7  # Maximum cost for assignment (lowered from 0.85 for motion-only matching)
+MIN_IOU_THRESHOLD = 0.2  # Minimum IoU for matching (lowered from 0.3 for walking persons)
 
 # Low confidence deletion
 MIN_CONFIDENCE_HISTORY = 0.25  # Avg confidence threshold
@@ -68,10 +68,10 @@ class KalmanBoxTracker:
         self.P = np.eye(8)
         self.P[4:, 4:] *= 100.0  # High uncertainty for velocity
 
-        # Process noise covariance
+        # Process noise covariance (INCREASED for better adaptation to movement)
         self.Q = np.eye(8)
-        self.Q[0:4, 0:4] *= 0.01  # Low noise for position
-        self.Q[4:, 4:] *= 0.01  # Low noise for velocity
+        self.Q[0:4, 0:4] *= 1.0  # Position noise (increased from 0.01 for faster adaptation)
+        self.Q[4:, 4:] *= 0.1  # Velocity noise (increased from 0.01 to allow velocity changes)
 
         # Measurement noise covariance
         self.R = np.eye(4)
@@ -91,14 +91,19 @@ class KalmanBoxTracker:
     def predict(self, dt: float = 1/15) -> Tuple[float, float, float, float]:
         """Predict next state using constant velocity model.
 
+        CRITICAL FIX: Use 1.0 for velocity in state transition, not dt.
+        The velocity is per-frame, so we use constant velocity model directly.
+        Using dt (0.067) would make velocity contribution negligible.
+
         Returns:
             Predicted bbox (x, y, w, h)
         """
-        # Update state transition matrix with dt
-        self.F[0, 4] = dt  # cx += vx * dt
-        self.F[1, 5] = dt  # cy += vy * dt
-        self.F[2, 6] = dt  # w += vw * dt
-        self.F[3, 7] = dt  # h += vh * dt
+        # Update state transition matrix (constant velocity model)
+        # CRITICAL: Use 1.0, not dt! Velocity is already per-frame.
+        self.F[0, 4] = 1.0  # cx += vx
+        self.F[1, 5] = 1.0  # cy += vy
+        self.F[2, 6] = 1.0  # w += vw
+        self.F[3, 7] = 1.0  # h += vh
 
         # Prediction step
         self.state = self.F @ self.state
@@ -157,7 +162,7 @@ class Track:
 
     track_id_counter = 0
 
-    def __init__(self, detection: Detection, track_id: Optional[str] = None):
+    def __init__(self, detection: Detection, track_id: Optional[str] = None, camera_id: Optional[str] = None):
         """Initialize track with first detection."""
 
         # Generate unique track ID
@@ -170,6 +175,10 @@ class Track:
         # Detection info
         self.class_id = detection.class_id
         self.class_name = detection.class_name
+
+        # CRITICAL: Track which camera this object belongs to
+        self.camera_id = camera_id
+        self.last_seen_camera = camera_id
 
         # Kalman filter
         self.kalman = KalmanBoxTracker(detection.bbox)
@@ -204,11 +213,15 @@ class Track:
         if self.time_since_update > 0:
             self.hit_streak = 0
 
-    def update(self, detection: Detection, dt: float = 1/15):
+    def update(self, detection: Detection, dt: float = 1/15, camera_id: Optional[str] = None):
         """Update track with new detection."""
         # Update Kalman filter
         self.kalman.update(detection.bbox)
         self.bbox = detection.bbox
+
+        # Update camera tracking (for cross-camera filtering)
+        if camera_id:
+            self.last_seen_camera = camera_id
 
         # Update confidence
         self.confidence = detection.confidence
@@ -235,7 +248,7 @@ class Track:
         # State transition: tentative → confirmed
         if self.state == "tentative" and self.hits >= MIN_HITS:
             self.state = "confirmed"
-            logger.info(f"Track {self.track_id} ({self.class_name}) confirmed")
+            logger.info(f"Track {self.track_id} ({self.class_name}) confirmed on camera {camera_id}")
 
     @property
     def avg_confidence(self) -> float:
@@ -269,7 +282,9 @@ class Track:
             "time_since_update": self.time_since_update,
             "first_seen": self.first_seen,
             "last_seen": self.last_seen,
-            "is_reported": self.is_reported
+            "is_reported": self.is_reported,
+            "camera_id": self.camera_id,
+            "last_seen_camera": self.last_seen_camera
         }
 
 
@@ -292,7 +307,8 @@ class BoTSORTTracker:
         self,
         detections: List[Detection],
         object_type: str,
-        dt: float = 1/15
+        dt: float = 1/15,
+        camera_id: Optional[str] = None
     ) -> Tuple[List[Track], List[Track]]:
         """Update tracker with new detections.
 
@@ -300,6 +316,7 @@ class BoTSORTTracker:
             detections: List of Detection objects
             object_type: 'person' or 'vehicle'
             dt: Time delta since last frame
+            camera_id: Camera ID for tracking per-camera objects
 
         Returns:
             (all_tracks, new_tracks): All current tracks and newly confirmed tracks
@@ -324,7 +341,7 @@ class BoTSORTTracker:
             for track_idx, det_idx in zip(track_indices, det_indices):
                 if cost_matrix[track_idx, det_idx] < MAX_COST:
                     track_id = list(tracks.keys())[track_idx]
-                    tracks[track_id].update(detections[det_idx], dt)
+                    tracks[track_id].update(detections[det_idx], dt, camera_id)
                     matched_tracks.add(track_id)
                     matched_detections.add(det_idx)
         else:
@@ -335,7 +352,7 @@ class BoTSORTTracker:
         new_tracks = []
         for i, detection in enumerate(detections):
             if i not in matched_detections:
-                track = Track(detection)
+                track = Track(detection, camera_id=camera_id)
                 tracks[track.track_id] = track
                 self._stats["total_tracks"] += 1
 
@@ -369,6 +386,9 @@ class BoTSORTTracker:
     ) -> np.ndarray:
         """Build combined cost matrix (motion + appearance).
 
+        CRITICAL FIX: Use motion-only cost when ReID features are not available.
+        Without this, LAMBDA_APP=0.7 causes minimum cost of 0.7, making matches fail.
+
         Args:
             tracks: Dictionary of active tracks
             detections: List of detections
@@ -389,17 +409,17 @@ class BoTSORTTracker:
                 iou = self._calculate_iou(track.bbox, det.bbox)
                 motion_cost = 1.0 - iou
 
-                # Appearance cost (1 - cosine similarity)
+                # CRITICAL: Only use appearance cost if BOTH have features
                 if (object_type == 'person' and
                     track.feature is not None and
                     det.feature is not None):
+                    # Both have features - use combined cost
                     similarity = self._cosine_similarity(track.feature, det.feature)
                     app_cost = 1.0 - similarity
+                    cost_matrix[i, j] = (1 - LAMBDA_APP) * motion_cost + LAMBDA_APP * app_cost
                 else:
-                    app_cost = 1.0  # No appearance info
-
-                # Combined cost
-                cost_matrix[i, j] = (1 - LAMBDA_APP) * motion_cost + LAMBDA_APP * app_cost
+                    # NO features - use ONLY motion cost (critical for walking persons!)
+                    cost_matrix[i, j] = motion_cost
 
         return cost_matrix
 
@@ -444,14 +464,28 @@ class BoTSORTTracker:
 
         return dot_product / (norm1 * norm2)
 
-    def get_active_tracks(self, object_type: str) -> List[Track]:
-        """Get all active tracks of given type."""
-        tracks = self._persons if object_type == 'person' else self._vehicles
-        return list(tracks.values())
+    def get_active_tracks(self, object_type: str, camera_id: Optional[str] = None) -> List[Track]:
+        """Get all active tracks of given type, optionally filtered by camera.
 
-    def get_confirmed_tracks(self, object_type: str) -> List[Track]:
-        """Get only confirmed tracks."""
-        tracks = self.get_active_tracks(object_type)
+        Args:
+            object_type: 'person' or 'vehicle'
+            camera_id: Optional camera ID to filter tracks
+
+        Returns:
+            List of tracks (filtered by camera if camera_id provided)
+        """
+        tracks = self._persons if object_type == 'person' else self._vehicles
+        all_tracks = list(tracks.values())
+
+        # CRITICAL: Filter by camera to prevent cross-contamination
+        if camera_id is not None:
+            return [t for t in all_tracks if t.last_seen_camera == camera_id]
+
+        return all_tracks
+
+    def get_confirmed_tracks(self, object_type: str, camera_id: Optional[str] = None) -> List[Track]:
+        """Get only confirmed tracks, optionally filtered by camera."""
+        tracks = self.get_active_tracks(object_type, camera_id)
         return [t for t in tracks if t.state == "confirmed"]
 
     def get_stats(self) -> dict:

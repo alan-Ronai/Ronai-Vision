@@ -9,10 +9,12 @@ import SimulationPopup from './components/SimulationPopup';
 import StatusBar from './components/StatusBar';
 import DemoControls from './components/DemoControls';
 import CameraManager from './components/CameraManager';
+import DetectionSettings from './components/DetectionSettings';
 
 function Dashboard() {
   const { isEmergency, simulationPopup, loading } = useApp();
   const [showCameraManager, setShowCameraManager] = useState(false);
+  const [showDetectionSettings, setShowDetectionSettings] = useState(false);
 
   if (loading) {
     return (
@@ -74,19 +76,34 @@ function Dashboard() {
       {/* Demo controls (for testing) */}
       <DemoControls />
 
-      {/* Camera Manager button */}
-      <button
-        onClick={() => setShowCameraManager(true)}
-        className="fixed bottom-4 left-4 bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded-lg shadow-lg flex items-center gap-2 z-30"
-      >
-        <span>⚙️</span>
-        <span>ניהול מצלמות</span>
-      </button>
+      {/* Settings buttons */}
+      <div className="fixed bottom-4 left-4 flex flex-col gap-2 z-30">
+        <button
+          onClick={() => setShowCameraManager(true)}
+          className="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded-lg shadow-lg flex items-center gap-2"
+        >
+          <span>📹</span>
+          <span>ניהול מצלמות</span>
+        </button>
+        <button
+          onClick={() => setShowDetectionSettings(true)}
+          className="bg-blue-700 hover:bg-blue-600 px-4 py-2 rounded-lg shadow-lg flex items-center gap-2"
+        >
+          <span>⚙️</span>
+          <span>הגדרות זיהוי AI</span>
+        </button>
+      </div>
 
       {/* Camera Manager Modal */}
       <CameraManager
         isOpen={showCameraManager}
         onClose={() => setShowCameraManager(false)}
+      />
+
+      {/* Detection Settings Modal */}
+      <DetectionSettings
+        isOpen={showDetectionSettings}
+        onClose={() => setShowDetectionSettings(false)}
       />
 
       {/* Emergency popup */}
