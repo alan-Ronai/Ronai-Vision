@@ -105,33 +105,42 @@ class FFmpegStream:
             return None, 0.0
 
     def _build_ffmpeg_cmd(self) -> list:
-        """Build FFmpeg command for RTSP reading with ultra-low latency."""
+        """Build FFmpeg command with H264 error recovery and balanced latency."""
         cmd = [
             'ffmpeg',
             '-hide_banner',
-            '-loglevel', 'error',
+            '-loglevel', 'warning',  # Show warnings but reduce spam
 
-            # CRITICAL: Low-latency input options (reduces 2-4 seconds of delay!)
-            '-fflags', 'nobuffer+fastseek+flush_packets',  # Disable buffering
-            '-flags', 'low_delay',           # Low delay mode
-            '-avioflags', 'direct',          # Direct I/O (bypass buffering)
-            '-probesize', '32',              # Minimal probe size (faster start)
-            '-analyzeduration', '0',         # Don't analyze stream (immediate start)
+            # RTSP transport - TCP is more reliable for H264
+            '-rtsp_transport', 'tcp' if self.config.tcp else 'udp',
+            '-rtsp_flags', 'prefer_tcp',
+            '-timeout', '5000000',          # 5 second timeout (in microseconds)
 
-            # RTSP transport and error handling
-            '-rtsp_transport', 'tcp' if self.config.tcp else 'udp',  # TCP more reliable
-            '-fflags', '+genpts+discardcorrupt',  # Handle timing issues
-            '-max_delay', '100000',          # Reduced from 500000 for lower latency
-            '-reorder_queue_size', '0',      # No reordering queue
+            # Buffer settings - balance between latency and stability
+            # NOTE: nobuffer causes H264 decode errors - using genpts+discardcorrupt instead
+            '-fflags', '+genpts+discardcorrupt',  # Generate PTS, discard corrupt packets
+            '-flags', 'low_delay',
+
+            # Moderate probe/analyze - not too aggressive for camera compatibility
+            '-probesize', '2000000',        # 2MB probe (reduced from 5MB for compatibility)
+            '-analyzeduration', '1000000',  # 1s analysis (reduced from 2s)
+
+            # H264 error handling - CRITICAL for corrupted streams
+            '-err_detect', 'ignore_err',    # Continue despite errors
+            '-ec', 'guess_mvs+deblock',     # Error concealment: guess motion vectors + deblock
+
+            # Reasonable buffer to handle network jitter
+            '-max_delay', '500000',         # 500ms max delay
+            '-reorder_queue_size', '5',     # Reduced from 10 for lower latency
 
             '-i', self.rtsp_url,
 
-            # Output options - prioritize speed over quality
+            # Output options
             '-vf', f'fps={self.config.fps},scale={self.config.width}:{self.config.height}',
             '-pix_fmt', 'bgr24',
             '-f', 'rawvideo',
-            '-vsync', 'drop',                # Drop frames to maintain timing
-            '-an',                            # No audio
+            '-fps_mode', 'cfr',             # Constant frame rate (replaces deprecated -vsync)
+            '-an',                          # No audio
             '-'
         ]
         return cmd
@@ -154,7 +163,7 @@ class FFmpegStream:
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                bufsize=0  # CRITICAL: No buffering for minimum latency
+                bufsize=10**7  # 10MB buffer for large frames (was 0 - too small)
             )
 
             # Wait briefly and check if running

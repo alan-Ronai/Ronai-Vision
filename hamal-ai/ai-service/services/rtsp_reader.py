@@ -133,35 +133,51 @@ class FFmpegRTSPReader:
         return None
 
     def _build_ffmpeg_command(self) -> list:
-        """Build FFmpeg command for RTSP reading."""
+        """Build FFmpeg command with H264 error recovery."""
         # Check if this is an RTSP/network stream vs a local file
         is_network_stream = self.rtsp_url.startswith(('rtsp://', 'http://', 'https://', 'rtmp://', 'udp://'))
 
         cmd = [
             'ffmpeg',
             '-hide_banner',
-            '-loglevel', 'warning',
+            '-loglevel', 'warning',  # Show warnings but reduce spam
         ]
 
         # Add RTSP-specific options only for network streams
         if is_network_stream:
             cmd.extend([
+                # RTSP transport - TCP is more reliable for H264
                 '-rtsp_transport', 'tcp' if self.config.tcp_transport else 'udp',
-                '-fflags', 'nobuffer',
+                '-rtsp_flags', 'prefer_tcp',
+                '-timeout', '5000000',          # 5 second timeout (in microseconds)
+
+                # Buffer settings - balance between latency and stability
+                # NOTE: nobuffer causes H264 decode errors - using genpts+discardcorrupt instead
+                '-fflags', '+genpts+discardcorrupt',  # Generate PTS, discard corrupt packets
                 '-flags', 'low_delay',
-                '-max_delay', '500000',
-                '-analyzeduration', '1000000',
-                '-probesize', '1000000',
+
+                # Moderate probe/analyze - not too aggressive for camera compatibility
+                '-probesize', '2000000',        # 2MB probe (reduced for compatibility)
+                '-analyzeduration', '1000000',  # 1s analysis (reduced)
+
+                # H264 error handling - CRITICAL for corrupted streams
+                '-err_detect', 'ignore_err',    # Continue despite errors
+                '-ec', 'guess_mvs+deblock',     # Error concealment: guess motion vectors + deblock
+
+                # Reasonable buffer to handle network jitter
+                '-max_delay', '500000',         # 500ms max delay
+                '-reorder_queue_size', '5',     # Reduced from 10 for lower latency
             ])
 
         # Input file/stream
         cmd.extend([
             '-i', self.rtsp_url,
 
-            # Output options - scale and reduce framerate
+            # Output options
             '-vf', f'fps={self.config.fps},scale={self.config.width}:{self.config.height}',
             '-pix_fmt', 'bgr24',
             '-f', 'rawvideo',
+            '-fps_mode', 'cfr' if is_network_stream else 'passthrough',  # CFR for streams, passthrough for files
             '-an',  # No audio
             '-'
         ])
@@ -186,7 +202,7 @@ class FFmpegRTSPReader:
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                bufsize=10**8
+                bufsize=10**7  # 10MB buffer for large frames
             )
 
             # Wait a bit and check if process is running

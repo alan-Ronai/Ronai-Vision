@@ -103,14 +103,55 @@ class FrameBuffer:
             **self._stats
         }
 
+    def _is_frame_corrupted(self, frame: np.ndarray, threshold: float = None) -> bool:
+        """Check if frame is obviously corrupted (mostly single color)."""
+        if threshold is None:
+            threshold = float(os.getenv("RTSP_CORRUPTION_THRESHOLD", "0.5"))
+
+        try:
+            # Check if frame is mostly green (common H264 corruption)
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+            # Green detection (H: 35-85, S: 50-255, V: 50-255)
+            green_mask = cv2.inRange(hsv, (35, 50, 50), (85, 255, 255))
+            green_ratio = np.count_nonzero(green_mask) / green_mask.size
+
+            # Black detection
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            black_ratio = np.count_nonzero(gray < 10) / gray.size
+
+            # If >50% green or >80% black, frame is likely corrupted
+            if green_ratio > threshold or black_ratio > 0.8:
+                return True
+
+            return False
+        except:
+            return False
+
     def _capture_loop(self):
-        """Main capture loop running in background thread."""
+        """Main capture loop with H264 error recovery."""
         cap = None
         reconnect_delay = 2.0
         frame_interval = 1.0 / self.target_fps
 
-        # Set FFmpeg options for RTSP
-        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+        # Get configurable RTSP settings from environment
+        probe_size = os.getenv("RTSP_PROBE_SIZE", "5000000")
+        analyze_duration = os.getenv("RTSP_ANALYZE_DURATION", "2000000")
+        buffer_size = int(os.getenv("RTSP_BUFFER_SIZE", "3"))
+        error_concealment = os.getenv("RTSP_ERROR_CONCEALMENT", "true").lower() == "true"
+        skip_corrupted = os.getenv("RTSP_SKIP_CORRUPTED_FRAMES", "true").lower() == "true"
+
+        # Set FFmpeg options for H264 error tolerance
+        if error_concealment:
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+                f"rtsp_transport;tcp|"
+                f"fflags;+genpts+discardcorrupt|"
+                f"err_detect;ignore_err|"
+                f"analyzeduration;{analyze_duration}|"
+                f"probesize;{probe_size}"
+            )
+        else:
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
 
         while self._running:
             try:
@@ -120,7 +161,7 @@ class FrameBuffer:
                     logger.info(f"Connecting to RTSP: {self.camera_id}")
 
                     cap = cv2.VideoCapture(self._full_url, cv2.CAP_FFMPEG)
-                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, buffer_size)
                     cap.set(cv2.CAP_PROP_FPS, self.target_fps)
 
                     if not cap.isOpened():
@@ -129,6 +170,11 @@ class FrameBuffer:
                         self._stats["errors"] += 1
                         time.sleep(reconnect_delay)
                         continue
+
+                    # Wait for keyframe - read and discard a few frames to stabilize
+                    logger.debug(f"Waiting for keyframe: {self.camera_id}")
+                    for _ in range(5):
+                        cap.read()
 
                     self._connected = True
                     self._error = None
@@ -140,13 +186,24 @@ class FrameBuffer:
 
                 if not ret or frame is None:
                     self._consecutive_read_errors += 1
-                    # Only log on first failure, every 10th failure, or before reconnect
+                    # Only log on first failure, every 10th failure
                     if self._consecutive_read_errors == 1 or self._consecutive_read_errors % 10 == 0:
                         logger.warning(f"Failed to read frame: {self.camera_id} (errors: {self._consecutive_read_errors})")
-                    self._connected = False
-                    cap.release()
-                    cap = None
+
+                    # Reconnect after 30 consecutive errors
+                    if self._consecutive_read_errors > 30:
+                        logger.warning(f"Reconnecting {self.camera_id} after {self._consecutive_read_errors} errors")
+                        self._connected = False
+                        cap.release()
+                        cap = None
                     time.sleep(0.5)
+                    continue
+
+                # Check for obviously corrupted frame (if enabled)
+                if skip_corrupted and self._is_frame_corrupted(frame):
+                    self._consecutive_read_errors += 1
+                    if self._consecutive_read_errors % 10 == 0:
+                        logger.debug(f"Skipping corrupted frame: {self.camera_id}")
                     continue
 
                 # Success - reset error counter
