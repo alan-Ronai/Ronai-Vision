@@ -330,6 +330,32 @@ class DetectionLoop:
                 f"⚠️ Universal ReID initialization failed: {e} - Universal ReID disabled"
             )
 
+        # CRITICAL: Per-Class Confidence Thresholds
+        # Different classes can have different minimum confidence scores
+        # Higher threshold = fewer false positives for that class
+        import os
+        self.class_confidence = {
+            "person": float(os.environ.get("CONF_PERSON", "0.35")),
+            "car": float(os.environ.get("CONF_CAR", "0.40")),
+            "truck": float(os.environ.get("CONF_TRUCK", "0.50")),
+            "bus": float(os.environ.get("CONF_BUS", "0.50")),
+            "motorcycle": float(os.environ.get("CONF_MOTORCYCLE", "0.40")),
+            "bicycle": float(os.environ.get("CONF_BICYCLE", "0.40")),
+        }
+
+        # Parse CLASS_CONFIDENCE env var if provided (format: "person:0.35,car:0.40,truck:0.50")
+        class_conf_str = os.environ.get("CLASS_CONFIDENCE", "")
+        if class_conf_str:
+            for item in class_conf_str.split(","):
+                if ":" in item:
+                    class_name, threshold = item.split(":")
+                    self.class_confidence[class_name.strip()] = float(threshold.strip())
+
+        logger.info("=== Per-Class Confidence Thresholds ===")
+        for cls, thresh in sorted(self.class_confidence.items()):
+            logger.info(f"  {cls}: {thresh:.2f}")
+        logger.info("========================================")
+
         # Use BoT-SORT tracker for advanced tracking
         self.bot_sort = get_bot_sort_tracker() if self.config.use_bot_sort else None
 
@@ -469,11 +495,14 @@ class DetectionLoop:
         5. Draw annotations and return results
         """
         try:
-            # STEP 1: Run YOLO with proper NMS to prevent duplicate/overlapping boxes
+            # STEP 1: Run YOLO with LOW base confidence
+            # We use the minimum of all class thresholds, then filter per-class below
+            base_confidence = min(self.class_confidence.values()) if self.class_confidence else self.config.yolo_confidence
+
             yolo_results = self.yolo(
                 frame,
                 verbose=False,
-                conf=self.config.yolo_confidence,  # Configurable threshold
+                conf=base_confidence,  # Low base threshold - filter per-class below
                 iou=0.4,  # Stricter NMS to prevent overlaps
                 max_det=50,  # Allow more detections
                 agnostic_nms=True,  # Merge overlapping boxes across classes
@@ -494,11 +523,20 @@ class DetectionLoop:
                 if label not in ALLOWED_CLASSES:
                     continue
 
+                # FILTER 2: Per-class confidence threshold
+                # Different classes have different minimum confidence requirements
+                min_conf_for_class = self.class_confidence.get(label, self.config.yolo_confidence)
+                if conf < min_conf_for_class:
+                    logger.debug(
+                        f"Filtered {label}: confidence {conf:.2f} < {min_conf_for_class:.2f}"
+                    )
+                    continue
+
                 # Convert from xyxy to xywh format
                 x1, y1, x2, y2 = xyxy
                 bbox = (x1, y1, x2 - x1, y2 - y1)
 
-                # FILTER 2: Skip tiny boxes (noise)
+                # FILTER 3: Skip tiny boxes (noise)
                 box_area = (x2 - x1) * (y2 - y1)
                 if box_area < MIN_BOX_AREA:
                     continue

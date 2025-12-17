@@ -83,8 +83,16 @@ def get_device():
 DEVICE = get_device()
 
 # Model paths
-MODEL_PATH = os.getenv("YOLO_MODEL", "yolo12n.pt")
-CONFIDENCE = float(os.getenv("YOLO_CONFIDENCE", "0.25"))
+MODEL_PATH = os.getenv("YOLO_MODEL", "yolo12m.pt")  # Upgraded from yolo12n for better accuracy
+CONFIDENCE = float(os.getenv("YOLO_CONFIDENCE", "0.35"))
+
+logger.info("=" * 60)
+logger.info("YOLO Detection Configuration")
+logger.info("=" * 60)
+logger.info(f"Model: {MODEL_PATH}")
+logger.info(f"Base Confidence: {CONFIDENCE:.2f}")
+logger.info(f"Device: {DEVICE}")
+logger.info("=" * 60)
 
 # Try to find model in various locations
 model_locations = [
@@ -101,7 +109,7 @@ for model_path in model_locations:
         logger.info(f"Loading YOLO model from: {model_path}")
         yolo = YOLO(model_path)
         yolo.to(DEVICE)
-        logger.info(f"✅ YOLO loaded on {DEVICE}")
+        logger.info(f"✅ YOLO {MODEL_PATH} loaded successfully on {DEVICE}")
         break
 
 if yolo is None:
