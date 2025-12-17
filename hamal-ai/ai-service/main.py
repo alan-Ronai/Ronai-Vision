@@ -1384,11 +1384,28 @@ async def detection_stats():
 
 @app.get("/detection/fps")
 async def get_fps_config():
-    """Get current FPS configuration."""
+    """
+    Get current FPS configuration.
+
+    Returns:
+        target_fps: Master FPS for RTSP readers (MUST match camera output!)
+        detection_fps: How often to run AI detection (can be lower than target)
+        stream_fps: Output stream FPS to frontend (can be lower than target)
+
+    Example:
+        Camera outputs 25 FPS → target_fps=25
+        Run detection at 15 FPS → detection_fps=15 (saves CPU)
+        Stream to UI at 15 FPS → stream_fps=15 (saves bandwidth)
+    """
     return {
         "target_fps": TARGET_FPS,
         "detection_fps": DETECTION_FPS,
-        "stream_fps": STREAM_FPS
+        "stream_fps": STREAM_FPS,
+        "description": {
+            "target_fps": "Master FPS setting - MUST match camera output FPS",
+            "detection_fps": "AI detection processing FPS (can be lower to save CPU)",
+            "stream_fps": "Output stream FPS to frontend (can be lower to save bandwidth)"
+        }
     }
 
 
@@ -1452,6 +1469,85 @@ async def reload_cameras():
     """Reload cameras from backend."""
     await auto_load_cameras()
     return {"status": "reloaded", "cameras": get_rtsp_manager().get_active_cameras()}
+
+
+@app.post("/detection/cleanup")
+async def cleanup_cameras():
+    """
+    Stop and cleanup all camera streams and detection loops.
+
+    Use this to stop zombie processes when cameras are deleted from UI
+    or when experiencing reconnect loops.
+    """
+    logger.info("Cleaning up all camera streams...")
+
+    # Stop all RTSP readers
+    rtsp_manager = get_rtsp_manager()
+    active_cameras = rtsp_manager.get_active_cameras()
+    for camera_id in active_cameras:
+        try:
+            rtsp_manager.remove_camera(camera_id)
+            logger.info(f"Stopped RTSP reader for {camera_id}")
+        except Exception as e:
+            logger.error(f"Error stopping {camera_id}: {e}")
+
+    # Stop FFmpeg manager streams
+    try:
+        ffmpeg_manager = get_ffmpeg_manager()
+        ffmpeg_manager.stop_all()
+        logger.info("Stopped all FFmpeg streams")
+    except Exception as e:
+        logger.error(f"Error stopping FFmpeg manager: {e}")
+
+    # Stop detection loop
+    try:
+        detection_loop = get_detection_loop()
+        if detection_loop:
+            detection_loop.stop()
+            logger.info("Stopped detection loop")
+    except Exception as e:
+        logger.error(f"Error stopping detection loop: {e}")
+
+    return {
+        "status": "cleaned",
+        "stopped_cameras": active_cameras,
+        "message": "All camera streams and processes stopped"
+    }
+
+
+@app.delete("/detection/camera/{camera_id}")
+async def stop_camera(camera_id: str):
+    """
+    Stop and remove a specific camera stream.
+
+    Use this when deleting a camera from the UI to ensure
+    all associated processes are properly terminated.
+    """
+    logger.info(f"Stopping camera: {camera_id}")
+
+    # Stop RTSP reader
+    try:
+        rtsp_manager = get_rtsp_manager()
+        rtsp_manager.remove_camera(camera_id)
+        logger.info(f"Stopped RTSP reader for {camera_id}")
+    except Exception as e:
+        logger.warning(f"RTSP reader not found for {camera_id}: {e}")
+
+    # Stop FFmpeg stream
+    try:
+        ffmpeg_manager = get_ffmpeg_manager()
+        stream = ffmpeg_manager.get_stream(camera_id)
+        if stream:
+            stream.stop()
+            logger.info(f"Stopped FFmpeg stream for {camera_id}")
+    except Exception as e:
+        logger.warning(f"FFmpeg stream not found for {camera_id}: {e}")
+
+    return {
+        "status": "stopped",
+        "camera_id": camera_id,
+        "message": f"Camera {camera_id} stopped and removed"
+    }
 
 
 @app.post("/detection/start/{camera_id}")

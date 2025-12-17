@@ -628,7 +628,7 @@ class DetectionLoop:
                     [d.bbox for d in vehicle_detections],
                 )
                 if recovered_vehicles:
-                    logger.info(
+                    logger.debug(
                         f"Recovered {len(recovered_vehicles)} vehicle detections"
                     )
                     vehicle_detections.extend(recovered_vehicles)
@@ -641,7 +641,7 @@ class DetectionLoop:
                     [d.bbox for d in person_detections],
                 )
                 if recovered_persons:
-                    logger.info(f"Recovered {len(recovered_persons)} person detections")
+                    logger.debug(f"Recovered {len(recovered_persons)} person detections")
                     person_detections.extend(recovered_persons)
 
             # STEP 3: Single BoT-SORT tracker update with merged detections
@@ -703,6 +703,8 @@ class DetectionLoop:
 
             # STEP 4: Weapon Detection - detect firearms and mark nearby persons as armed
             detected_weapons = []
+            armed_persons_this_frame = []  # Track armed persons for summary log
+
             if self.config.weapon_detector is not None:
                 try:
                     weapon_results = self.config.weapon_detector(
@@ -723,10 +725,6 @@ class DetectionLoop:
                                 "confidence": weapon_conf,
                                 "class": weapon_class,
                             }
-                        )
-
-                        logger.warning(
-                            f"⚠️ WEAPON DETECTED: {weapon_class} (conf: {weapon_conf:.2f})"
                         )
 
                         # Find persons near this weapon
@@ -764,10 +762,21 @@ class DetectionLoop:
                                                 track.metadata.update(person_meta)
                                                 break
 
-                                    logger.warning(
-                                        f"🚨 ARMED PERSON: Track {person.get('track_id')} "
-                                        f"detected with {weapon_class}"
-                                    )
+                                    # Add to armed persons list for summary log
+                                    armed_persons_this_frame.append({
+                                        "track_id": person.get('track_id'),
+                                        "weapon": weapon_class,
+                                        "conf": weapon_conf
+                                    })
+
+                    # Log summary (once per frame instead of per weapon/person)
+                    if detected_weapons:
+                        weapon_summary = ", ".join([f"{w['class']} ({w['confidence']:.2f})" for w in detected_weapons])
+                        logger.warning(f"⚠️ WEAPONS DETECTED: {len(detected_weapons)} weapon(s) - {weapon_summary}")
+
+                        if armed_persons_this_frame:
+                            armed_ids = [p['track_id'] for p in armed_persons_this_frame]
+                            logger.warning(f"🚨 ARMED PERSONS: {len(armed_persons_this_frame)} person(s) - Tracks: {', '.join(armed_ids)}")
 
                 except Exception as e:
                     logger.error(f"Weapon detection error: {e}")

@@ -168,6 +168,12 @@ class FFmpegRTSPReader:
                 '-max_delay', '500000',         # 500ms max delay
                 '-reorder_queue_size', '5',     # Reduced from 10 for lower latency
             ])
+        else:
+            # For local video files - loop infinitely
+            cmd.extend([
+                '-stream_loop', '-1',           # Loop video infinitely
+                '-re',                          # Read at native frame rate (prevents CPU spike)
+            ])
 
         # Input file/stream
         cmd.extend([
