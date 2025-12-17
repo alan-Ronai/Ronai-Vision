@@ -108,26 +108,37 @@ router.post('/', async (req, res) => {
       timestamp: new Date()
     };
 
-    const event = new Event(eventData);
-    await event.save();
+    let savedEvent = eventData;
 
-    // Emit to all connected clients
+    // Try to save to MongoDB if connected
+    try {
+      const event = new Event(eventData);
+      savedEvent = await event.save();
+    } catch (dbError) {
+      // MongoDB not available - continue without saving
+      console.warn('⚠️  MongoDB not available, event not saved:', dbError.message);
+      // Add a temporary ID for the event
+      savedEvent._id = `temp-${Date.now()}`;
+      savedEvent.createdAt = new Date();
+    }
+
+    // Emit to all connected clients (works even without MongoDB)
     const io = req.app.get('io');
-    io.emit('event:new', event.toObject());
+    io.emit('event:new', savedEvent);
 
     // Check if this triggers emergency mode
-    if (event.severity === 'critical') {
+    if (savedEvent.severity === 'critical') {
       console.log('🚨 CRITICAL EVENT - Triggering emergency mode');
       io.emit('emergency:start', {
-        eventId: event._id,
-        title: event.title,
-        details: event.details,
-        cameraId: event.cameraId,
-        timestamp: event.createdAt
+        eventId: savedEvent._id,
+        title: savedEvent.title,
+        details: savedEvent.details,
+        cameraId: savedEvent.cameraId,
+        timestamp: savedEvent.createdAt || savedEvent.timestamp
       });
     }
 
-    res.status(201).json(event);
+    res.status(201).json(savedEvent);
   } catch (error) {
     console.error('Error creating event:', error);
     res.status(500).json({ error: error.message });

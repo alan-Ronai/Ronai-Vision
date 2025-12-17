@@ -10,6 +10,7 @@ import logging
 import time
 import threading
 import cv2
+from pathlib import Path
 from typing import Optional, Callable, Dict, List
 from queue import Queue, Empty
 from dataclasses import dataclass
@@ -22,7 +23,7 @@ class RTSPConfig:
     """RTSP reader configuration."""
     width: int = 1280
     height: int = 720
-    fps: int = 5
+    fps: int = 15  # Increased from 5 to 15 for smoother streaming
     reconnect_delay: float = 3.0
     max_reconnect_attempts: int = -1  # -1 = infinite
     tcp_transport: bool = True
@@ -41,6 +42,37 @@ class FFmpegRTSPReader:
         on_frame: Optional[Callable[[str, np.ndarray], None]] = None
     ):
         self.camera_id = camera_id
+
+        # Resolve local file paths relative to Ronai-Vision root
+        if not rtsp_url.startswith(('rtsp://', 'http://', 'https://', 'rtmp://', 'udp://')):
+            # Local file path - resolve relative to Ronai-Vision root
+            # Current file is at: Ronai-Vision/hamal-ai/ai-service/services/rtsp_reader.py
+            # Root is three levels up: ../../../
+            script_dir = Path(__file__).parent
+            project_root = script_dir.parent.parent.parent  # Ronai-Vision root
+
+            # Clean up the path (remove leading slash if present for relative paths)
+            clean_path = rtsp_url.lstrip('/')
+
+            # Try as relative path first (from project root)
+            video_path = project_root / clean_path
+
+            # If doesn't exist as relative, try as absolute
+            if not video_path.exists() and Path(rtsp_url).is_absolute():
+                video_path = Path(rtsp_url)
+
+            # Convert to absolute path
+            resolved_path = str(video_path.absolute())
+
+            # Check if file exists
+            if video_path.exists():
+                logger.info(f"Camera {camera_id}: ✓ Resolved local video: {resolved_path}")
+                rtsp_url = resolved_path
+            else:
+                logger.error(f"Camera {camera_id}: ✗ Video file not found: {resolved_path}")
+                logger.error(f"Camera {camera_id}: Looked in project root: {project_root}")
+                # Keep original path and let FFmpeg fail with proper error
+
         self.rtsp_url = rtsp_url
         self.config = config or RTSPConfig()
         self.on_frame = on_frame
@@ -102,18 +134,28 @@ class FFmpegRTSPReader:
 
     def _build_ffmpeg_command(self) -> list:
         """Build FFmpeg command for RTSP reading."""
+        # Check if this is an RTSP/network stream vs a local file
+        is_network_stream = self.rtsp_url.startswith(('rtsp://', 'http://', 'https://', 'rtmp://', 'udp://'))
+
         cmd = [
             'ffmpeg',
             '-hide_banner',
             '-loglevel', 'warning',
+        ]
 
-            # Input options
-            '-rtsp_transport', 'tcp' if self.config.tcp_transport else 'udp',
-            '-fflags', 'nobuffer',
-            '-flags', 'low_delay',
-            '-max_delay', '500000',
-            '-analyzeduration', '1000000',
-            '-probesize', '1000000',
+        # Add RTSP-specific options only for network streams
+        if is_network_stream:
+            cmd.extend([
+                '-rtsp_transport', 'tcp' if self.config.tcp_transport else 'udp',
+                '-fflags', 'nobuffer',
+                '-flags', 'low_delay',
+                '-max_delay', '500000',
+                '-analyzeduration', '1000000',
+                '-probesize', '1000000',
+            ])
+
+        # Input file/stream
+        cmd.extend([
             '-i', self.rtsp_url,
 
             # Output options - scale and reduce framerate
@@ -122,7 +164,8 @@ class FFmpegRTSPReader:
             '-f', 'rawvideo',
             '-an',  # No audio
             '-'
-        ]
+        ])
+
         return cmd
 
     def _connect(self) -> bool:

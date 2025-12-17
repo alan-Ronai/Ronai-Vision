@@ -25,8 +25,8 @@ export default function MainCamera() {
 
     // Use annotated stream (with bboxes) or raw stream
     const endpoint = streamMode === 'annotated'
-      ? `${AI_SERVICE_URL}/api/stream/annotated/${encodeURIComponent(selectedCamera)}?fps=5`
-      : `${AI_SERVICE_URL}/api/stream/sse/${encodeURIComponent(selectedCamera)}?fps=5`;
+      ? `${AI_SERVICE_URL}/api/stream/annotated/${encodeURIComponent(selectedCamera)}?fps=15`
+      : `${AI_SERVICE_URL}/api/stream/sse/${encodeURIComponent(selectedCamera)}?fps=15`;
 
     console.log('Connecting to stream:', endpoint);
 

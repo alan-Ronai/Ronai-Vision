@@ -157,6 +157,35 @@ class RTSPStreamManager:
                 logger.info(f"Stream already running for {camera_id}")
                 return True  # Already running
 
+        # Check if this is a local file path (not a network URL)
+        if not rtsp_url.startswith(('rtsp://', 'http://', 'https://', 'rtmp://', 'udp://')):
+            # Local file path - resolve relative to Ronai-Vision root
+            # Current file is at: Ronai-Vision/hamal-ai/ai-service/main.py
+            # Root is two levels up: ../../
+            script_dir = Path(__file__).parent
+            project_root = script_dir.parent.parent  # Ronai-Vision root
+
+            # Clean up the path (remove leading slash if present for relative paths)
+            clean_path = rtsp_url.lstrip('/')
+
+            # Try as relative path first (from project root)
+            video_path = project_root / clean_path
+
+            # If doesn't exist as relative, try as absolute
+            if not video_path.exists() and Path(rtsp_url).is_absolute():
+                video_path = Path(rtsp_url)
+
+            # Convert to absolute path
+            rtsp_url = str(video_path.absolute())
+
+            # Check if file exists
+            if not video_path.exists():
+                logger.error(f"Video file not found: {rtsp_url}")
+                logger.error(f"Looked in project root: {project_root}")
+                return False
+
+            logger.info(f"✓ Resolved local video path: {rtsp_url}")
+
         # Build full RTSP URL with credentials if not already in URL
         full_url = rtsp_url
         if username and password and "@" not in rtsp_url:
@@ -1167,8 +1196,8 @@ async def startup_event():
     # Initialize detection loop
     loop_config = LoopConfig(
         backend_url=BACKEND_URL,
-        detection_fps=2,  # Process 2 frames per second for detection
-        stream_fps=5,     # Stream at 5 fps
+        detection_fps=15,  # Process all frames (15 FPS) for continuous analysis
+        stream_fps=15,     # Stream at 15 fps for smooth viewing
         draw_bboxes=True,
         send_events=True
     )
@@ -1386,7 +1415,7 @@ async def reset_stable_tracker():
 
 
 @app.get("/api/stream/annotated/{camera_id}")
-async def stream_annotated(camera_id: str, fps: int = 5):
+async def stream_annotated(camera_id: str, fps: int = 15):
     """
     Stream annotated frames with bounding boxes via SSE.
     This shows the AI detection results in real-time.

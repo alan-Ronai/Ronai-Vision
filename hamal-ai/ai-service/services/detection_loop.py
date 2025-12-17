@@ -228,8 +228,8 @@ class BBoxDrawer:
 class LoopConfig:
     """Detection loop configuration."""
     backend_url: str = "http://localhost:3000"
-    detection_fps: int = 2  # Frames per second for detection
-    stream_fps: int = 5     # Frames per second for streaming
+    detection_fps: int = 15  # Process all frames (15 FPS) for continuous analysis
+    stream_fps: int = 15     # Stream at 15 fps for smooth viewing
     alert_cooldown: float = 30.0
     gemini_cooldown: float = 5.0  # Don't analyze same track more than once per 5 sec
     event_cooldown: float = 5.0  # Minimum seconds between events per camera
@@ -382,8 +382,8 @@ class DetectionLoop:
         - Same object won't be reported twice
         """
         try:
-            # Run YOLO
-            yolo_results = self.yolo(frame, verbose=False, conf=0.4)[0]
+            # Run YOLO with higher confidence threshold to reduce false detections
+            yolo_results = self.yolo(frame, verbose=False, conf=0.55)[0]
 
             # Separate detections
             vehicle_dets = []
