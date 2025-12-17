@@ -13,6 +13,13 @@ from .frame_buffer import (
     get_frame_buffer_manager
 )
 
+from .bot_sort_tracker import (
+    Detection,
+    Track,
+    BoTSORTTracker,
+    get_bot_sort_tracker
+)
+
 __all__ = [
     "StableTracker",
     "TrackedObject",
@@ -20,5 +27,9 @@ __all__ = [
     "reset_stable_tracker",
     "FrameBuffer",
     "FrameBufferManager",
-    "get_frame_buffer_manager"
+    "get_frame_buffer_manager",
+    "Detection",
+    "Track",
+    "BoTSORTTracker",
+    "get_bot_sort_tracker"
 ]

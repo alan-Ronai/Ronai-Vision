@@ -10,6 +10,7 @@ torchvision>=0.15.0
 numpy>=1.24.0
 opencv-python-headless>=4.8.0
 pillow>=10.0.0
+scipy>=1.11.0  # For Hungarian assignment in BoT-SORT
 
 # ReID Tracking
 deep-sort-realtime>=1.3.2

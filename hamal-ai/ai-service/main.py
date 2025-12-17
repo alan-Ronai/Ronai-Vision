@@ -1419,6 +1419,7 @@ async def stream_annotated(camera_id: str, fps: int = 15):
     """
     Stream annotated frames with bounding boxes via SSE.
     This shows the AI detection results in real-time.
+    Smooth delivery with frame deduplication.
     """
     import base64
 
@@ -1430,16 +1431,35 @@ async def stream_annotated(camera_id: str, fps: int = 15):
     frame_interval = 1.0 / fps
 
     async def generate():
+        last_frame_id = None
+        last_send_time = time.time()
+
         while True:
-            frame = detection_loop.get_annotated_frame(camera_id)
+            current_time = time.time()
+            elapsed = current_time - last_send_time
 
-            if frame is not None:
-                ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-                if ret:
-                    frame_b64 = base64.b64encode(jpeg.tobytes()).decode('utf-8')
-                    yield f"data: {{\"frame\": \"{frame_b64}\"}}\n\n"
+            # Only send if enough time has elapsed (smooth pacing)
+            if elapsed >= frame_interval:
+                frame = detection_loop.get_annotated_frame(camera_id)
 
-            await asyncio.sleep(frame_interval)
+                if frame is not None:
+                    # Use frame hash to detect duplicates
+                    frame_id = hash(frame.tobytes())
+
+                    # Only send if it's a new frame (prevents bursts of duplicates)
+                    if frame_id != last_frame_id:
+                        ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                        if ret:
+                            frame_b64 = base64.b64encode(jpeg.tobytes()).decode('utf-8')
+                            yield f"data: {{\"frame\": \"{frame_b64}\"}}\n\n"
+                            last_frame_id = frame_id
+                            last_send_time = current_time
+                    else:
+                        # Same frame, wait for next interval
+                        last_send_time = current_time
+
+            # Small sleep to prevent CPU spinning
+            await asyncio.sleep(0.01)
 
     return StreamingResponse(
         generate(),
