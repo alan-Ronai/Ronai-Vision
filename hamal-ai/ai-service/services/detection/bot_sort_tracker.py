@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Configuration Constants
 MIN_HITS = 3  # Detections needed to confirm track
-MAX_LOST = 30  # Frames before deletion
+MAX_LOST = 15  # Frames before deletion (reduced from 30 for faster ghost cleanup = 1 second at 15fps)
 LAMBDA_APP = 0.7  # Appearance weight in cost matrix (only used when features exist)
 MAX_COST = 0.8  # Maximum cost for assignment (increased from 0.7 for better tolerance)
 MIN_IOU_THRESHOLD = 0.2  # Minimum IoU for matching (lowered from 0.3 for walking persons)
@@ -91,28 +91,20 @@ class KalmanBoxTracker:
     def predict(self, dt: float = 1/15) -> Tuple[float, float, float, float]:
         """Predict next state using constant velocity model.
 
-        CRITICAL FIX: Don't apply velocity for stationary objects to prevent drift.
-        Dampen velocity to prevent overshoot for moving objects.
+        Use full velocity for position prediction to properly track moving objects.
+        This helps the predicted position match the actual next detection.
 
         Returns:
             Predicted bbox (x, y, w, h)
         """
-        # Check velocity magnitude to avoid drifting stationary objects
-        velocity_magnitude = np.sqrt(self.state[4]**2 + self.state[5]**2)
+        # Apply velocity with moderate damping for position
+        # Full velocity (1.0) helps prediction follow moving objects
+        self.F[0, 4] = 1.0  # cx += vx (full velocity for accurate prediction)
+        self.F[1, 5] = 1.0  # cy += vy (this helps match moving objects!)
 
-        # Update state transition matrix based on velocity
-        if velocity_magnitude > 1.0:  # Only apply if moving > 1 pixel/frame
-            # Dampen velocity to prevent overshoot (0.8 instead of 1.0)
-            self.F[0, 4] = 0.8  # cx += vx * 0.8
-            self.F[1, 5] = 0.8  # cy += vy * 0.8
-        else:
-            # Stationary object - don't add velocity to prediction
-            self.F[0, 4] = 0.0
-            self.F[1, 5] = 0.0
-
-        # Size changes slowly (prevents box size oscillation)
-        self.F[2, 6] = 0.3  # w += vw * 0.3
-        self.F[3, 7] = 0.3  # h += vh * 0.3
+        # Size changes slower to prevent box size oscillation
+        self.F[2, 6] = 0.5  # w += vw * 0.5
+        self.F[3, 7] = 0.5  # h += vh * 0.5
 
         # Prediction step
         self.state = self.F @ self.state
@@ -214,14 +206,10 @@ class Track:
         self.metadata = {}
         self.is_reported = False  # For "new object" event logic
 
-        # Track matching state (to prevent deletion of actively matched tracks)
-        self._matched_this_frame = False
-
     def predict(self, dt: float = 1/15):
         """Predict next position using Kalman filter."""
         self.bbox = self.kalman.predict(dt)
         self.time_since_update += 1
-        self._matched_this_frame = False  # Reset at start of frame
 
         if self.time_since_update > 0:
             self.hit_streak = 0
@@ -235,9 +223,6 @@ class Track:
         # Update camera tracking (for cross-camera filtering)
         if camera_id:
             self.last_seen_camera = camera_id
-
-        # Mark as matched this frame (prevents premature deletion)
-        self._matched_this_frame = True
 
         # Update confidence
         self.confidence = detection.confidence
@@ -258,7 +243,7 @@ class Track:
         # Update state
         self.hits += 1
         self.hit_streak += 1
-        self.time_since_update = 0
+        self.time_since_update = 0  # Reset - this track was matched!
         self.last_seen = time.time()
 
         # State transition: tentative → confirmed
@@ -274,22 +259,19 @@ class Track:
     def should_delete(self) -> bool:
         """Check if track should be deleted.
 
-        CRITICAL: Never delete a track that was just matched this frame.
-        This prevents ID switching when detections are still happening.
+        Simple logic:
+        - Delete if not matched for MAX_LOST frames
+        - Delete if low confidence AND not being matched
         """
-        # NEVER delete a track that was just matched
-        if self._matched_this_frame:
-            return False
-
-        # Delete if lost for too long
+        # Delete if lost for too long (not matched for MAX_LOST frames)
         if self.time_since_update > MAX_LOST:
             return True
 
-        # Delete if consistently low confidence AND not recently matched
-        if (len(self.confidence_history) >= LOW_CONF_MAX_FRAMES and
-            self.avg_confidence < MIN_CONFIDENCE_HISTORY and
-            self.time_since_update > 5):  # Only if missed for 5+ frames
-            logger.info(f"Deleting track {self.track_id} due to low confidence: {self.avg_confidence:.2f}")
+        # Delete if consistently low confidence AND not being matched recently
+        if (self.time_since_update > 5 and  # Not matched for 5+ frames
+            len(self.confidence_history) >= LOW_CONF_MAX_FRAMES and
+            self.avg_confidence < MIN_CONFIDENCE_HISTORY):
+            logger.debug(f"Deleting track {self.track_id} due to low confidence: {self.avg_confidence:.2f}")
             return True
 
         return False
