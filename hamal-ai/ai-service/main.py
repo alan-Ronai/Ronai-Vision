@@ -94,6 +94,33 @@ logger.info(f"Base Confidence: {CONFIDENCE:.2f}")
 logger.info(f"Device: {DEVICE}")
 logger.info("=" * 60)
 
+# FPS Configuration
+TARGET_FPS = int(os.getenv("TARGET_FPS", "15"))
+DETECTION_FPS = int(os.getenv("DETECTION_FPS", str(TARGET_FPS)))
+STREAM_FPS = int(os.getenv("STREAM_FPS", str(TARGET_FPS)))
+
+def get_target_fps() -> int:
+    """Get the target FPS for RTSP readers and cameras."""
+    return TARGET_FPS
+
+def validate_fps(camera_fps: int, target_fps: int) -> int:
+    """Ensure target FPS doesn't exceed camera FPS."""
+    if target_fps > camera_fps:
+        logger.warning(
+            f"Target FPS ({target_fps}) > Camera FPS ({camera_fps}). "
+            f"Lowering to camera FPS."
+        )
+        return camera_fps
+    return target_fps
+
+logger.info("=" * 60)
+logger.info("FPS Configuration")
+logger.info("=" * 60)
+logger.info(f"Target FPS (RTSP/Camera): {TARGET_FPS}")
+logger.info(f"Detection FPS:            {DETECTION_FPS}")
+logger.info(f"Stream FPS:               {STREAM_FPS}")
+logger.info("=" * 60)
+
 # Try to find model in various locations
 model_locations = [
     MODEL_PATH,
@@ -284,7 +311,9 @@ class RTSPStreamManager:
                         self.streams[camera_id]["error"] = None
             else:
                 consecutive_errors += 1
-                logger.warning(f"Failed to read frame for {camera_id} ({consecutive_errors}/{max_consecutive_errors})")
+                # Only log on first failure, every 10th failure, or when reaching threshold
+                if consecutive_errors == 1 or consecutive_errors % 10 == 0 or consecutive_errors >= max_consecutive_errors:
+                    logger.warning(f"Failed to read frame for {camera_id} ({consecutive_errors}/{max_consecutive_errors})")
 
                 if consecutive_errors >= max_consecutive_errors:
                     logger.warning(f"Too many errors, attempting reconnect for {camera_id}")
@@ -408,8 +437,8 @@ async def generate_mjpeg_frames(camera_id: str, fps: int = 15):
         # Get frame from FFmpeg RTSP reader
         frame = rtsp_manager.get_frame(camera_id)
         if frame is not None:
-            # Encode frame as JPEG
-            ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            # Encode frame as JPEG (lower quality for reduced latency)
+            ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
             if ret:
                 frame_count += 1
                 if frame_count % 100 == 0:
@@ -417,7 +446,7 @@ async def generate_mjpeg_frames(camera_id: str, fps: int = 15):
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
         else:
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.01)  # Reduced from 0.1 for lower latency
 
 
 async def generate_ffmpeg_mjpeg_frames(camera_id: str, rtsp_url: str, fps: int = 15):
@@ -449,8 +478,8 @@ async def generate_ffmpeg_mjpeg_frames(camera_id: str, rtsp_url: str, fps: int =
 
         frame, frame_time = stream.get_frame()
         if frame is not None:
-            # Encode frame as JPEG
-            ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            # Encode frame as JPEG (lower quality for reduced latency)
+            ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
             if ret:
                 frame_count += 1
                 if frame_count % 100 == 0:
@@ -458,7 +487,7 @@ async def generate_ffmpeg_mjpeg_frames(camera_id: str, rtsp_url: str, fps: int =
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
         else:
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.01)  # Reduced from 0.1 for lower latency
 
 
 async def generate_mjpeg_frames_buffered(camera_id: str, rtsp_url: str, fps: int = 15,
@@ -493,8 +522,8 @@ async def generate_mjpeg_frames_buffered(camera_id: str, rtsp_url: str, fps: int
 
         frame = buffer.get_frame()
         if frame is not None:
-            # Encode frame as JPEG
-            ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            # Encode frame as JPEG (lower quality for reduced latency)
+            ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
             if ret:
                 frame_count += 1
                 if frame_count % 100 == 0:
@@ -502,7 +531,7 @@ async def generate_mjpeg_frames_buffered(camera_id: str, rtsp_url: str, fps: int
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
         else:
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.01)  # Reduced from 0.1 for lower latency
 
 
 @app.get("/api/stream/mjpeg/{camera_id}")
@@ -539,7 +568,7 @@ async def stream_mjpeg(camera_id: str, fps: int = 15):
                     raise HTTPException(400, f"Camera {camera_id} has no RTSP URL")
 
                 # Start the FFmpeg reader
-                config = RTSPConfig(width=1280, height=720, fps=15, tcp_transport=True)
+                config = RTSPConfig(width=1280, height=720, fps=TARGET_FPS, tcp_transport=True)
                 rtsp_manager.add_camera(camera_id, rtsp_url, config)
 
                 # Wait for connection
@@ -697,7 +726,7 @@ async def get_snapshot(camera_id: str):
     if frame is None:
         raise HTTPException(503, f"No frame available for {camera_id}")
 
-    ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
     if not ret:
         raise HTTPException(500, "Failed to encode frame")
 
@@ -760,8 +789,8 @@ async def stream_sse(camera_id: str, fps: int = 5):
                 frame = stream_manager.get_frame(camera_id)
 
                 if frame is not None:
-                    # Encode as JPEG with moderate quality
-                    ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                    # Encode as JPEG (lower quality for reduced latency)
+                    ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
                     if ret:
                         # Convert to base64
                         frame_b64 = base64.b64encode(jpeg.tobytes()).decode('utf-8')
@@ -774,7 +803,7 @@ async def stream_sse(camera_id: str, fps: int = 5):
                     if error_count >= max_errors:
                         yield f"data: {{\"error\": \"No frames available\"}}\n\n"
                         break
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.1)  # Reduced from 0.5 for lower latency
 
             except Exception as e:
                 logger.error(f"SSE error for {camera_id}: {e}")
@@ -1301,7 +1330,7 @@ async def auto_load_cameras():
                 config = RTSPConfig(
                     width=1280,
                     height=720,
-                    fps=5,
+                    fps=TARGET_FPS,
                     tcp_transport=True
                 )
 
@@ -1353,6 +1382,71 @@ async def detection_stats():
     }
 
 
+@app.get("/detection/fps")
+async def get_fps_config():
+    """Get current FPS configuration."""
+    return {
+        "target_fps": TARGET_FPS,
+        "detection_fps": DETECTION_FPS,
+        "stream_fps": STREAM_FPS
+    }
+
+
+@app.post("/detection/fps")
+async def update_fps_config(
+    target_fps: Optional[int] = None,
+    detection_fps: Optional[int] = None,
+    stream_fps: Optional[int] = None
+):
+    """
+    Update FPS configuration.
+
+    Note: This updates the in-memory configuration. To persist changes,
+    update the .env file and restart the service.
+
+    Args:
+        target_fps: Target FPS for RTSP readers and cameras (5-30)
+        detection_fps: Detection processing FPS (5-30)
+        stream_fps: Stream output FPS (5-30)
+    """
+    global TARGET_FPS, DETECTION_FPS, STREAM_FPS
+
+    updated = {}
+
+    if target_fps is not None:
+        if not 5 <= target_fps <= 30:
+            raise HTTPException(400, "target_fps must be between 5 and 30")
+        TARGET_FPS = target_fps
+        updated["target_fps"] = target_fps
+
+    if detection_fps is not None:
+        if not 5 <= detection_fps <= 30:
+            raise HTTPException(400, "detection_fps must be between 5 and 30")
+        DETECTION_FPS = detection_fps
+        updated["detection_fps"] = detection_fps
+
+    if stream_fps is not None:
+        if not 5 <= stream_fps <= 30:
+            raise HTTPException(400, "stream_fps must be between 5 and 30")
+        STREAM_FPS = stream_fps
+        updated["stream_fps"] = stream_fps
+
+    if not updated:
+        raise HTTPException(400, "No FPS values provided to update")
+
+    logger.info(f"FPS configuration updated: {updated}")
+    return {
+        "status": "updated",
+        "changes": updated,
+        "current": {
+            "target_fps": TARGET_FPS,
+            "detection_fps": DETECTION_FPS,
+            "stream_fps": STREAM_FPS
+        },
+        "note": "Changes are in-memory only. Update .env file to persist across restarts."
+    }
+
+
 @app.post("/detection/reload")
 async def reload_cameras():
     """Reload cameras from backend."""
@@ -1376,7 +1470,7 @@ async def start_camera_detection(camera_id: str):
             if not rtsp_url:
                 raise HTTPException(400, f"Camera {camera_id} has no RTSP URL")
 
-            config = RTSPConfig(width=1280, height=720, fps=5, tcp_transport=True)
+            config = RTSPConfig(width=1280, height=720, fps=TARGET_FPS, tcp_transport=True)
             get_rtsp_manager().add_camera(camera_id, rtsp_url, config)
 
             return {"status": "started", "camera_id": camera_id}
@@ -1591,7 +1685,7 @@ async def stream_annotated(camera_id: str, fps: int = 15):
 
                     # Only send if it's a new frame (prevents bursts of duplicates)
                     if frame_id != last_frame_id:
-                        ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                        ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
                         if ret:
                             frame_b64 = base64.b64encode(jpeg.tobytes()).decode('utf-8')
                             yield f"data: {{\"frame\": \"{frame_b64}\"}}\n\n"

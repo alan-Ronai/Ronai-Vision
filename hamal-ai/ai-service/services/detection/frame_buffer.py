@@ -39,6 +39,7 @@ class FrameBuffer:
         self._last_frame_time = 0.0
         self._connected = False
         self._error: Optional[str] = None
+        self._consecutive_read_errors = 0
 
         # Build full URL with credentials
         self._full_url = self._build_url()
@@ -138,12 +139,18 @@ class FrameBuffer:
                 ret, frame = cap.read()
 
                 if not ret or frame is None:
-                    logger.warning(f"Failed to read frame: {self.camera_id}")
+                    self._consecutive_read_errors += 1
+                    # Only log on first failure, every 10th failure, or before reconnect
+                    if self._consecutive_read_errors == 1 or self._consecutive_read_errors % 10 == 0:
+                        logger.warning(f"Failed to read frame: {self.camera_id} (errors: {self._consecutive_read_errors})")
                     self._connected = False
                     cap.release()
                     cap = None
                     time.sleep(0.5)
                     continue
+
+                # Success - reset error counter
+                self._consecutive_read_errors = 0
 
                 # Update frame buffer
                 with self._frame_lock:

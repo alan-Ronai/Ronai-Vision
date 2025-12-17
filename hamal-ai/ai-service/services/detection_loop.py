@@ -365,7 +365,13 @@ class DetectionLoop:
             logger.info("✅ BoT-SORT tracker reset on startup - cleared ghost tracks")
 
         self._running = False
-        self._frame_queue: Queue = Queue(maxsize=50)
+
+        # CRITICAL: Latest-frame-only storage (eliminates 2-3 second queue delay!)
+        # Instead of FIFO queue that builds up frames, we only keep the LATEST frame per camera
+        # This ensures we always process the most recent frame, not stale frames from 3 seconds ago
+        self._latest_frames: Dict[str, Tuple[np.ndarray, float]] = {}  # {camera_id: (frame, timestamp)}
+        self._latest_frames_lock = threading.Lock()
+
         self._result_queue: Queue = Queue(maxsize=20)
         self._last_alert: Dict[str, float] = {}
         self._last_gemini: Dict[str, float] = {}
@@ -385,17 +391,23 @@ class DetectionLoop:
             "events_sent": 0,
             "events_rate_limited": 0,
             "gemini_calls": 0,
+            "frames_dropped_stale": 0,  # Count of stale frames dropped
         }
 
         # Recovery throttling
         self._recovery_counter = 0
 
+        # Stale frame threshold (configurable)
+        self._stale_frame_threshold = float(os.environ.get("STALE_FRAME_THRESHOLD_MS", "300")) / 1000.0
+
     def on_frame(self, camera_id: str, frame: np.ndarray):
-        """Callback when frame received from RTSP reader."""
-        try:
-            self._frame_queue.put_nowait((camera_id, frame, time.time()))
-        except:
-            pass  # Queue full, drop frame
+        """Callback when frame received from RTSP reader.
+
+        CRITICAL: Stores only the LATEST frame per camera (overwrites previous).
+        This prevents frame queue buildup and ensures we process fresh frames only.
+        """
+        with self._latest_frames_lock:
+            self._latest_frames[camera_id] = (frame.copy(), time.time())
 
     def get_annotated_frame(self, camera_id: str) -> Optional[np.ndarray]:
         """Get latest annotated frame for streaming."""
@@ -429,7 +441,11 @@ class DetectionLoop:
         logger.info("Detection loop stopped")
 
     def _process_loop(self):
-        """Process frames in background thread (blocking operations)."""
+        """Process frames in background thread (blocking operations).
+
+        CRITICAL: Uses latest-frame-only approach to minimize latency.
+        Always processes the most recent frame available, skipping stale frames.
+        """
         logger.info("Detection processing thread started")
 
         frame_interval = 1.0 / self.config.detection_fps
@@ -437,28 +453,51 @@ class DetectionLoop:
 
         while self._running:
             try:
-                # Get frame from queue
-                try:
-                    camera_id, frame, timestamp = self._frame_queue.get(timeout=0.5)
-                except Empty:
+                # Get list of cameras that have frames waiting
+                with self._latest_frames_lock:
+                    cameras_with_frames = list(self._latest_frames.keys())
+
+                if not cameras_with_frames:
+                    time.sleep(0.01)  # Small sleep if no frames
                     continue
 
-                # Rate limit per camera
-                last_time = last_process_time.get(camera_id, 0)
-                if time.time() - last_time < frame_interval:
-                    # Still store frame for streaming (with minimal annotation)
-                    if self.config.draw_bboxes:
-                        annotated = self.drawer.draw_status_overlay(
-                            frame, camera_id, 0, 0, 0
+                # Process each camera's latest frame
+                for camera_id in cameras_with_frames:
+                    # Get and remove the latest frame
+                    with self._latest_frames_lock:
+                        frame_data = self._latest_frames.pop(camera_id, None)
+
+                    if frame_data is None:
+                        continue
+
+                    frame, timestamp = frame_data
+
+                    # CRITICAL: Skip stale frames (older than threshold)
+                    # This prevents processing old frames that are no longer relevant
+                    frame_age = time.time() - timestamp
+                    if frame_age > self._stale_frame_threshold:
+                        logger.debug(
+                            f"Dropped stale frame from {camera_id} (age: {frame_age:.3f}s)"
                         )
-                        with self._frame_lock:
-                            self._annotated_frames[camera_id] = annotated
-                    continue
+                        self._stats["frames_dropped_stale"] += 1
+                        continue
 
-                last_process_time[camera_id] = time.time()
+                    # Rate limit per camera
+                    last_time = last_process_time.get(camera_id, 0)
+                    if time.time() - last_time < frame_interval:
+                        # Still store frame for streaming (with minimal annotation)
+                        if self.config.draw_bboxes:
+                            annotated = self.drawer.draw_status_overlay(
+                                frame, camera_id, 0, 0, 0
+                            )
+                            with self._frame_lock:
+                                self._annotated_frames[camera_id] = annotated
+                        continue
 
-                # Run detection
-                result = self._detect_frame(camera_id, frame)
+                    last_process_time[camera_id] = time.time()
+
+                    # Run detection on LATEST frame
+                    result = self._detect_frame(camera_id, frame)
 
                 if result:
                     self._stats["frames_processed"] += 1
@@ -1410,7 +1449,7 @@ class DetectionLoop:
         stats = {
             **self._stats,
             "running": self._running,
-            "frame_queue_size": self._frame_queue.qsize(),
+            "pending_frames": len(self._latest_frames),
             "result_queue_size": self._result_queue.qsize(),
             "active_cameras": list(self._annotated_frames.keys()),
             "config": {
