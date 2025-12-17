@@ -247,7 +247,7 @@ class LoopConfig:
     draw_bboxes: bool = True
     send_events: bool = True
     use_bot_sort: bool = True  # Use BoT-SORT tracker with full Kalman filter
-    use_reid_recovery: bool = True  # Enable ReID-based detection recovery
+    use_reid_recovery: bool = False  # Enable ReID-based detection recovery (DISABLED for now)
 
 
 class DetectionLoop:
@@ -406,8 +406,14 @@ class DetectionLoop:
         5. Draw annotations and return results
         """
         try:
-            # STEP 1: Run YOLO with moderate confidence threshold (lowered to reduce flickering)
-            yolo_results = self.yolo(frame, verbose=False, conf=0.45)[0]
+            # STEP 1: Run YOLO with proper NMS to prevent duplicate/overlapping boxes
+            yolo_results = self.yolo(
+                frame,
+                verbose=False,
+                conf=0.55,       # Confidence threshold (higher = fewer false positives)
+                iou=0.5,         # NMS IoU threshold
+                max_det=30       # Max detections per image
+            )[0]
 
             # Separate detections by class
             vehicle_detections = []
@@ -694,9 +700,13 @@ class DetectionLoop:
                 f"Recovery for {object_type}: {len(lost_tracks)} lost tracks out of {len(active_tracks)} active"
             )
 
-            # STEP 2: Run low-threshold YOLO detection
+            # STEP 2: Run low-threshold YOLO detection with NMS
             low_conf_results = self.yolo(
-                frame, verbose=False, conf=RECOVERY_CONFIDENCE
+                frame,
+                verbose=False,
+                conf=RECOVERY_CONFIDENCE,
+                iou=0.45,  # NMS IoU threshold
+                max_det=30  # Limit recovery detections
             )[0]
 
             recovery_candidates = []
@@ -738,7 +748,35 @@ class DetectionLoop:
             if not recovery_candidates:
                 return []
 
-            # STEP 3: Match candidates to lost tracks
+            # STEP 3: Filter out candidates that overlap with recently detected tracks
+            # (to prevent duplicates)
+            active_detected_bboxes = [
+                t.bbox for t in active_tracks
+                if t.time_since_update == 0  # Recently detected
+            ]
+
+            filtered_candidates = []
+            for candidate in recovery_candidates:
+                # Check if this candidate overlaps significantly with any detected track
+                is_duplicate = False
+                for detected_bbox in active_detected_bboxes:
+                    if self._calculate_iou(candidate["bbox"], detected_bbox) > 0.5:
+                        is_duplicate = True
+                        break
+
+                if not is_duplicate:
+                    filtered_candidates.append(candidate)
+
+            logger.debug(
+                f"Recovery filtering: {len(recovery_candidates)} candidates → "
+                f"{len(filtered_candidates)} after deduplication"
+            )
+            recovery_candidates = filtered_candidates
+
+            if not recovery_candidates:
+                return []
+
+            # STEP 4: Match candidates to lost tracks
             recovered = []
             matched_candidate_indices = set()
 

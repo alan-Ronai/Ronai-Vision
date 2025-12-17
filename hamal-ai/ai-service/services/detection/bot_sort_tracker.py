@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 MIN_HITS = 3  # Detections needed to confirm track
 MAX_LOST = 30  # Frames before deletion
 LAMBDA_APP = 0.7  # Appearance weight in cost matrix
-MAX_COST = 0.9  # Maximum cost for assignment
+MAX_COST = 0.85  # Maximum cost for assignment (balanced)
 MIN_IOU_THRESHOLD = 0.3  # Minimum IoU for matching
 
 # Low confidence deletion
