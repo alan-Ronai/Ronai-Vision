@@ -25,12 +25,12 @@ logger = logging.getLogger(__name__)
 MIN_HITS = 3  # Detections needed to confirm track
 MAX_LOST = 30  # Frames before deletion
 LAMBDA_APP = 0.7  # Appearance weight in cost matrix (only used when features exist)
-MAX_COST = 0.7  # Maximum cost for assignment (lowered from 0.85 for motion-only matching)
+MAX_COST = 0.8  # Maximum cost for assignment (increased from 0.7 for better tolerance)
 MIN_IOU_THRESHOLD = 0.2  # Minimum IoU for matching (lowered from 0.3 for walking persons)
 
-# Low confidence deletion
-MIN_CONFIDENCE_HISTORY = 0.25  # Avg confidence threshold
-LOW_CONF_MAX_FRAMES = 30  # Frames at low conf before deletion
+# Low confidence deletion (more tolerant to prevent premature ID switching)
+MIN_CONFIDENCE_HISTORY = 0.20  # Avg confidence threshold (lowered from 0.25)
+LOW_CONF_MAX_FRAMES = 60  # Frames at low conf before deletion (increased from 30)
 
 
 @dataclass
@@ -91,19 +91,28 @@ class KalmanBoxTracker:
     def predict(self, dt: float = 1/15) -> Tuple[float, float, float, float]:
         """Predict next state using constant velocity model.
 
-        CRITICAL FIX: Use 1.0 for velocity in state transition, not dt.
-        The velocity is per-frame, so we use constant velocity model directly.
-        Using dt (0.067) would make velocity contribution negligible.
+        CRITICAL FIX: Don't apply velocity for stationary objects to prevent drift.
+        Dampen velocity to prevent overshoot for moving objects.
 
         Returns:
             Predicted bbox (x, y, w, h)
         """
-        # Update state transition matrix (constant velocity model)
-        # CRITICAL: Use 1.0, not dt! Velocity is already per-frame.
-        self.F[0, 4] = 1.0  # cx += vx
-        self.F[1, 5] = 1.0  # cy += vy
-        self.F[2, 6] = 1.0  # w += vw
-        self.F[3, 7] = 1.0  # h += vh
+        # Check velocity magnitude to avoid drifting stationary objects
+        velocity_magnitude = np.sqrt(self.state[4]**2 + self.state[5]**2)
+
+        # Update state transition matrix based on velocity
+        if velocity_magnitude > 1.0:  # Only apply if moving > 1 pixel/frame
+            # Dampen velocity to prevent overshoot (0.8 instead of 1.0)
+            self.F[0, 4] = 0.8  # cx += vx * 0.8
+            self.F[1, 5] = 0.8  # cy += vy * 0.8
+        else:
+            # Stationary object - don't add velocity to prediction
+            self.F[0, 4] = 0.0
+            self.F[1, 5] = 0.0
+
+        # Size changes slowly (prevents box size oscillation)
+        self.F[2, 6] = 0.3  # w += vw * 0.3
+        self.F[3, 7] = 0.3  # h += vh * 0.3
 
         # Prediction step
         self.state = self.F @ self.state
@@ -205,10 +214,14 @@ class Track:
         self.metadata = {}
         self.is_reported = False  # For "new object" event logic
 
+        # Track matching state (to prevent deletion of actively matched tracks)
+        self._matched_this_frame = False
+
     def predict(self, dt: float = 1/15):
         """Predict next position using Kalman filter."""
         self.bbox = self.kalman.predict(dt)
         self.time_since_update += 1
+        self._matched_this_frame = False  # Reset at start of frame
 
         if self.time_since_update > 0:
             self.hit_streak = 0
@@ -222,6 +235,9 @@ class Track:
         # Update camera tracking (for cross-camera filtering)
         if camera_id:
             self.last_seen_camera = camera_id
+
+        # Mark as matched this frame (prevents premature deletion)
+        self._matched_this_frame = True
 
         # Update confidence
         self.confidence = detection.confidence
@@ -256,14 +272,23 @@ class Track:
         return sum(self.confidence_history) / len(self.confidence_history) if self.confidence_history else 0.0
 
     def should_delete(self) -> bool:
-        """Check if track should be deleted."""
+        """Check if track should be deleted.
+
+        CRITICAL: Never delete a track that was just matched this frame.
+        This prevents ID switching when detections are still happening.
+        """
+        # NEVER delete a track that was just matched
+        if self._matched_this_frame:
+            return False
+
         # Delete if lost for too long
         if self.time_since_update > MAX_LOST:
             return True
 
-        # Delete if consistently low confidence
+        # Delete if consistently low confidence AND not recently matched
         if (len(self.confidence_history) >= LOW_CONF_MAX_FRAMES and
-            self.avg_confidence < MIN_CONFIDENCE_HISTORY):
+            self.avg_confidence < MIN_CONFIDENCE_HISTORY and
+            self.time_since_update > 5):  # Only if missed for 5+ frames
             logger.info(f"Deleting track {self.track_id} due to low confidence: {self.avg_confidence:.2f}")
             return True
 
@@ -387,7 +412,7 @@ class BoTSORTTracker:
         """Build combined cost matrix (motion + appearance).
 
         CRITICAL FIX: Use motion-only cost when ReID features are not available.
-        Without this, LAMBDA_APP=0.7 causes minimum cost of 0.7, making matches fail.
+        FALLBACK: Use center distance when IoU is low (helps with box size changes).
 
         Args:
             tracks: Dictionary of active tracks
@@ -408,6 +433,18 @@ class BoTSORTTracker:
                 # Motion cost (1 - IoU)
                 iou = self._calculate_iou(track.bbox, det.bbox)
                 motion_cost = 1.0 - iou
+
+                # FALLBACK: If IoU is low, use center distance
+                # This helps when box sizes differ but centers are close (e.g., perspective change)
+                if iou < 0.3:
+                    center_dist = self._center_distance(track.bbox, det.bbox)
+                    # Normalize by average box diagonal
+                    avg_diag = (self._box_diagonal(track.bbox) + self._box_diagonal(det.bbox)) / 2
+                    normalized_dist = center_dist / (avg_diag + 1e-6)
+
+                    # If centers are very close (< 30% of diagonal), give it a lower cost
+                    if normalized_dist < 0.3:
+                        motion_cost = min(motion_cost, normalized_dist + 0.2)
 
                 # CRITICAL: Only use appearance cost if BOTH have features
                 if (object_type == 'person' and
@@ -463,6 +500,22 @@ class BoTSORTTracker:
             return 0.0
 
         return dot_product / (norm1 * norm2)
+
+    @staticmethod
+    def _center_distance(bbox1: Tuple[float, float, float, float],
+                        bbox2: Tuple[float, float, float, float]) -> float:
+        """Calculate center-to-center Euclidean distance between two bboxes."""
+        x1, y1, w1, h1 = bbox1
+        x2, y2, w2, h2 = bbox2
+        cx1, cy1 = x1 + w1/2, y1 + h1/2
+        cx2, cy2 = x2 + w2/2, y2 + h2/2
+        return np.sqrt((cx1 - cx2)**2 + (cy1 - cy2)**2)
+
+    @staticmethod
+    def _box_diagonal(bbox: Tuple[float, float, float, float]) -> float:
+        """Calculate diagonal length of bounding box."""
+        x, y, w, h = bbox
+        return np.sqrt(w**2 + h**2)
 
     def get_active_tracks(self, object_type: str, camera_id: Optional[str] = None) -> List[Track]:
         """Get all active tracks of given type, optionally filtered by camera.
