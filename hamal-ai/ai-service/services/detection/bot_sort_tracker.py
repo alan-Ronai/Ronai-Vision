@@ -442,30 +442,49 @@ class BoTSORTTracker:
                     if normalized_dist < 0.3:
                         motion_cost = min(motion_cost, normalized_dist + 0.2)
 
-                # CRITICAL: Only use appearance cost if BOTH have features
-                if (object_type == 'person' and
-                    track.feature is not None and
-                    det.feature is not None):
-                    # Both have features - use combined cost
-                    similarity = self._cosine_similarity(track.feature, det.feature)
-                    app_cost = 1.0 - similarity
-                    cost_matrix[i, j] = (1 - LAMBDA_APP) * motion_cost + LAMBDA_APP * app_cost
+                # CRITICAL: Use appearance cost if BOTH have features (for ANY class)
+                # Multi-class ReID support:
+                # - Persons: OSNet (512-dim)
+                # - Vehicles: TransReID (768-dim)
+                # - Others: CLIP (768-dim)
+                if (track.feature is not None and det.feature is not None):
+                    # Verify feature dimensions match (safety check)
+                    if track.feature.shape == det.feature.shape:
+                        # Both have features with matching dimensions - use combined cost
+                        similarity = self._cosine_similarity(track.feature, det.feature)
+                        app_cost = 1.0 - similarity
+                        cost_matrix[i, j] = (1 - LAMBDA_APP) * motion_cost + LAMBDA_APP * app_cost
 
-                    # Log ReID usage
-                    logger.debug(
-                        f"ReID matching: track {track.track_id} similarity={similarity:.3f}, "
-                        f"motion_cost={motion_cost:.3f}, combined_cost={cost_matrix[i, j]:.3f}"
-                    )
+                        # Log ReID usage
+                        logger.debug(
+                            f"ReID matching ({object_type}): track {track.track_id} "
+                            f"similarity={similarity:.3f}, motion_cost={motion_cost:.3f}, "
+                            f"combined_cost={cost_matrix[i, j]:.3f}, feat_dim={track.feature.shape[0]}"
+                        )
+                    else:
+                        # Feature dimension mismatch - use only motion cost
+                        logger.warning(
+                            f"Feature dimension mismatch for track {track.track_id}: "
+                            f"track={track.feature.shape} vs det={det.feature.shape}"
+                        )
+                        cost_matrix[i, j] = motion_cost
                 else:
-                    # NO features - use ONLY motion cost (critical for walking persons!)
+                    # NO features - use ONLY motion cost
                     cost_matrix[i, j] = motion_cost
 
-                    # Log when features are missing
-                    if object_type == 'person':
+                    # Log when features are missing (debug level)
+                    if track.feature is None and det.feature is None:
                         logger.debug(
-                            f"No ReID features for track {track.track_id}: "
-                            f"track.feature={track.feature is not None}, "
-                            f"det.feature={det.feature is not None}"
+                            f"No ReID features for {object_type} track {track.track_id} "
+                            f"(both track and detection missing features)"
+                        )
+                    elif track.feature is None:
+                        logger.debug(
+                            f"No track feature for {object_type} track {track.track_id}"
+                        )
+                    elif det.feature is None:
+                        logger.debug(
+                            f"No detection feature for {object_type} detection"
                         )
 
         return cost_matrix

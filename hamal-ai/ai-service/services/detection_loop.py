@@ -26,13 +26,21 @@ import threading
 
 from .detection import get_bot_sort_tracker, Detection, Track
 from .osnet_reid import OSNetReID
+from .transreid_vehicle import TransReIDVehicle
+from .universal_reid import UniversalReID
 
 logger = logging.getLogger(__name__)
 
 # Detection Recovery Configuration
-RECOVERY_CONFIDENCE = 0.20  # Low threshold for recovery pass (raised from 0.15 to reduce noise)
-RECOVERY_IOU_THRESH = 0.3  # Minimum IoU with Kalman prediction (lowered for better recovery)
-RECOVERY_REID_THRESH = 0.5  # Minimum ReID similarity (for persons) (lowered for better recovery)
+RECOVERY_CONFIDENCE = (
+    0.20  # Low threshold for recovery pass (raised from 0.15 to reduce noise)
+)
+RECOVERY_IOU_THRESH = (
+    0.3  # Minimum IoU with Kalman prediction (lowered for better recovery)
+)
+RECOVERY_REID_THRESH = (
+    0.5  # Minimum ReID similarity (for persons) (lowered for better recovery)
+)
 RECOVERY_MIN_TRACK_CONFIDENCE = 0.25  # Only recover tracks with decent history
 RECOVERY_EVERY_N_FRAMES = 3  # Run recovery every N frames (throttle for performance)
 
@@ -245,20 +253,22 @@ class LoopConfig:
     """Detection loop configuration."""
 
     backend_url: str = "http://localhost:3000"
-    detection_fps: int = 15  # Process all frames (15 FPS) for continuous analysis
-    stream_fps: int = 15  # Stream at 15 fps for smooth viewing
+    detection_fps: int = 20  # Process all frames (15 FPS) for continuous analysis
+    stream_fps: int = 20  # Stream at 15 fps for smooth viewing
     alert_cooldown: float = 30.0
     gemini_cooldown: float = 5.0  # Don't analyze same track more than once per 5 sec
     event_cooldown: float = 5.0  # Minimum seconds between events per camera
     draw_bboxes: bool = True
     send_events: bool = True
     use_bot_sort: bool = True  # Use BoT-SORT tracker with full Kalman filter
-    use_reid_recovery: bool = False  # Enable ReID-based detection recovery (DISABLED for now)
+    use_reid_recovery: bool = (
+        True  # Enable ReID-based detection recovery (DISABLED for now)
+    )
     weapon_detector: Optional[Any] = None  # Weapon detection YOLO model
 
     # Confidence thresholds
-    yolo_confidence: float = 0.35  # Main YOLO detection confidence
-    weapon_confidence: float = 0.40  # Weapon detection confidence
+    yolo_confidence: float = 0.45  # Main YOLO detection confidence
+    weapon_confidence: float = 0.75  # Weapon detection confidence
     recovery_confidence: float = 0.20  # Low-confidence recovery pass
 
 
@@ -287,14 +297,38 @@ class DetectionLoop:
         self.config = config or LoopConfig()
         self.drawer = BBoxDrawer()
 
-        # CRITICAL: Initialize OSNet for ReID feature extraction
-        # The reid_tracker is just a DeepSort wrapper - doesn't have OSNet
+        # CRITICAL: Initialize Multi-Class ReID Encoders
+        # - OSNet for persons (512-dim)
+        # - TransReID for vehicles (768-dim)
+        # - CLIP for universal fallback (768-dim)
         self.osnet = None
+        self.vehicle_reid = None
+        self.universal_reid = None
+
+        # Initialize OSNet for person ReID
         try:
             self.osnet = OSNetReID()
-            logger.info("✅ OSNet ReID encoder initialized for feature extraction")
+            logger.info("✅ OSNet ReID (person) initialized: 512-dim features")
         except Exception as e:
-            logger.warning(f"⚠️ OSNet initialization failed: {e} - ReID features disabled")
+            logger.warning(f"⚠️ OSNet initialization failed: {e} - Person ReID disabled")
+
+        # Initialize TransReID for vehicle ReID
+        try:
+            self.vehicle_reid = TransReIDVehicle()
+            logger.info("✅ TransReID (vehicle) initialized: 768-dim features")
+        except Exception as e:
+            logger.warning(
+                f"⚠️ TransReID initialization failed: {e} - Vehicle ReID disabled"
+            )
+
+        # Initialize CLIP for universal ReID (fallback for other classes)
+        try:
+            self.universal_reid = UniversalReID()
+            logger.info("✅ Universal ReID (CLIP) initialized: 768-dim features")
+        except Exception as e:
+            logger.warning(
+                f"⚠️ Universal ReID initialization failed: {e} - Universal ReID disabled"
+            )
 
         # Use BoT-SORT tracker for advanced tracking
         self.bot_sort = get_bot_sort_tracker() if self.config.use_bot_sort else None
@@ -440,9 +474,9 @@ class DetectionLoop:
                 frame,
                 verbose=False,
                 conf=self.config.yolo_confidence,  # Configurable threshold
-                iou=0.4,             # Stricter NMS to prevent overlaps
-                max_det=50,          # Allow more detections
-                agnostic_nms=True    # Merge overlapping boxes across classes
+                iou=0.4,  # Stricter NMS to prevent overlaps
+                max_det=50,  # Allow more detections
+                agnostic_nms=True,  # Merge overlapping boxes across classes
             )[0]
 
             # Separate detections by class
@@ -469,14 +503,16 @@ class DetectionLoop:
                 if box_area < MIN_BOX_AREA:
                     continue
 
-                # Extract ReID feature for persons (if tracker available)
+                # CRITICAL: Extract ReID features for ALL classes (person, vehicle, other)
+                # - Persons: OSNet (512-dim)
+                # - Vehicles: TransReID (768-dim)
+                # - Others: CLIP Universal (768-dim)
                 feature = None
-                if label == "person" and self.reid_tracker:
-                    try:
-                        # Extract ReID embedding from person crop
-                        feature = self._extract_reid_feature(frame, xyxy)
-                    except Exception as e:
-                        logger.debug(f"ReID extraction failed: {e}")
+                try:
+                    # Extract ReID embedding using appropriate encoder
+                    feature = self._extract_reid_feature(frame, xyxy, label)
+                except Exception as e:
+                    logger.debug(f"ReID extraction failed for {label}: {e}")
 
                 # Create Detection object
                 det = Detection(
@@ -500,20 +536,32 @@ class DetectionLoop:
             # This avoids double Kalman prediction
             if self.bot_sort and self.config.use_reid_recovery:
                 # Get current active tracks to identify lost tracks (filtered by camera)
-                current_vehicles = self.bot_sort.get_active_tracks("vehicle", camera_id=camera_id)
-                current_persons = self.bot_sort.get_active_tracks("person", camera_id=camera_id)
+                current_vehicles = self.bot_sort.get_active_tracks(
+                    "vehicle", camera_id=camera_id
+                )
+                current_persons = self.bot_sort.get_active_tracks(
+                    "person", camera_id=camera_id
+                )
 
                 # Recover vehicles using IoU matching
                 recovered_vehicles = self._recover_missing_detections(
-                    frame, current_vehicles, "vehicle", [d.bbox for d in vehicle_detections]
+                    frame,
+                    current_vehicles,
+                    "vehicle",
+                    [d.bbox for d in vehicle_detections],
                 )
                 if recovered_vehicles:
-                    logger.info(f"Recovered {len(recovered_vehicles)} vehicle detections")
+                    logger.info(
+                        f"Recovered {len(recovered_vehicles)} vehicle detections"
+                    )
                     vehicle_detections.extend(recovered_vehicles)
 
                 # Recover persons using IoU + ReID matching
                 recovered_persons = self._recover_missing_detections(
-                    frame, current_persons, "person", [d.bbox for d in person_detections]
+                    frame,
+                    current_persons,
+                    "person",
+                    [d.bbox for d in person_detections],
                 )
                 if recovered_persons:
                     logger.info(f"Recovered {len(recovered_persons)} person detections")
@@ -529,18 +577,32 @@ class DetectionLoop:
                 # Update BoT-SORT tracker with merged detections (primary + recovered)
                 # CRITICAL: Pass camera_id to associate tracks with specific camera
                 all_vehicles, new_vehicle_tracks = self.bot_sort.update(
-                    vehicle_detections, "vehicle", dt=1 / self.config.detection_fps, camera_id=camera_id
+                    vehicle_detections,
+                    "vehicle",
+                    dt=1 / self.config.detection_fps,
+                    camera_id=camera_id,
                 )
                 all_persons, new_person_tracks = self.bot_sort.update(
-                    person_detections, "person", dt=1 / self.config.detection_fps, camera_id=camera_id
+                    person_detections,
+                    "person",
+                    dt=1 / self.config.detection_fps,
+                    camera_id=camera_id,
                 )
 
                 # CRITICAL: Filter tracks by camera to prevent cross-contamination
                 # Only show tracks that were last seen on THIS camera
-                all_vehicles = [t for t in all_vehicles if t.last_seen_camera == camera_id]
-                all_persons = [t for t in all_persons if t.last_seen_camera == camera_id]
-                new_vehicle_tracks = [t for t in new_vehicle_tracks if t.last_seen_camera == camera_id]
-                new_person_tracks = [t for t in new_person_tracks if t.last_seen_camera == camera_id]
+                all_vehicles = [
+                    t for t in all_vehicles if t.last_seen_camera == camera_id
+                ]
+                all_persons = [
+                    t for t in all_persons if t.last_seen_camera == camera_id
+                ]
+                new_vehicle_tracks = [
+                    t for t in new_vehicle_tracks if t.last_seen_camera == camera_id
+                ]
+                new_person_tracks = [
+                    t for t in new_person_tracks if t.last_seen_camera == camera_id
+                ]
 
                 # Convert Track objects to dicts for compatibility with rest of pipeline
                 tracked_vehicles = [self._track_to_dict(t) for t in all_vehicles]
@@ -570,7 +632,7 @@ class DetectionLoop:
                         frame,
                         verbose=False,
                         conf=self.config.weapon_confidence,  # Configurable weapon confidence
-                        iou=0.4
+                        iou=0.4,
                     )[0]
 
                     for box in weapon_results.boxes:
@@ -578,20 +640,26 @@ class DetectionLoop:
                         weapon_conf = float(box.conf[0])
                         weapon_class = weapon_results.names[int(box.cls[0])]
 
-                        detected_weapons.append({
-                            "bbox": weapon_bbox,
-                            "confidence": weapon_conf,
-                            "class": weapon_class
-                        })
+                        detected_weapons.append(
+                            {
+                                "bbox": weapon_bbox,
+                                "confidence": weapon_conf,
+                                "class": weapon_class,
+                            }
+                        )
 
-                        logger.warning(f"⚠️ WEAPON DETECTED: {weapon_class} (conf: {weapon_conf:.2f})")
+                        logger.warning(
+                            f"⚠️ WEAPON DETECTED: {weapon_class} (conf: {weapon_conf:.2f})"
+                        )
 
                         # Find persons near this weapon
                         for person in tracked_persons:
                             person_bbox = person.get("bbox", [])
                             if len(person_bbox) >= 4:
                                 # Check if weapon is near person (using IoU or proximity)
-                                if self._is_weapon_near_person(weapon_bbox, person_bbox):
+                                if self._is_weapon_near_person(
+                                    weapon_bbox, person_bbox
+                                ):
                                     # Mark person as armed
                                     person_meta = person.get("metadata", {})
                                     if not isinstance(person_meta, dict):
@@ -602,7 +670,9 @@ class DetectionLoop:
                                     person_meta["weaponType"] = weapon_class
                                     person_meta["סוג_נשק"] = weapon_class
                                     person_meta["weapon_confidence"] = weapon_conf
-                                    person_meta["detection_method"] = "yolo_weapon_detector"
+                                    person_meta["detection_method"] = (
+                                        "yolo_weapon_detector"
+                                    )
 
                                     person["metadata"] = person_meta
 
@@ -610,7 +680,9 @@ class DetectionLoop:
                                     if self.bot_sort:
                                         track_id = person.get("track_id")
                                         # Filter by camera when updating metadata
-                                        for track in self.bot_sort.get_active_tracks("person", camera_id=camera_id):
+                                        for track in self.bot_sort.get_active_tracks(
+                                            "person", camera_id=camera_id
+                                        ):
                                             if track.track_id == track_id:
                                                 track.metadata.update(person_meta)
                                                 break
@@ -642,7 +714,9 @@ class DetectionLoop:
                         w_bbox = weapon["bbox"]
                         x1, y1, x2, y2 = [int(v) for v in w_bbox]
                         # Draw weapon box in bright red
-                        cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
+                        cv2.rectangle(
+                            annotated_frame, (x1, y1), (x2, y2), (0, 0, 255), 3
+                        )
                         # Label
                         label = f"⚠️ {weapon['class']} {weapon['confidence']:.0%}"
                         cv2.putText(
@@ -691,20 +765,38 @@ class DetectionLoop:
             return None
 
     def _extract_reid_feature(
-        self, frame: np.ndarray, xyxy: List[float]
+        self, frame: np.ndarray, xyxy: List[float], class_name: str
     ) -> Optional[np.ndarray]:
-        """Extract ReID feature vector from person crop using OSNet.
+        """Extract ReID feature vector using appropriate encoder for the class.
 
         Args:
             frame: Full frame image (BGR format)
             xyxy: Bounding box in [x1, y1, x2, y2] format
+            class_name: Object class (e.g., "person", "car", "truck")
 
         Returns:
-            ReID feature vector (512-dim, L2-normalized) or None if extraction fails
+            ReID feature vector (L2-normalized) or None if extraction fails
+            - Person: 512-dim (OSNet)
+            - Vehicle: 768-dim (TransReID)
+            - Other: 768-dim (CLIP)
         """
         try:
-            # CRITICAL: Use OSNet encoder, not reid_tracker (which is DeepSort wrapper)
-            if self.osnet is None:
+            # Select appropriate encoder based on class
+            vehicle_classes = {"car", "truck", "bus", "motorcycle", "bicycle", "van"}
+
+            if class_name == "person":
+                encoder = self.osnet
+                encoder_name = "OSNet"
+            elif class_name in vehicle_classes:
+                encoder = self.vehicle_reid
+                encoder_name = "TransReID"
+            else:
+                encoder = self.universal_reid
+                encoder_name = "CLIP"
+
+            # Check if encoder is available
+            if encoder is None:
+                logger.debug(f"{encoder_name} encoder not available for {class_name}")
                 return None
 
             x1, y1, x2, y2 = [int(v) for v in xyxy]
@@ -717,27 +809,29 @@ class DetectionLoop:
             if x2 <= x1 or y2 <= y1:
                 return None
 
-            # OSNet expects boxes in [x1, y1, x2, y2] format as numpy array
+            # All encoders expect boxes in [x1, y1, x2, y2] format as numpy array
             boxes = np.array([[x1, y1, x2, y2]])
 
-            # Extract features using OSNet (returns L2-normalized features)
-            features = self.osnet.extract_features(frame, boxes)
+            # Extract features using appropriate encoder (returns L2-normalized features)
+            features = encoder.extract_features(frame, boxes)
 
             if features is not None and len(features) > 0:
                 feature = features[0]  # Get first (only) feature vector
 
                 # Log successful extraction
                 logger.debug(
-                    f"✅ Extracted ReID feature: shape={feature.shape}, "
-                    f"norm={np.linalg.norm(feature):.3f}"
+                    f"✅ Extracted {encoder_name} ReID feature for {class_name}: "
+                    f"shape={feature.shape}, norm={np.linalg.norm(feature):.3f}"
                 )
 
                 return feature
 
-            logger.debug("❌ ReID feature extraction returned None")
+            logger.debug(
+                f"❌ {encoder_name} feature extraction returned None for {class_name}"
+            )
             return None
         except Exception as e:
-            logger.debug(f"ReID feature extraction error: {e}")
+            logger.debug(f"ReID feature extraction error for {class_name}: {e}")
             return None
 
     def _track_to_dict(self, track: Track) -> dict:
@@ -790,8 +884,11 @@ class DetectionLoop:
         }
 
     def _recover_missing_detections(
-        self, frame: np.ndarray, active_tracks: List[Track], object_type: str,
-        primary_bboxes: List[Tuple[float, float, float, float]] = None
+        self,
+        frame: np.ndarray,
+        active_tracks: List[Track],
+        object_type: str,
+        primary_bboxes: List[Tuple[float, float, float, float]] = None,
     ) -> List[Detection]:
         """Recover missed detections for lost tracks using ReID matching.
 
@@ -838,9 +935,9 @@ class DetectionLoop:
                 frame,
                 verbose=False,
                 conf=self.config.recovery_confidence,  # Configurable recovery confidence
-                iou=0.4,           # Stricter NMS
-                max_det=30,        # Limit recovery detections
-                agnostic_nms=True  # Merge across classes
+                iou=0.4,  # Stricter NMS
+                max_det=30,  # Limit recovery detections
+                agnostic_nms=True,  # Merge across classes
             )[0]
 
             recovery_candidates = []
@@ -864,10 +961,12 @@ class DetectionLoop:
                 x1, y1, x2, y2 = xyxy
                 bbox = (x1, y1, x2 - x1, y2 - y1)
 
-                # Extract ReID feature for persons
+                # Extract ReID feature for ALL classes using appropriate encoder
                 feature = None
-                if object_type == "person" and self.reid_tracker:
-                    feature = self._extract_reid_feature(frame, xyxy)
+                try:
+                    feature = self._extract_reid_feature(frame, xyxy, label)
+                except Exception as e:
+                    logger.debug(f"Recovery ReID extraction failed for {label}: {e}")
 
                 recovery_candidates.append(
                     {
@@ -891,10 +990,13 @@ class DetectionLoop:
                 all_existing_bboxes.extend(primary_bboxes)
 
             # Add recently detected track bboxes
-            all_existing_bboxes.extend([
-                t.bbox for t in active_tracks
-                if t.time_since_update == 0  # Recently detected
-            ])
+            all_existing_bboxes.extend(
+                [
+                    t.bbox
+                    for t in active_tracks
+                    if t.time_since_update == 0  # Recently detected
+                ]
+            )
 
             filtered_candidates = []
             for candidate in recovery_candidates:
@@ -1023,7 +1125,9 @@ class DetectionLoop:
 
     @staticmethod
     def _is_weapon_near_person(
-        weapon_bbox: List[float], person_bbox: List[float], proximity_threshold: float = 100
+        weapon_bbox: List[float],
+        person_bbox: List[float],
+        proximity_threshold: float = 100,
     ) -> bool:
         """Check if weapon is near a person.
 
@@ -1110,7 +1214,9 @@ class DetectionLoop:
                 # Update tracker with metadata
                 if self.bot_sort:
                     # Find track and update metadata (filter by camera)
-                    for track in self.bot_sort.get_active_tracks("vehicle", camera_id=result.camera_id):
+                    for track in self.bot_sort.get_active_tracks(
+                        "vehicle", camera_id=result.camera_id
+                    ):
                         if track.track_id == track_id:
                             track.metadata.update(metadata)
                             break
@@ -1144,7 +1250,9 @@ class DetectionLoop:
                 # Update tracker with metadata
                 if self.bot_sort:
                     # Find track and update metadata (filter by camera)
-                    for track in self.bot_sort.get_active_tracks("person", camera_id=result.camera_id):
+                    for track in self.bot_sort.get_active_tracks(
+                        "person", camera_id=result.camera_id
+                    ):
                         if track.track_id == track_id:
                             track.metadata.update(metadata)
                             break
@@ -1274,7 +1382,7 @@ class DetectionLoop:
                 "yolo_confidence": self.config.yolo_confidence,
                 "weapon_confidence": self.config.weapon_confidence,
                 "recovery_confidence": self.config.recovery_confidence,
-            }
+            },
         }
 
         # Include BoT-SORT tracker stats
@@ -1283,7 +1391,9 @@ class DetectionLoop:
 
         return stats
 
-    def set_fps(self, detection_fps: Optional[int] = None, stream_fps: Optional[int] = None):
+    def set_fps(
+        self, detection_fps: Optional[int] = None, stream_fps: Optional[int] = None
+    ):
         """Change FPS settings dynamically.
 
         Args:
@@ -1313,7 +1423,7 @@ class DetectionLoop:
         self,
         yolo_confidence: Optional[float] = None,
         weapon_confidence: Optional[float] = None,
-        recovery_confidence: Optional[float] = None
+        recovery_confidence: Optional[float] = None,
     ):
         """Change confidence thresholds dynamically.
 

@@ -19,7 +19,10 @@ try:
     DEEPSORT_AVAILABLE = True
 except ImportError:
     DEEPSORT_AVAILABLE = False
-    logger.warning("deep-sort-realtime not installed. ReID tracking disabled.")
+    logger.info(
+        "deep-sort-realtime not installed. "
+        "Using OSNet/TransReID/CLIP for ReID instead (recommended)."
+    )
 
 
 class ReIDTracker:
@@ -60,11 +63,13 @@ class ReIDTracker:
                 max_cosine_distance=0.2,
                 nn_budget=100
             )
-            logger.info("✅ ReID trackers initialized (DeepSort)")
+            logger.info("✅ ReID trackers initialized (DeepSort - legacy mode)")
         else:
             self.vehicle_tracker = None
             self.person_tracker = None
-            logger.warning("⚠️ ReID tracking disabled - DeepSort not available")
+            logger.info(
+                "DeepSort not available - using OSNet/TransReID/CLIP instead (recommended)"
+            )
 
         # Metadata storage: {track_id: {type, analysis, first_seen, last_seen, ...}}
         self.tracked_objects: Dict[str, Dict[str, Any]] = {}
