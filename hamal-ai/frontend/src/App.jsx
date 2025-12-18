@@ -12,6 +12,7 @@ import CameraManager from './components/CameraManager';
 import DetectionSettings from './components/DetectionSettings';
 import GlobalIDStore from './components/GlobalIDStore';
 import AudioTransmitter from './components/AudioTransmitter';
+import EventRuleManager from './components/EventRuleManager';
 
 function Dashboard() {
   const { isEmergency, simulationPopup, loading } = useApp();
@@ -19,6 +20,7 @@ function Dashboard() {
   const [showDetectionSettings, setShowDetectionSettings] = useState(false);
   const [showGlobalIDStore, setShowGlobalIDStore] = useState(false);
   const [showAudioTransmitter, setShowAudioTransmitter] = useState(false);
+  const [showEventRules, setShowEventRules] = useState(false);
 
   if (loading) {
     return (
@@ -103,6 +105,13 @@ function Dashboard() {
           <span>📻</span>
           <span>שידור לקשר</span>
         </button>
+        <button
+          onClick={() => setShowEventRules(true)}
+          className="bg-yellow-700 hover:bg-yellow-600 px-4 py-2 rounded-lg shadow-lg flex items-center gap-2"
+        >
+          <span>⚡</span>
+          <span>חוקי אירועים</span>
+        </button>
       </div>
 
       {/* Camera Manager Modal */}
@@ -127,6 +136,12 @@ function Dashboard() {
       <AudioTransmitter
         isOpen={showAudioTransmitter}
         onClose={() => setShowAudioTransmitter(false)}
+      />
+
+      {/* Event Rule Manager Modal */}
+      <EventRuleManager
+        isOpen={showEventRules}
+        onClose={() => setShowEventRules(false)}
       />
 
       {/* Emergency popup */}

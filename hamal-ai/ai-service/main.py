@@ -10,6 +10,13 @@ FastAPI service for AI-powered detection using:
 Supports Mac MPS acceleration.
 """
 
+import os
+
+# Disable gRPC fork handlers BEFORE importing any gRPC-related modules (like google.generativeai)
+# This prevents the "Other threads are currently calling into gRPC, skipping fork() handlers" warning
+# when using subprocess (FFmpeg) alongside gRPC (Gemini API)
+os.environ["GRPC_ENABLE_FORK_SUPPORT"] = "0"
+
 from fastapi import FastAPI, File, UploadFile, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
@@ -20,8 +27,6 @@ import torch
 from ultralytics import YOLO
 import numpy as np
 import cv2
-import os
-import sys
 import asyncio
 import logging
 from pathlib import Path
@@ -48,6 +53,7 @@ from services.detection_loop import init_detection_loop, get_detection_loop, Loo
 from services.detection import get_frame_buffer_manager, get_stable_tracker
 from services.radio import init_radio_service, get_radio_service, stop_radio_service
 from services.radio.radio_transmit import router as radio_transmit_router
+from services.recording import init_recording_manager, get_recording_manager
 
 # FastAPI app
 app = FastAPI(
@@ -197,7 +203,12 @@ class RTSPStreamManager:
         return None
 
     def start_stream(self, camera_id: str, rtsp_url: str, username: str = None, password: str = None) -> bool:
-        """Start capturing from RTSP stream"""
+        """Start capturing from RTSP stream.
+
+        NOTE: This is the legacy OpenCV-based reader. The FFmpeg-based rtsp_manager
+        (from services.streaming) is more robust and is used for the main detection loop.
+        This manager is kept for compatibility with SSE endpoints.
+        """
         with self.lock:
             if camera_id in self.streams and self.streams[camera_id].get("running"):
                 logger.info(f"Stream already running for {camera_id}")
@@ -206,33 +217,23 @@ class RTSPStreamManager:
         # Check if this is a local file path (not a network URL)
         if not rtsp_url.startswith(('rtsp://', 'http://', 'https://', 'rtmp://', 'udp://')):
             # Local file path - resolve relative to Ronai-Vision root
-            # Current file is at: Ronai-Vision/hamal-ai/ai-service/main.py
-            # Root is two levels up: ../../
             script_dir = Path(__file__).parent
             project_root = script_dir.parent.parent  # Ronai-Vision root
-
-            # Clean up the path (remove leading slash if present for relative paths)
             clean_path = rtsp_url.lstrip('/')
-
-            # Try as relative path first (from project root)
             video_path = project_root / clean_path
 
-            # If doesn't exist as relative, try as absolute
             if not video_path.exists() and Path(rtsp_url).is_absolute():
                 video_path = Path(rtsp_url)
 
-            # Convert to absolute path
             rtsp_url = str(video_path.absolute())
 
-            # Check if file exists
             if not video_path.exists():
                 logger.error(f"Video file not found: {rtsp_url}")
-                logger.error(f"Looked in project root: {project_root}")
                 return False
 
             logger.info(f"✓ Resolved local video path: {rtsp_url}")
 
-        # Build full RTSP URL with credentials if not already in URL
+        # Build full RTSP URL with credentials
         full_url = rtsp_url
         if username and password and "@" not in rtsp_url:
             if "://" in rtsp_url:
@@ -240,27 +241,36 @@ class RTSPStreamManager:
                 full_url = f"{protocol}://{username}:{password}@{rest}"
 
         logger.info(f"Starting RTSP stream for {camera_id}")
-        logger.info(f"URL: {rtsp_url[:50]}...")
 
-        # Set environment for FFmpeg
-        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+        # Set environment for FFmpeg with TCP transport and error handling
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+            "rtsp_transport;tcp|"
+            "timeout;5000000|"
+            "fflags;+genpts+discardcorrupt|"
+            "err_detect;ignore_err"
+        )
 
         # OpenCV VideoCapture with RTSP over TCP
         cap = cv2.VideoCapture(full_url, cv2.CAP_FFMPEG)
 
-        # Configure capture for low latency
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        cap.set(cv2.CAP_PROP_FPS, 15)  # Limit FPS
+        # Configure capture for stability
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 3)  # Slightly larger buffer for stability
+        cap.set(cv2.CAP_PROP_FPS, 15)
 
         if not cap.isOpened():
             logger.error(f"Failed to open RTSP stream for {camera_id}")
-            logger.error(f"Make sure FFmpeg is installed and the URL is correct")
             return False
 
-        # Read first frame to verify connection
-        ret, test_frame = cap.read()
-        if not ret:
-            logger.error(f"Connected but failed to read first frame for {camera_id}")
+        # Read first frame with retries
+        ret, test_frame = None, None
+        for attempt in range(5):
+            ret, test_frame = cap.read()
+            if ret and test_frame is not None:
+                break
+            time.sleep(0.5)
+
+        if not ret or test_frame is None:
+            logger.error(f"Failed to read first frame for {camera_id} after 5 attempts")
             cap.release()
             return False
 
@@ -270,7 +280,7 @@ class RTSPStreamManager:
             stream_data = {
                 "cap": cap,
                 "url": full_url,
-                "frame": test_frame,  # Store first frame immediately
+                "frame": test_frame,
                 "running": True,
                 "last_update": time.time(),
                 "error": None,
@@ -278,7 +288,6 @@ class RTSPStreamManager:
             }
             self.streams[camera_id] = stream_data
 
-        # Start capture thread
         thread = threading.Thread(target=self._capture_loop, args=(camera_id,), daemon=True)
         with self.lock:
             self.streams[camera_id]["thread"] = thread
@@ -288,9 +297,18 @@ class RTSPStreamManager:
         return True
 
     def _capture_loop(self, camera_id: str):
-        """Background thread to continuously capture frames"""
+        """Background thread to continuously capture frames.
+
+        Uses adaptive error handling:
+        - Tolerates occasional frame drops (common with H.264 streams)
+        - Only reconnects after sustained failures
+        - Uses exponential backoff for reconnects
+        """
         consecutive_errors = 0
-        max_consecutive_errors = 30  # ~3 seconds of errors before reconnect
+        max_consecutive_errors = 50  # Increased tolerance (~5 seconds at 10fps)
+        reconnect_attempts = 0
+        max_reconnect_attempts = 10
+        base_reconnect_delay = 2.0
 
         while True:
             # Check if we should stop
@@ -308,6 +326,7 @@ class RTSPStreamManager:
 
             if ret and frame is not None:
                 consecutive_errors = 0
+                reconnect_attempts = 0  # Reset on successful frame
                 with self.lock:
                     if camera_id in self.streams:
                         self.streams[camera_id]["frame"] = frame
@@ -315,36 +334,62 @@ class RTSPStreamManager:
                         self.streams[camera_id]["error"] = None
             else:
                 consecutive_errors += 1
-                # Only log on first failure, every 10th failure, or when reaching threshold
-                if consecutive_errors == 1 or consecutive_errors % 10 == 0 or consecutive_errors >= max_consecutive_errors:
-                    logger.warning(f"Failed to read frame for {camera_id} ({consecutive_errors}/{max_consecutive_errors})")
+
+                # Only log periodically to avoid spam
+                if consecutive_errors == 1:
+                    logger.debug(f"Frame read failed for {camera_id}")
+                elif consecutive_errors % 25 == 0:
+                    logger.warning(f"Frame read failures for {camera_id}: {consecutive_errors}/{max_consecutive_errors}")
 
                 if consecutive_errors >= max_consecutive_errors:
-                    logger.warning(f"Too many errors, attempting reconnect for {camera_id}")
-                    cap.release()
-
-                    # Wait before reconnecting
-                    time.sleep(2)
-
-                    # Reconnect
-                    new_cap = cv2.VideoCapture(stream_url, cv2.CAP_FFMPEG)
-                    new_cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
-                    if new_cap.isOpened():
+                    if reconnect_attempts >= max_reconnect_attempts:
+                        logger.error(f"Max reconnect attempts reached for {camera_id}, giving up")
                         with self.lock:
                             if camera_id in self.streams:
-                                self.streams[camera_id]["cap"] = new_cap
-                                self.streams[camera_id]["reconnect_count"] = \
-                                    self.streams[camera_id].get("reconnect_count", 0) + 1
-                        cap = new_cap
-                        consecutive_errors = 0
-                        logger.info(f"Reconnected to stream for {camera_id}")
+                                self.streams[camera_id]["error"] = "Max reconnects exceeded"
+                                self.streams[camera_id]["running"] = False
+                        break
+
+                    # Exponential backoff
+                    delay = min(base_reconnect_delay * (2 ** reconnect_attempts), 30)
+                    reconnect_attempts += 1
+
+                    logger.warning(f"Reconnecting {camera_id} (attempt {reconnect_attempts}/{max_reconnect_attempts}, delay {delay:.1f}s)")
+                    cap.release()
+                    time.sleep(delay)
+
+                    # Reconnect with fresh FFmpeg options
+                    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+                        "rtsp_transport;tcp|"
+                        "timeout;5000000|"
+                        "fflags;+genpts+discardcorrupt|"
+                        "err_detect;ignore_err"
+                    )
+                    new_cap = cv2.VideoCapture(stream_url, cv2.CAP_FFMPEG)
+                    new_cap.set(cv2.CAP_PROP_BUFFERSIZE, 3)
+                    new_cap.set(cv2.CAP_PROP_FPS, 15)
+
+                    if new_cap.isOpened():
+                        # Try to read a frame to verify connection
+                        test_ret, test_frame = new_cap.read()
+                        if test_ret and test_frame is not None:
+                            with self.lock:
+                                if camera_id in self.streams:
+                                    self.streams[camera_id]["cap"] = new_cap
+                                    self.streams[camera_id]["frame"] = test_frame
+                                    self.streams[camera_id]["reconnect_count"] = \
+                                        self.streams[camera_id].get("reconnect_count", 0) + 1
+                            cap = new_cap
+                            consecutive_errors = 0
+                            logger.info(f"✅ Reconnected to {camera_id}")
+                        else:
+                            new_cap.release()
+                            logger.warning(f"Reconnected but no frames for {camera_id}")
                     else:
-                        logger.error(f"Reconnect failed for {camera_id}")
+                        logger.warning(f"Reconnect failed for {camera_id}")
                         with self.lock:
                             if camera_id in self.streams:
                                 self.streams[camera_id]["error"] = "Connection lost"
-                        time.sleep(5)  # Wait longer before next attempt
 
             # Control frame rate - ~10 FPS capture
             time.sleep(0.1)
@@ -741,17 +786,22 @@ async def get_snapshot(camera_id: str):
 
 
 @app.get("/api/stream/sse/{camera_id}")
-async def stream_sse(camera_id: str, fps: int = 5):
+async def stream_sse(camera_id: str, fps: Optional[int] = None):
     """
     Server-Sent Events streaming - stable single connection.
-    Server controls frame rate (default 5 FPS).
+    Server controls frame rate. Uses detection loop's stream_fps config if not specified.
     """
     import base64
+
+    # Use configured stream_fps if not explicitly provided
+    detection_loop = get_detection_loop()
+    if fps is None:
+        fps = detection_loop.config.stream_fps if detection_loop else 15
 
     logger.info(f"SSE stream requested for camera: {camera_id}, fps: {fps}")
 
     # Clamp FPS to reasonable range
-    fps = max(1, min(fps, 15))
+    fps = max(1, min(fps, 30))
     frame_interval = 1.0 / fps
 
     # Ensure stream is started
@@ -1468,6 +1518,11 @@ async def startup_event():
 
     logger.info("✅ Detection loop initialized and ready")
 
+    # Initialize recording manager for video recording with pre-buffer
+    recordings_dir = os.getenv("RECORDINGS_DIR", "/tmp/hamal_recordings")
+    await init_recording_manager(recordings_dir=recordings_dir, default_fps=TARGET_FPS)
+    logger.info(f"📹 Recording manager initialized, output: {recordings_dir}")
+
     # Start radio service for RTP audio transcription via EC2 relay
     ec2_host = os.getenv("EC2_RTP_HOST")
     ec2_port = int(os.getenv("EC2_RTP_PORT", "5005"))
@@ -1605,6 +1660,11 @@ async def shutdown_event():
 
     # Stop radio service
     await stop_radio_service()
+
+    # Stop recording manager
+    recording_manager = get_recording_manager()
+    if recording_manager:
+        await recording_manager.stop()
 
     logger.info("Shutdown complete")
 
@@ -1953,6 +2013,70 @@ async def radio_stats():
 
 # ============== FFMPEG STREAMING ENDPOINTS ==============
 
+@app.get("/recordings/{filename}")
+async def get_recording(filename: str):
+    """Serve recorded video files."""
+    from pathlib import Path
+
+    recordings_dir = os.getenv("RECORDINGS_DIR", "/tmp/hamal_recordings")
+    video_path = Path(recordings_dir) / filename
+
+    if not video_path.exists():
+        raise HTTPException(404, "Recording not found")
+
+    # Security: ensure filename doesn't escape the recordings directory
+    try:
+        video_path.resolve().relative_to(Path(recordings_dir).resolve())
+    except ValueError:
+        raise HTTPException(403, "Invalid path")
+
+    return FileResponse(
+        video_path,
+        media_type="video/mp4",
+        filename=filename
+    )
+
+
+@app.get("/recordings")
+async def list_recordings():
+    """List all recorded videos."""
+    from pathlib import Path
+
+    recordings_dir = os.getenv("RECORDINGS_DIR", "/tmp/hamal_recordings")
+    recordings_path = Path(recordings_dir)
+
+    if not recordings_path.exists():
+        return {"recordings": []}
+
+    recordings = []
+    for video_file in sorted(recordings_path.glob("*.mp4"), reverse=True):
+        stat = video_file.stat()
+        recordings.append({
+            "filename": video_file.name,
+            "url": f"/recordings/{video_file.name}",
+            "size_bytes": stat.st_size,
+            "created_at": stat.st_ctime
+        })
+
+    return {"recordings": recordings}
+
+
+@app.get("/recording/stats")
+async def recording_stats():
+    """Get recording manager statistics."""
+    manager = get_recording_manager()
+    if not manager:
+        return {"error": "Recording manager not initialized"}
+
+    from services.recording import get_frame_buffer
+    frame_buffer = get_frame_buffer()
+
+    return {
+        "recording_manager": manager.get_stats(),
+        "frame_buffer": frame_buffer.get_stats() if frame_buffer else None
+    }
+
+
 @app.get("/ffmpeg/stats")
 async def ffmpeg_stats():
     """Get FFmpeg stream statistics."""
@@ -1992,11 +2116,15 @@ async def reset_stable_tracker():
 
 
 @app.get("/api/stream/annotated/{camera_id}")
-async def stream_annotated(camera_id: str, fps: int = 15):
+async def stream_annotated(camera_id: str, fps: Optional[int] = None):
     """
     Stream annotated frames with bounding boxes via SSE.
     This shows the AI detection results in real-time.
     Smooth delivery with frame deduplication.
+
+    Args:
+        camera_id: Camera to stream
+        fps: Optional FPS override. If not provided, uses detection loop's stream_fps config.
     """
     import base64
 
@@ -2004,7 +2132,11 @@ async def stream_annotated(camera_id: str, fps: int = 15):
     if not detection_loop:
         raise HTTPException(503, "Detection loop not running")
 
-    fps = max(1, min(fps, 15))
+    # Use configured stream_fps if not explicitly provided
+    if fps is None:
+        fps = detection_loop.config.stream_fps
+
+    fps = max(1, min(fps, 30))  # Allow up to 30 FPS
     frame_interval = 1.0 / fps
 
     async def generate():

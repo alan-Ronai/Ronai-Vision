@@ -1,0 +1,290 @@
+[
+  {
+    "_id": "default-armed-alert",
+    "name": "התראת אדם חמוש",
+    "description": "הפעלת מצב חירום כאשר מזוהה אדם חמוש",
+    "enabled": true,
+    "priority": 100,
+    "conditions": {
+      "operator": "AND",
+      "items": [
+        {
+          "type": "object_detected",
+          "params": {
+            "objectType": "person",
+            "minConfidence": 0.5
+          }
+        },
+        {
+          "type": "attribute_match",
+          "params": {
+            "attribute": "armed",
+            "operator": "equals",
+            "value": true
+          }
+        }
+      ]
+    },
+    "pipeline": [
+      {
+        "type": "debounce",
+        "params": {
+          "cooldownMs": 30000,
+          "key": "armed_alert_{cameraId}"
+        }
+      }
+    ],
+    "actions": [
+      {
+        "type": "log_event",
+        "params": {
+          "message": "CRITICAL: Armed person detected on camera {cameraId}",
+          "level": "error"
+        }
+      },
+      {
+        "type": "system_alert",
+        "params": {
+          "severity": "critical",
+          "title": "חדירה ודאית - אדם חמוש!",
+          "message": "זוהה אדם חמוש במצלמה {cameraId}"
+        }
+      },
+      {
+        "type": "emergency_mode",
+        "params": {
+          "action": "start"
+        }
+      },
+      {
+        "type": "start_recording",
+        "params": {
+          "duration": 60,
+          "preBuffer": 10
+        }
+      },
+      {
+        "type": "trigger_simulation",
+        "params": {
+          "simulationType": "phone_call",
+          "delay": 2000
+        }
+      },
+      {
+        "type": "trigger_simulation",
+        "params": {
+          "simulationType": "drone_dispatch",
+          "delay": 4000
+        }
+      }
+    ],
+    "tags": ["critical", "armed", "migrated"],
+    "migratedFrom": "alertService",
+    "triggerCount": 0,
+    "createdAt": "2025-01-01T00:00:00.000Z",
+    "updatedAt": "2025-01-01T00:00:00.000Z"
+  },
+  {
+    "_id": "default-multiple-people",
+    "name": "התראת ריבוי אנשים",
+    "description": "התראה כאשר מזוהים 2 אנשים או יותר",
+    "enabled": true,
+    "priority": 50,
+    "conditions": {
+      "operator": "AND",
+      "items": [
+        {
+          "type": "object_count",
+          "params": {
+            "objectType": "person",
+            "operator": "greaterOrEqual",
+            "count": 2
+          }
+        }
+      ]
+    },
+    "pipeline": [
+      {
+        "type": "debounce",
+        "params": {
+          "cooldownMs": 60000,
+          "key": "multiple_people_{cameraId}"
+        }
+      }
+    ],
+    "actions": [
+      {
+        "type": "log_event",
+        "params": {
+          "message": "WARNING: Multiple people ({personCount}) detected on camera {cameraId}",
+          "level": "warning"
+        }
+      },
+      {
+        "type": "system_alert",
+        "params": {
+          "severity": "warning",
+          "title": "זיהוי ריבוי אנשים",
+          "message": "זוהו {personCount} אנשים במצלמה {cameraId}"
+        }
+      }
+    ],
+    "tags": ["warning", "people", "migrated"],
+    "migratedFrom": "alertService",
+    "triggerCount": 0,
+    "createdAt": "2025-01-01T00:00:00.000Z",
+    "updatedAt": "2025-01-01T00:00:00.000Z"
+  },
+  {
+    "_id": "default-suspicious-vehicle",
+    "name": "התראת רכב חשוד",
+    "description": "התראה בזיהוי משאית או אוטובוס",
+    "enabled": true,
+    "priority": 40,
+    "conditions": {
+      "operator": "OR",
+      "items": [
+        {
+          "type": "object_detected",
+          "params": {
+            "objectType": "truck",
+            "minConfidence": 0.5
+          }
+        },
+        {
+          "type": "object_detected",
+          "params": {
+            "objectType": "bus",
+            "minConfidence": 0.5
+          }
+        }
+      ]
+    },
+    "pipeline": [
+      {
+        "type": "debounce",
+        "params": {
+          "cooldownMs": 120000,
+          "key": "suspicious_vehicle_{cameraId}"
+        }
+      }
+    ],
+    "actions": [
+      {
+        "type": "log_event",
+        "params": {
+          "message": "WARNING: Suspicious vehicle ({objectType}) detected on camera {cameraId}",
+          "level": "warning"
+        }
+      },
+      {
+        "type": "system_alert",
+        "params": {
+          "severity": "warning",
+          "title": "זיהוי רכב חשוד",
+          "message": "זוהה {objectType} במצלמה {cameraId}"
+        }
+      }
+    ],
+    "tags": ["warning", "vehicle", "migrated"],
+    "migratedFrom": "alertService",
+    "triggerCount": 0,
+    "createdAt": "2025-01-01T00:00:00.000Z",
+    "updatedAt": "2025-01-01T00:00:00.000Z"
+  },
+  {
+    "_id": "default-drone-keyword",
+    "name": "הפעלת רחפן במילת מפתח",
+    "description": "הפעלת סימולציית רחפן כאשר נאמרת המילה 'רחפן'",
+    "enabled": true,
+    "priority": 30,
+    "conditions": {
+      "operator": "OR",
+      "items": [
+        {
+          "type": "transcription_keyword",
+          "params": {
+            "keywords": ["רחפן", "drone", "הקפץ רחפן"],
+            "matchType": "any"
+          }
+        }
+      ]
+    },
+    "pipeline": [
+      {
+        "type": "debounce",
+        "params": {
+          "cooldownMs": 30000,
+          "key": "drone_keyword"
+        }
+      }
+    ],
+    "actions": [
+      {
+        "type": "log_event",
+        "params": {
+          "message": "INFO: Drone dispatch triggered by keyword",
+          "level": "info"
+        }
+      },
+      {
+        "type": "trigger_simulation",
+        "params": {
+          "simulationType": "drone_dispatch"
+        }
+      },
+      {
+        "type": "system_alert",
+        "params": {
+          "severity": "info",
+          "title": "רחפן הוקפץ",
+          "message": "הופעלה סימולציית רחפן לפי מילת מפתח"
+        }
+      }
+    ],
+    "tags": ["radio", "simulation", "drone"],
+    "triggerCount": 0,
+    "createdAt": "2025-01-01T00:00:00.000Z",
+    "updatedAt": "2025-01-01T00:00:00.000Z"
+  },
+  {
+    "_id": "default-new-person",
+    "name": "זיהוי אדם חדש",
+    "description": "רישום כאשר מזוהה אדם חדש",
+    "enabled": false,
+    "priority": 10,
+    "conditions": {
+      "operator": "AND",
+      "items": [
+        {
+          "type": "new_track",
+          "params": {
+            "objectType": "person"
+          }
+        }
+      ]
+    },
+    "pipeline": [
+      {
+        "type": "debounce",
+        "params": {
+          "cooldownMs": 5000,
+          "key": "new_person_{cameraId}"
+        }
+      }
+    ],
+    "actions": [
+      {
+        "type": "log_event",
+        "params": {
+          "message": "INFO: New person detected on camera {cameraId}",
+          "level": "info"
+        }
+      }
+    ],
+    "tags": ["info", "tracking"],
+    "triggerCount": 0,
+    "createdAt": "2025-01-01T00:00:00.000Z",
+    "updatedAt": "2025-01-01T00:00:00.000Z"
+  }
+]

@@ -109,7 +109,7 @@ class FFmpegStream:
         cmd = [
             'ffmpeg',
             '-hide_banner',
-            '-loglevel', 'warning',  # Show warnings but reduce spam
+            '-loglevel', 'error',  # Only show errors, not warnings (reduces H264 decode spam)
 
             # RTSP transport - TCP is more reliable for H264
             '-rtsp_transport', 'tcp' if self.config.tcp else 'udp',
@@ -127,11 +127,14 @@ class FFmpegStream:
 
             # H264 error handling - CRITICAL for corrupted streams
             '-err_detect', 'ignore_err',    # Continue despite errors
-            '-ec', 'guess_mvs+deblock',     # Error concealment: guess motion vectors + deblock
+            '-ec', 'guess_mvs+deblock+favor_inter',  # Error concealment: guess motion vectors + deblock + favor inter
 
             # Reasonable buffer to handle network jitter
             '-max_delay', '500000',         # 500ms max delay
             '-reorder_queue_size', '5',     # Reduced from 10 for lower latency
+
+            # Thread-based decoding for better error resilience
+            '-threads', '2',
 
             '-i', self.rtsp_url,
 

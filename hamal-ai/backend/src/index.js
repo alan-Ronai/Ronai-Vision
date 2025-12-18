@@ -14,6 +14,7 @@ import radioRoutes from './routes/radio.js';
 import streamRoutes from './routes/stream.js';
 import trackedRoutes from './routes/tracked.js';
 import alertRoutes from './routes/alerts.js';
+import eventRulesRoutes from './routes/eventRules.js';
 import { setupSocket } from './socket/handlers.js';
 
 // Load environment variables
@@ -64,6 +65,7 @@ app.use('/api/radio', radioRoutes);
 app.use('/api/stream', streamRoutes);
 app.use('/api/tracked', trackedRoutes);
 app.use('/api/alerts', alertRoutes);
+app.use('/api/event-rules', eventRulesRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {
@@ -72,6 +74,13 @@ app.get('/api/health', (req, res) => {
     timestamp: new Date(),
     mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'
   });
+});
+
+// System routes (for AI service actions)
+app.post('/api/system/play-sound', (req, res) => {
+  const { sound = 'alert', volume = 1 } = req.body;
+  io.emit('system:play-sound', { sound, volume });
+  res.json({ success: true, sound, volume });
 });
 
 // Error handling middleware

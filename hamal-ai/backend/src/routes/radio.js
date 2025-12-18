@@ -48,7 +48,15 @@ router.post('/transcription', async (req, res) => {
     const io = req.app.get('io');
     io.emit('radio:transcription', transcription);
 
-    // Check for command keywords
+    // Emit transcription event for rule engine processing
+    // This allows rules with transcription_keyword conditions to be triggered
+    io.emit('event-rules:transcription', {
+      text: transcription.text,
+      timestamp: transcription.timestamp,
+      source: transcription.source
+    });
+
+    // Check for command keywords (legacy behavior - rules can also handle this)
     const commands = checkForCommands(text);
     if (commands.length > 0) {
       for (const command of commands) {

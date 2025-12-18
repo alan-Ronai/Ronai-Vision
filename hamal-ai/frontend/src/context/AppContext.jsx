@@ -138,6 +138,12 @@ export function AppProvider({ children }) {
       );
     });
 
+    // Listen for play sound events from rule engine
+    newSocket.on('system:play-sound', (data) => {
+      console.log('Play sound event:', data);
+      playSound(data.sound, data.volume);
+    });
+
     return () => {
       newSocket.close();
     };
@@ -187,10 +193,9 @@ export function AppProvider({ children }) {
     fetchInitialData();
   }, []);
 
-  // Play alert sound
-  const playAlertSound = useCallback(() => {
+  // Play sound with different types
+  const playSound = useCallback((soundType = 'alert', volume = 1) => {
     try {
-      // Create audio context for alert sound
       const audioContext = new (window.AudioContext || window.webkitAudioContext)();
       const oscillator = audioContext.createOscillator();
       const gainNode = audioContext.createGain();
@@ -198,19 +203,35 @@ export function AppProvider({ children }) {
       oscillator.connect(gainNode);
       gainNode.connect(audioContext.destination);
 
-      oscillator.frequency.value = 880;
-      oscillator.type = 'sine';
-      gainNode.gain.value = 0.5;
+      // Configure sound based on type
+      const soundConfig = {
+        alert: { frequency: 880, type: 'sine', duration: 500 },
+        warning: { frequency: 660, type: 'triangle', duration: 400 },
+        notification: { frequency: 523, type: 'sine', duration: 200 },
+        success: { frequency: 1047, type: 'sine', duration: 150 },
+        error: { frequency: 220, type: 'sawtooth', duration: 600 },
+        beep: { frequency: 1000, type: 'square', duration: 100 },
+      };
+
+      const config = soundConfig[soundType] || soundConfig.alert;
+      oscillator.frequency.value = config.frequency;
+      oscillator.type = config.type;
+      gainNode.gain.value = Math.min(1, Math.max(0, volume)) * 0.5;
 
       oscillator.start();
       setTimeout(() => {
         oscillator.stop();
         audioContext.close();
-      }, 500);
+      }, config.duration);
     } catch (e) {
-      console.log('Could not play alert sound:', e);
+      console.log('Could not play sound:', e);
     }
   }, []);
+
+  // Play alert sound (legacy, calls playSound)
+  const playAlertSound = useCallback(() => {
+    playSound('alert', 1);
+  }, [playSound]);
 
   // Acknowledge emergency
   const acknowledgeEmergency = useCallback(() => {
@@ -282,10 +303,16 @@ export function AppProvider({ children }) {
     setRadioTranscript([]);
   };
 
+  // Clear events (local only)
+  const clearEvents = useCallback(() => {
+    setEvents([]);
+  }, []);
+
   const value = {
     socket,
     connected,
     events,
+    clearEvents,
     cameras,
     selectedCamera,
     selectCamera,

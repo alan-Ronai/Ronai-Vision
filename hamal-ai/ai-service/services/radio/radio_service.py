@@ -3,8 +3,13 @@
 Integrates RTPTCPClient with GeminiTranscriber and sends
 transcriptions to the backend for display in UI.
 
+Also processes transcription events through the Rule Engine for
+transcription_keyword conditions.
+
 Architecture:
     Radio → RTP/UDP → EC2 Relay → TCP → This Service → Gemini → Backend → UI
+                                                      ↓
+                                                Rule Engine → Actions
 """
 
 import os
@@ -17,6 +22,7 @@ import httpx
 
 from .rtp_tcp_client import RTPTCPClient
 from .gemini_transcriber import StreamingGeminiTranscriber, TranscriptionResult
+from ..rules import get_rule_engine, RuleContext
 
 logger = logging.getLogger(__name__)
 
@@ -187,9 +193,47 @@ class RadioService:
         # Send to backend
         asyncio.create_task(self._send_to_backend(result))
 
+        # Process through rule engine for transcription_keyword rules
+        asyncio.create_task(self._process_transcription_rules(result))
+
         # Call external callback
         if self.on_transcription:
             self.on_transcription(result)
+
+    async def _process_transcription_rules(self, result: TranscriptionResult):
+        """Process transcription through rule engine.
+
+        This allows rules with transcription_keyword conditions to be triggered
+        independently of the detection loop.
+
+        Args:
+            result: Transcription result
+        """
+        try:
+            rule_engine = get_rule_engine()
+            if not rule_engine:
+                logger.debug("Rule engine not available for transcription processing")
+                return
+
+            # Create context for transcription event
+            context = RuleContext(
+                event_type="transcription",
+                transcription=result.text,
+            )
+            # Set timestamp if available
+            if result.timestamp:
+                context.timestamp = result.timestamp.timestamp()
+
+            # Process through rule engine
+            results = await rule_engine.process_event(context)
+
+            if results:
+                logger.info(f"[RadioService] Transcription triggered {len(results)} rule(s)")
+                for r in results:
+                    logger.debug(f"  - Rule '{r.get('rule_name')}': {r.get('actions_executed')} actions")
+
+        except Exception as e:
+            logger.error(f"Error processing transcription rules: {e}")
 
     async def _send_to_backend(self, result: TranscriptionResult):
         """Send transcription to backend API.

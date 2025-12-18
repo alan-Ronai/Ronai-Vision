@@ -27,6 +27,8 @@ import threading
 from .detection import get_bot_sort_tracker, Detection, Track
 from .reid import OSNetReID, TransReIDVehicle, UniversalReID
 from . import backend_sync
+from .rules import RuleEngine, RuleContext, get_rule_engine
+from .recording import get_frame_buffer, get_recording_manager
 
 logger = logging.getLogger(__name__)
 
@@ -399,14 +401,40 @@ class DetectionLoop:
         # Stale frame threshold (configurable)
         self._stale_frame_threshold = float(os.environ.get("STALE_FRAME_THRESHOLD_MS", "300")) / 1000.0
 
+        # Rule Engine for configurable event handling
+        self.rule_engine = get_rule_engine()
+        logger.info("Rule Engine initialized")
+
     def on_frame(self, camera_id: str, frame: np.ndarray):
         """Callback when frame received from RTSP reader.
 
         CRITICAL: Stores only the LATEST frame per camera (overwrites previous).
         This prevents frame queue buildup and ensures we process fresh frames only.
+
+        Also feeds frames to:
+        - Frame buffer (for pre-recording buffer)
+        - Active recordings (if any)
         """
+        timestamp = time.time()
+
         with self._latest_frames_lock:
-            self._latest_frames[camera_id] = (frame.copy(), time.time())
+            self._latest_frames[camera_id] = (frame.copy(), timestamp)
+
+        # Add to frame buffer for pre-recording support
+        try:
+            frame_buffer = get_frame_buffer()
+            if frame_buffer:
+                frame_buffer.add_frame(camera_id, frame, timestamp)
+        except Exception as e:
+            logger.debug(f"Frame buffer error: {e}")
+
+        # Feed to active recordings
+        try:
+            recording_manager = get_recording_manager()
+            if recording_manager and recording_manager.is_recording(camera_id):
+                recording_manager.add_frame(camera_id, frame)
+        except Exception as e:
+            logger.debug(f"Recording manager error: {e}")
 
     def get_annotated_frame(self, camera_id: str) -> Optional[np.ndarray]:
         """Get latest annotated frame for streaming."""
@@ -428,11 +456,17 @@ class DetectionLoop:
         # Start async result handler
         asyncio.create_task(self._handle_results())
 
+        # Start the rule engine periodic timer for time-based rules
+        await self.rule_engine.start_periodic_timer()
+
         logger.info("Detection loop started")
 
     async def stop(self):
         """Stop the detection loop."""
         self._running = False
+
+        # Stop the rule engine periodic timer
+        await self.rule_engine.stop_periodic_timer()
 
         if self._http_client:
             await self._http_client.aclose()
@@ -771,14 +805,10 @@ class DetectionLoop:
                                         "conf": weapon_conf
                                     })
 
-                    # Log summary (once per frame instead of per weapon/person)
+                    # Note: Detailed logging is now handled by the Rule Engine via log_event action
+                    # Only log at debug level here for troubleshooting
                     if detected_weapons:
-                        weapon_summary = ", ".join([f"{w['class']} ({w['confidence']:.2f})" for w in detected_weapons])
-                        logger.warning(f"⚠️ WEAPONS DETECTED: {len(detected_weapons)} weapon(s) - {weapon_summary}")
-
-                        if armed_persons_this_frame:
-                            armed_ids = [p['track_id'] for p in armed_persons_this_frame]
-                            logger.warning(f"🚨 ARMED PERSONS: {len(armed_persons_this_frame)} person(s) - Tracks: {', '.join(armed_ids)}")
+                        logger.debug(f"Weapon detection: {len(detected_weapons)} weapon(s), {len(armed_persons_this_frame)} armed person(s)")
 
                 except Exception as e:
                     logger.error(f"Weapon detection error: {e}")
@@ -1172,7 +1202,7 @@ class DetectionLoop:
                     )
 
             if recovered:
-                logger.info(f"Recovered {len(recovered)} {object_type} detections")
+                logger.debug(f"Recovered {len(recovered)} {object_type} detections")
 
             return recovered
 
@@ -1267,13 +1297,8 @@ class DetectionLoop:
                 if self.gemini and self.gemini.is_configured():
                     await self._analyze_new_objects(result)
 
-                # Send events
-                if self.config.send_events:
-                    await self._send_events(result)
-
-                # Check for alerts
-                if result.armed_persons:
-                    await self._send_alert(result)
+                # Process events through Rule Engine
+                await self._process_with_rules(result)
 
                 # Sync tracked objects to backend for persistence
                 try:
@@ -1341,7 +1366,7 @@ class DetectionLoop:
 
                 self._last_gemini[track_id] = time.time()
                 self._stats["gemini_calls"] += 1
-                logger.info(
+                logger.debug(
                     f"Analyzed vehicle {track_id}: {analysis.get('manufacturer', '?')} {analysis.get('color', '?')}"
                 )
 
@@ -1407,9 +1432,8 @@ class DetectionLoop:
                 except Exception as sync_error:
                     logger.debug(f"Backend sync error: {sync_error}")
 
-                # Check if armed
+                # Check if armed (logging handled by Rule Engine)
                 if analysis.get("armed") or analysis.get("חמוש"):
-                    logger.warning(f"ARMED PERSON DETECTED: {track_id}")
                     p["metadata"] = metadata
                     result.armed_persons.append(p)
 
@@ -1465,9 +1489,9 @@ class DetectionLoop:
 
             if response.status_code in (200, 201):
                 self._stats["events_sent"] += 1
-                logger.info(f"Event sent: {event['title']}")
+                logger.debug(f"Event sent: {event['title']}")
             else:
-                logger.warning(f"Event send failed: {response.status_code}")
+                logger.debug(f"Event send failed: {response.status_code}")
 
         except Exception as e:
             logger.error(f"Failed to send event: {e}")
@@ -1503,9 +1527,131 @@ class DetectionLoop:
             response = await self._http_client.post(
                 f"{self.config.backend_url}/api/alerts", json=alert
             )
-            logger.warning(f"ALERT sent for {camera_id}: {response.status_code}")
+            logger.debug(f"Alert sent for {camera_id}: {response.status_code}")
         except Exception as e:
             logger.error(f"Failed to send alert: {e}")
+
+    async def _process_with_rules(self, result: DetectionResult):
+        """Process detection result through the rule engine.
+
+        This method creates rule contexts for different event types and
+        processes them through the rule engine, which evaluates conditions,
+        runs pipeline processors, and executes actions based on configured rules.
+
+        Fallback: If no rules are loaded, use legacy _send_events and _send_alert.
+        """
+        try:
+            # Ensure rules are loaded
+            await self.rule_engine.load_rules()
+
+            # If no rules loaded, fall back to legacy behavior
+            if not self.rule_engine.rules:
+                logger.debug("No rules loaded, using legacy event handling")
+                if self.config.send_events:
+                    await self._send_events(result)
+                if result.armed_persons:
+                    await self._send_alert(result)
+                return
+
+            # Build list of detections for rule context
+            all_detections = []
+
+            # Add tracked persons
+            for p in result.tracked_persons:
+                all_detections.append({
+                    "class": "person",
+                    "track_id": p.get("track_id"),
+                    "bbox": p.get("bbox"),
+                    "confidence": p.get("confidence", 0.5),
+                    "metadata": p.get("metadata", {}),
+                    "armed": p.get("metadata", {}).get("analysis", {}).get("armed", False)
+                })
+
+            # Add tracked vehicles
+            for v in result.tracked_vehicles:
+                all_detections.append({
+                    "class": v.get("class", "vehicle"),
+                    "track_id": v.get("track_id"),
+                    "bbox": v.get("bbox"),
+                    "confidence": v.get("confidence", 0.5),
+                    "metadata": v.get("metadata", {})
+                })
+
+            # Get attributes from armed persons if any
+            attributes = {}
+            if result.armed_persons:
+                armed = result.armed_persons[0]
+                meta = armed.get("metadata", {})
+                analysis = meta.get("analysis", {})
+                attributes = {
+                    "armed": True,
+                    "threatLevel": "critical",
+                    "weaponType": analysis.get("weaponType", analysis.get("סוג_נשק"))
+                }
+
+            # Process detection event
+            if result.new_vehicles or result.new_persons or result.tracked_persons or result.tracked_vehicles:
+                detection_context = RuleContext(
+                    event_type="detection",
+                    camera_id=result.camera_id,
+                    person_count=len(result.tracked_persons),
+                    vehicle_count=len(result.tracked_vehicles),
+                    object_counts={
+                        "person": len(result.tracked_persons),
+                        "vehicle": len(result.tracked_vehicles),
+                        "new_person": len(result.new_persons),
+                        "new_vehicle": len(result.new_vehicles),
+                    },
+                    attributes=attributes,
+                    frame=result.frame,
+                    detections=all_detections,
+                    timestamp=result.timestamp
+                )
+
+                results = await self.rule_engine.process_event(detection_context)
+                if results:
+                    logger.debug(f"Rule engine processed {len(results)} rules for detection")
+
+            # Process new track events (for each new person/vehicle)
+            for p in result.new_persons:
+                new_track_context = RuleContext(
+                    event_type="new_track",
+                    camera_id=result.camera_id,
+                    track_id=p.get("track_id"),
+                    object_type="person",
+                    confidence=p.get("confidence", 0.5),
+                    bbox=p.get("bbox"),
+                    attributes=p.get("metadata", {}).get("analysis", {}),
+                    frame=result.frame,
+                    detections=all_detections,
+                    person_count=len(result.tracked_persons),
+                    timestamp=result.timestamp
+                )
+                await self.rule_engine.process_event(new_track_context)
+
+            for v in result.new_vehicles:
+                new_track_context = RuleContext(
+                    event_type="new_track",
+                    camera_id=result.camera_id,
+                    track_id=v.get("track_id"),
+                    object_type=v.get("class", "vehicle"),
+                    confidence=v.get("confidence", 0.5),
+                    bbox=v.get("bbox"),
+                    attributes=v.get("metadata", {}).get("analysis", {}),
+                    frame=result.frame,
+                    detections=all_detections,
+                    vehicle_count=len(result.tracked_vehicles),
+                    timestamp=result.timestamp
+                )
+                await self.rule_engine.process_event(new_track_context)
+
+        except Exception as e:
+            logger.error(f"Rule engine processing error: {e}", exc_info=True)
+            # Fall back to legacy behavior on error
+            if self.config.send_events:
+                await self._send_events(result)
+            if result.armed_persons:
+                await self._send_alert(result)
 
     def _make_title(self, result: DetectionResult) -> str:
         """Generate Hebrew title."""
