@@ -64,7 +64,7 @@ class GeminiTranscriber:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = "gemini-2.0-flash-exp",
+        model: str = "gemini-2.0-flash",
         sample_rate: int = 16000,
         chunk_duration: float = 5.0,  # Seconds of audio per transcription
         silence_threshold: float = 500.0,  # RMS threshold for silence
@@ -117,7 +117,9 @@ class GeminiTranscriber:
         if self.save_audio:
             self.audio_output_dir = Path("audio_output")
             self.audio_output_dir.mkdir(exist_ok=True)
-            logger.info(f"Audio files will be saved to: {self.audio_output_dir.absolute()}")
+            logger.info(
+                f"Audio files will be saved to: {self.audio_output_dir.absolute()}"
+            )
         else:
             self.audio_output_dir = None
             logger.info("Audio file saving disabled")
@@ -276,7 +278,8 @@ class GeminiTranscriber:
         elif (
             self._has_speech  # We have speech in the buffer
             and self._buffer_samples >= self._min_samples  # Met minimum duration
-            and self._silence_samples >= self._samples_per_silence  # Enough silence detected
+            and self._silence_samples
+            >= self._samples_per_silence  # Enough silence detected
         ):
             should_process = True
             reason = "silence detected"
@@ -313,7 +316,9 @@ class GeminiTranscriber:
             # Combine buffer
             audio_bytes = b"".join(self._audio_buffer)
             duration = len(audio_bytes) / (2 * self.sample_rate)
-            logger.info(f"🎙️  Processing audio buffer: {len(audio_bytes)} bytes, {duration:.2f}s")
+            logger.info(
+                f"🎙️  Processing audio buffer: {len(audio_bytes)} bytes, {duration:.2f}s"
+            )
 
             # Clear buffer and reset silence detection state
             self._audio_buffer = []
@@ -326,7 +331,9 @@ class GeminiTranscriber:
 
             if result and result.text:
                 self._stats["transcriptions"] += 1
-                logger.info(f"✅ Transcription successful: '{result.text}' ({len(result.text)} chars)")
+                logger.info(
+                    f"✅ Transcription successful: '{result.text}' ({len(result.text)} chars)"
+                )
 
                 # Call callback
                 if self.on_transcription:
@@ -396,8 +403,6 @@ class GeminiTranscriber:
 
 כללים:
 - תמלל בדיוק מה שנאמר בעברית
-- אם יש רעשי רקע או דיבור לא ברור, התעלם
-- אם אין דיבור ברור, החזר מחרוזת ריקה
 - אל תוסיף הסברים או הערות
 - החזר רק את הטקסט המתומלל"""
 
@@ -428,7 +433,10 @@ class GeminiTranscriber:
                     )
 
                 # Check if candidate has content
-                if not response.candidates[0].content or not response.candidates[0].content.parts:
+                if (
+                    not response.candidates[0].content
+                    or not response.candidates[0].content.parts
+                ):
                     warning_msg = "⚠️  Gemini candidate has no content parts - likely no speech detected"
                     if saved_path:
                         warning_msg += f"\n   Audio saved to: {saved_path}\n   You can play this file to debug what Gemini received"
@@ -447,9 +455,13 @@ class GeminiTranscriber:
                 # Log where the audio was saved (if enabled)
                 if saved_path:
                     if text:
-                        logger.info(f"📝 Transcribed: '{text}' (audio: {saved_path.name})")
+                        logger.info(
+                            f"📝 Transcribed: '{text}' (audio: {saved_path.name})"
+                        )
                     else:
-                        logger.info(f"📝 Empty transcription (audio: {saved_path.name})")
+                        logger.info(
+                            f"📝 Empty transcription (audio: {saved_path.name})"
+                        )
                 else:
                     if text:
                         logger.info(f"📝 Transcribed: '{text}'")
