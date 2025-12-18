@@ -28,6 +28,7 @@ from .detection import get_bot_sort_tracker, Detection, Track
 from .osnet_reid import OSNetReID
 from .transreid_vehicle import TransReIDVehicle
 from .universal_reid import UniversalReID
+from . import backend_sync
 
 logger = logging.getLogger(__name__)
 
@@ -437,6 +438,9 @@ class DetectionLoop:
 
         if self._http_client:
             await self._http_client.aclose()
+
+        # Close backend sync client
+        await backend_sync.close_http_client()
 
         logger.info("Detection loop stopped")
 
@@ -1273,13 +1277,43 @@ class DetectionLoop:
                 if result.armed_persons:
                     await self._send_alert(result)
 
+                # Sync tracked objects to backend for persistence
+                try:
+                    await backend_sync.sync_from_detection_result(
+                        camera_id=result.camera_id,
+                        camera_name=result.camera_id,  # Use camera_id as name for now
+                        tracked_persons=result.tracked_persons,
+                        tracked_vehicles=result.tracked_vehicles,
+                        new_persons=result.new_persons,
+                        new_vehicles=result.new_vehicles,
+                        armed_persons=result.armed_persons,
+                    )
+                except Exception as sync_error:
+                    logger.debug(f"Backend sync error (non-critical): {sync_error}")
+
             except Exception as e:
                 logger.error(f"Result handler error: {e}")
 
     async def _analyze_new_objects(self, result: DetectionResult):
-        """Analyze new objects with Gemini."""
-        # Analyze new vehicles
-        for v in result.new_vehicles[:3]:  # Limit to 3 per frame
+        """Analyze new and unanalyzed objects with Gemini."""
+        # Collect all vehicles that need analysis (new + existing without analysis)
+        vehicles_to_analyze = []
+
+        # Add new vehicles
+        for v in result.new_vehicles:
+            vehicles_to_analyze.append(v)
+
+        # Add tracked vehicles that don't have analysis yet
+        for v in result.tracked_vehicles:
+            track_id = v.get("track_id")
+            # Check if already in list or has analysis
+            if track_id and track_id not in [x.get("track_id") for x in vehicles_to_analyze]:
+                metadata = v.get("metadata", {})
+                if not metadata.get("analysis"):
+                    vehicles_to_analyze.append(v)
+
+        # Analyze vehicles (limit to 3 per frame to avoid overloading Gemini)
+        for v in vehicles_to_analyze[:3]:
             track_id = v["track_id"]
 
             # Cooldown check
@@ -1290,7 +1324,7 @@ class DetectionLoop:
                 continue
 
             try:
-                analysis = await self.gemini.analyze_veihcle(result.frame, v["bbox"])
+                analysis = await self.gemini.analyze_vehicle(result.frame, v["bbox"])
                 metadata = {
                     "type": "vehicle",
                     "analysis": analysis,
@@ -1312,11 +1346,34 @@ class DetectionLoop:
                 logger.info(
                     f"Analyzed vehicle {track_id}: {analysis.get('manufacturer', '?')} {analysis.get('color', '?')}"
                 )
+
+                # Sync analysis to backend
+                try:
+                    await backend_sync.update_analysis(gid=track_id, analysis=analysis)
+                except Exception as sync_error:
+                    logger.debug(f"Backend sync error: {sync_error}")
+
             except Exception as e:
                 logger.error(f"Gemini vehicle analysis error: {e}")
 
-        # Analyze new persons
-        for p in result.new_persons[:3]:
+        # Collect all persons that need analysis (new + existing without analysis)
+        persons_to_analyze = []
+
+        # Add new persons
+        for p in result.new_persons:
+            persons_to_analyze.append(p)
+
+        # Add tracked persons that don't have analysis yet
+        for p in result.tracked_persons:
+            track_id = p.get("track_id")
+            # Check if already in list or has analysis
+            if track_id and track_id not in [x.get("track_id") for x in persons_to_analyze]:
+                metadata = p.get("metadata", {})
+                if not metadata.get("analysis"):
+                    persons_to_analyze.append(p)
+
+        # Analyze persons (limit to 3 per frame)
+        for p in persons_to_analyze[:3]:
             track_id = p["track_id"]
 
             if (
@@ -1346,11 +1403,26 @@ class DetectionLoop:
                 self._last_gemini[track_id] = time.time()
                 self._stats["gemini_calls"] += 1
 
+                # Sync analysis to backend
+                try:
+                    await backend_sync.update_analysis(gid=track_id, analysis=analysis)
+                except Exception as sync_error:
+                    logger.debug(f"Backend sync error: {sync_error}")
+
                 # Check if armed
                 if analysis.get("armed") or analysis.get("חמוש"):
                     logger.warning(f"ARMED PERSON DETECTED: {track_id}")
                     p["metadata"] = metadata
                     result.armed_persons.append(p)
+
+                    # Immediately sync armed status to backend
+                    try:
+                        await backend_sync.mark_armed(
+                            gid=track_id,
+                            weapon_type=analysis.get("weaponType", analysis.get("סוג_נשק")),
+                        )
+                    except Exception as sync_error:
+                        logger.debug(f"Backend armed sync error: {sync_error}")
 
             except Exception as e:
                 logger.error(f"Gemini person analysis error: {e}")

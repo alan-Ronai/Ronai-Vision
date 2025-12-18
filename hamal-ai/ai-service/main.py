@@ -45,6 +45,7 @@ from services.tts_service import TTSService
 from services.rtsp_reader import get_rtsp_manager, RTSPConfig
 from services.detection_loop import init_detection_loop, get_detection_loop, LoopConfig
 from services.radio import init_radio_service, get_radio_service, stop_radio_service
+from services.radio.radio_transmit import router as radio_transmit_router
 from services.detection import get_frame_buffer_manager, get_stable_tracker
 from services.ffmpeg_rtsp import get_ffmpeg_manager, FFmpegConfig
 
@@ -63,6 +64,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Include routers
+app.include_router(radio_transmit_router, prefix="/api")
 
 # Device detection
 def get_device():
@@ -1107,6 +1111,122 @@ async def get_tracker_stats():
     return tracker.get_stats()
 
 
+@app.post("/tracker/refresh-analysis/{track_id}")
+async def refresh_analysis(
+    track_id: str,
+    camera_id: str = Query(None, description="Camera ID to get current frame from")
+):
+    """
+    Refresh Gemini analysis for a tracked object.
+
+    Gets the current frame from the camera and re-analyzes the object
+    if it's still visible in the scene.
+
+    Args:
+        track_id: Track ID of the object to refresh (e.g., 't_5', 'v_3', or '5')
+        camera_id: Camera to use for getting current frame
+
+    Returns:
+        Updated analysis or error if object not visible
+    """
+    from services.backend_sync import parse_gid
+
+    # Parse track ID to get numeric GID
+    gid = parse_gid(track_id)
+    if gid is None:
+        raise HTTPException(400, f"Invalid track_id: {track_id}")
+
+    # Get detection loop
+    detection_loop = get_detection_loop()
+    if not detection_loop:
+        raise HTTPException(503, "Detection loop not running")
+
+    # Get the stable tracker to find the object
+    stable_tracker = get_stable_tracker()
+
+    # Determine object type and get object
+    obj = None
+    obj_type = None
+
+    # Check if it's a person (track IDs starting with 't_' or 'p_')
+    if track_id.startswith('t_') or track_id.startswith('p_'):
+        obj_type = 'person'
+        for person in stable_tracker.get_all_persons():
+            if person.track_id == gid:
+                obj = person
+                break
+    # Check if it's a vehicle
+    elif track_id.startswith('v_'):
+        obj_type = 'vehicle'
+        for vehicle in stable_tracker.get_all_vehicles():
+            if vehicle.track_id == gid:
+                obj = vehicle
+                break
+    else:
+        # Try both
+        for person in stable_tracker.get_all_persons():
+            if person.track_id == gid:
+                obj = person
+                obj_type = 'person'
+                break
+        if not obj:
+            for vehicle in stable_tracker.get_all_vehicles():
+                if vehicle.track_id == gid:
+                    obj = vehicle
+                    obj_type = 'vehicle'
+                    break
+
+    if not obj:
+        raise HTTPException(404, f"Object {track_id} not found in active tracking")
+
+    # Get camera_id from object if not provided
+    if not camera_id:
+        camera_id = obj.camera_id
+
+    if not camera_id:
+        raise HTTPException(400, "Camera ID not provided and object has no camera")
+
+    # Get current frame from RTSP manager
+    rtsp_manager = get_rtsp_manager()
+    frame = rtsp_manager.get_frame(camera_id)
+
+    if frame is None:
+        raise HTTPException(503, f"No frame available from camera {camera_id}")
+
+    # Get bbox from object
+    bbox = obj.bbox if hasattr(obj, 'bbox') else None
+    if not bbox:
+        raise HTTPException(400, "Object has no bounding box")
+
+    # Run Gemini analysis
+    try:
+        if obj_type == 'vehicle':
+            analysis = await gemini.analyze_vehicle(frame, bbox)
+        else:
+            analysis = await gemini.analyze_person(frame, bbox)
+
+        # Update tracker metadata
+        obj.metadata['analysis'] = analysis
+
+        # Sync to backend
+        from services import backend_sync
+        await backend_sync.update_analysis(gid=gid, analysis=analysis)
+
+        logger.info(f"Refreshed analysis for {track_id}: {analysis}")
+
+        return {
+            "track_id": track_id,
+            "gid": gid,
+            "type": obj_type,
+            "analysis": analysis,
+            "camera_id": camera_id
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to refresh analysis for {track_id}: {e}")
+        raise HTTPException(500, f"Analysis failed: {str(e)}")
+
+
 @app.get("/tracker/objects")
 async def get_tracked_objects(
     obj_type: Optional[str] = Query(None, description="Filter by type: vehicle/person")
@@ -1312,6 +1432,25 @@ async def startup_event():
         logger.info("📻 Radio service not started (EC2_RTP_HOST not configured)")
 
 
+async def update_camera_status(camera_id: str, status: str, error_msg: str = None):
+    """Update camera status in the backend."""
+    import httpx
+
+    try:
+        async with httpx.AsyncClient() as client:
+            payload = {"status": status}
+            if error_msg:
+                payload["error"] = error_msg
+            await client.patch(
+                f"{BACKEND_URL}/api/cameras/{camera_id}/status",
+                json=payload,
+                timeout=5.0
+            )
+            logger.debug(f"Updated camera {camera_id} status to {status}")
+    except Exception as e:
+        logger.debug(f"Failed to update camera status: {e}")
+
+
 async def auto_load_cameras():
     """Load cameras from backend and start RTSP readers."""
     import httpx
@@ -1343,6 +1482,9 @@ async def auto_load_cameras():
 
                 logger.info(f"📹 Starting camera: {camera.get('name', camera_id)}")
 
+                # Set status to connecting
+                await update_camera_status(camera_id, "connecting")
+
                 config = RTSPConfig(
                     width=1280,
                     height=720,
@@ -1350,7 +1492,21 @@ async def auto_load_cameras():
                     tcp_transport=True
                 )
 
-                rtsp_manager.add_camera(camera_id, rtsp_url, config)
+                try:
+                    rtsp_manager.add_camera(camera_id, rtsp_url, config)
+                    # Wait a bit for connection to establish
+                    await asyncio.sleep(1.0)
+                    # Check if we got a frame
+                    frame = rtsp_manager.get_frame(camera_id)
+                    if frame is not None:
+                        await update_camera_status(camera_id, "online")
+                        logger.info(f"✅ Camera {camera_id} online")
+                    else:
+                        await update_camera_status(camera_id, "error", "No frames received")
+                        logger.warning(f"⚠️ Camera {camera_id} - no frames yet")
+                except Exception as e:
+                    await update_camera_status(camera_id, "error", str(e))
+                    logger.error(f"❌ Failed to start camera {camera_id}: {e}")
 
             logger.info(f"✅ Loaded {len(rtsp_manager.get_active_cameras())} cameras")
 

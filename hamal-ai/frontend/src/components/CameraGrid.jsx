@@ -1,7 +1,12 @@
+import { useState } from 'react';
 import { useApp } from '../context/AppContext';
+import CameraManager from './CameraManager';
+
+const AI_SERVICE_URL = import.meta.env.VITE_AI_SERVICE_URL || 'http://localhost:8000';
 
 export default function CameraGrid() {
   const { cameras, selectedCamera, selectCamera, isEmergency, API_URL } = useApp();
+  const [showCameraManager, setShowCameraManager] = useState(false);
 
   return (
     <div className={`
@@ -14,7 +19,17 @@ export default function CameraGrid() {
           <span>📷</span>
           <span className="font-bold">מצלמות</span>
         </div>
-        <span className="text-sm text-gray-400">{cameras.length} מצלמות</span>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => setShowCameraManager(true)}
+            className="px-2 py-1 bg-gray-600 hover:bg-gray-500 rounded text-xs flex items-center gap-1 transition-colors"
+            title="ניהול מצלמות"
+          >
+            <span>⚙️</span>
+            <span>ניהול</span>
+          </button>
+          <span className="text-sm text-gray-400">{cameras.length} מצלמות</span>
+        </div>
       </div>
 
       {/* Camera grid */}
@@ -26,7 +41,7 @@ export default function CameraGrid() {
               camera={camera}
               isSelected={selectedCamera === camera.cameraId}
               onSelect={() => selectCamera(camera.cameraId)}
-              apiUrl={API_URL}
+              aiServiceUrl={AI_SERVICE_URL}
             />
           ))}
 
@@ -38,17 +53,28 @@ export default function CameraGrid() {
           )}
         </div>
       </div>
+
+      {/* Camera Manager Modal */}
+      <CameraManager
+        isOpen={showCameraManager}
+        onClose={() => setShowCameraManager(false)}
+      />
     </div>
   );
 }
 
-function CameraThumbnail({ camera, isSelected, onSelect, apiUrl }) {
+function CameraThumbnail({ camera, isSelected, onSelect, aiServiceUrl }) {
+  const [imgError, setImgError] = useState(false);
+
   const statusColors = {
     online: 'bg-green-500',
     offline: 'bg-gray-500',
     error: 'bg-red-500',
-    connecting: 'bg-yellow-500'
+    connecting: 'bg-yellow-500 animate-pulse'
   };
+
+  // Use AI service URL for the MJPEG stream (port 8000)
+  const streamUrl = `${aiServiceUrl}/api/stream/mjpeg/${camera.cameraId}?fps=5`;
 
   return (
     <button
@@ -63,18 +89,13 @@ function CameraThumbnail({ camera, isSelected, onSelect, apiUrl }) {
       `}
     >
       {/* Thumbnail image or placeholder */}
-      {camera.thumbnail ? (
+      {camera.status === 'online' && !imgError ? (
         <img
-          src={`${apiUrl}${camera.thumbnail}`}
-          alt={camera.name}
-          className="w-full h-full object-cover"
-        />
-      ) : camera.status === 'online' ? (
-        <img
-          src={`${apiUrl}/api/stream/mjpeg/${camera.cameraId}`}
+          src={streamUrl}
           alt={camera.name}
           className="w-full h-full object-cover"
           loading="lazy"
+          onError={() => setImgError(true)}
         />
       ) : (
         <div className="w-full h-full flex items-center justify-center text-gray-600">

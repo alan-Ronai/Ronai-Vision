@@ -7,13 +7,40 @@ const AI_SERVICE_URL = import.meta.env.VITE_AI_SERVICE_URL || 'http://localhost:
 export default function MainCamera() {
   const { selectedCamera, cameras, isEmergency } = useApp();
   const imgRef = useRef(null);
+  const containerRef = useRef(null);
   const [error, setError] = useState(null);
   const [frameData, setFrameData] = useState(null);
   const [isConnected, setIsConnected] = useState(false);
-  const [frameCount, setFrameCount] = useState(0);
+  const [fps, setFps] = useState(0);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [streamMode, setStreamMode] = useState('annotated'); // 'annotated' or 'raw'
 
+  // FPS calculation refs
+  const frameTimesRef = useRef([]);
+  const lastFpsUpdateRef = useRef(Date.now());
+
   const camera = cameras.find(c => c.cameraId === selectedCamera);
+
+  // Calculate FPS from frame timestamps
+  const updateFps = useCallback(() => {
+    const now = Date.now();
+    const frameTimes = frameTimesRef.current;
+
+    // Add current frame time
+    frameTimes.push(now);
+
+    // Keep only frames from the last second
+    const oneSecondAgo = now - 1000;
+    while (frameTimes.length > 0 && frameTimes[0] < oneSecondAgo) {
+      frameTimes.shift();
+    }
+
+    // Update FPS display every 500ms for smoother display
+    if (now - lastFpsUpdateRef.current >= 500) {
+      setFps(frameTimes.length);
+      lastFpsUpdateRef.current = now;
+    }
+  }, []);
 
   // SSE-based streaming - single connection, server controls frame rate
   useEffect(() => {
@@ -21,7 +48,8 @@ export default function MainCamera() {
 
     setError(null);
     setIsConnected(false);
-    setFrameCount(0);
+    setFps(0);
+    frameTimesRef.current = [];
 
     // Use annotated stream (with bboxes) or raw stream
     const endpoint = streamMode === 'annotated'
@@ -43,7 +71,7 @@ export default function MainCamera() {
         const data = JSON.parse(event.data);
         if (data.frame) {
           setFrameData(`data:image/jpeg;base64,${data.frame}`);
-          setFrameCount(prev => prev + 1);
+          updateFps();
         } else if (data.error) {
           console.error('Stream error:', data.error);
         }
@@ -64,19 +92,53 @@ export default function MainCamera() {
       console.log('Closing SSE connection for', selectedCamera);
       eventSource.close();
     };
-  }, [selectedCamera, streamMode]);
+  }, [selectedCamera, streamMode, updateFps]);
 
   const handleRetry = useCallback(() => {
     setError(null);
     setFrameData(null);
-    setFrameCount(0);
+    setFps(0);
+    frameTimesRef.current = [];
+  }, []);
+
+  // Fullscreen handling
+  const toggleFullscreen = useCallback(() => {
+    if (!containerRef.current) return;
+
+    if (!document.fullscreenElement) {
+      containerRef.current.requestFullscreen().then(() => {
+        setIsFullscreen(true);
+      }).catch(err => {
+        console.error('Fullscreen error:', err);
+      });
+    } else {
+      document.exitFullscreen().then(() => {
+        setIsFullscreen(false);
+      });
+    }
+  }, []);
+
+  // Listen for fullscreen changes (e.g., pressing Escape)
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsFullscreen(!!document.fullscreenElement);
+    };
+
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+    };
   }, []);
 
   return (
-    <div className={`
-      h-full bg-gray-800 rounded-lg overflow-hidden flex flex-col
-      ${isEmergency ? 'border-2 border-red-500 animate-border-pulse' : 'border border-gray-700'}
-    `}>
+    <div
+      ref={containerRef}
+      className={`
+        h-full bg-gray-800 rounded-lg overflow-hidden flex flex-col
+        ${isEmergency ? 'border-2 border-red-500 animate-border-pulse' : 'border border-gray-700'}
+        ${isFullscreen ? 'fixed inset-0 z-50 rounded-none' : ''}
+      `}
+    >
       {/* Header */}
       <div className="bg-gray-700 px-4 py-2 flex items-center justify-between flex-shrink-0">
         <div className="flex items-center gap-2">
@@ -115,12 +177,21 @@ export default function MainCamera() {
             {isConnected ? 'משדר' : 'מתחבר...'}
           </div>
 
-          {/* Frame counter */}
+          {/* FPS counter */}
           {isConnected && (
-            <span className="text-xs text-gray-400">
-              {frameCount} פריימים
+            <span className={`text-sm font-mono px-2 py-1 rounded ${fps < 10 ? 'bg-red-600' : fps < 15 ? 'bg-yellow-600' : 'bg-gray-600'}`}>
+              {fps} FPS
             </span>
           )}
+
+          {/* Fullscreen button */}
+          <button
+            onClick={toggleFullscreen}
+            className="px-2 py-1 bg-gray-600 hover:bg-gray-500 rounded text-sm transition-colors"
+            title={isFullscreen ? 'יציאה ממסך מלא' : 'מסך מלא'}
+          >
+            {isFullscreen ? '⛶' : '⛶'}
+          </button>
         </div>
       </div>
 

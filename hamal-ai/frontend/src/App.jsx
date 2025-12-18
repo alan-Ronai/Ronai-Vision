@@ -10,11 +10,15 @@ import StatusBar from './components/StatusBar';
 import DemoControls from './components/DemoControls';
 import CameraManager from './components/CameraManager';
 import DetectionSettings from './components/DetectionSettings';
+import GlobalIDStore from './components/GlobalIDStore';
+import AudioTransmitter from './components/AudioTransmitter';
 
 function Dashboard() {
   const { isEmergency, simulationPopup, loading } = useApp();
   const [showCameraManager, setShowCameraManager] = useState(false);
   const [showDetectionSettings, setShowDetectionSettings] = useState(false);
+  const [showGlobalIDStore, setShowGlobalIDStore] = useState(false);
+  const [showAudioTransmitter, setShowAudioTransmitter] = useState(false);
 
   if (loading) {
     return (
@@ -79,18 +83,25 @@ function Dashboard() {
       {/* Settings buttons */}
       <div className="fixed bottom-4 left-4 flex flex-col gap-2 z-30">
         <button
-          onClick={() => setShowCameraManager(true)}
-          className="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded-lg shadow-lg flex items-center gap-2"
-        >
-          <span>📹</span>
-          <span>ניהול מצלמות</span>
-        </button>
-        <button
           onClick={() => setShowDetectionSettings(true)}
           className="bg-blue-700 hover:bg-blue-600 px-4 py-2 rounded-lg shadow-lg flex items-center gap-2"
         >
           <span>⚙️</span>
           <span>הגדרות זיהוי AI</span>
+        </button>
+        <button
+          onClick={() => setShowGlobalIDStore(true)}
+          className="bg-purple-700 hover:bg-purple-600 px-4 py-2 rounded-lg shadow-lg flex items-center gap-2"
+        >
+          <span>🆔</span>
+          <span>מאגר זיהויים</span>
+        </button>
+        <button
+          onClick={() => setShowAudioTransmitter(true)}
+          className="bg-orange-700 hover:bg-orange-600 px-4 py-2 rounded-lg shadow-lg flex items-center gap-2"
+        >
+          <span>📻</span>
+          <span>שידור לקשר</span>
         </button>
       </div>
 
@@ -104,6 +115,18 @@ function Dashboard() {
       <DetectionSettings
         isOpen={showDetectionSettings}
         onClose={() => setShowDetectionSettings(false)}
+      />
+
+      {/* Global ID Store Modal */}
+      <GlobalIDStore
+        isOpen={showGlobalIDStore}
+        onClose={() => setShowGlobalIDStore(false)}
+      />
+
+      {/* Audio Transmitter Modal */}
+      <AudioTransmitter
+        isOpen={showAudioTransmitter}
+        onClose={() => setShowAudioTransmitter(false)}
       />
 
       {/* Emergency popup */}
