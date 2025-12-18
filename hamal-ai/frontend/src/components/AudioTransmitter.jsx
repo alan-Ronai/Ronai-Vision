@@ -5,13 +5,14 @@
  * Features:
  * - Live microphone recording with VAD (voice activity detection)
  * - Audio file upload
- * - PTT (Push-to-Talk) controls
+ * - Text-to-Speech transmission
  * - Transmission status display
  */
 
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3000';
+const AI_SERVICE_URL = import.meta.env.VITE_AI_SERVICE_URL || 'http://localhost:8000';
 
 // Audio processing constants
 const SAMPLE_RATE = 16000;
@@ -21,7 +22,6 @@ const VAD_SILENCE_DURATION = 1500; // ms of silence before auto-stop
 export default function AudioTransmitter({ isOpen, onClose }) {
   // Recording state
   const [isRecording, setIsRecording] = useState(false);
-  const [isPTTActive, setIsPTTActive] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
   const [audioLevel, setAudioLevel] = useState(0);
 
@@ -30,9 +30,12 @@ export default function AudioTransmitter({ isOpen, onClose }) {
   const [transmitStatus, setTransmitStatus] = useState(null);
   const [txStats, setTxStats] = useState(null);
 
+  // TTS state
+  const [ttsText, setTtsText] = useState('');
+  const [isTTSProcessing, setIsTTSProcessing] = useState(false);
+
   // Settings
   const [useVAD, setUseVAD] = useState(true);
-  const [autoPTT, setAutoPTT] = useState(true);
 
   // Refs for audio processing
   const mediaRecorderRef = useRef(null);
@@ -62,7 +65,7 @@ export default function AudioTransmitter({ isOpen, onClose }) {
         }
       } catch (error) {
         // Service unavailable - don't spam console
-        setTxStats({ connected: false, error: 'AI service unavailable' });
+        setTxStats({ connected: false, error: 'שירות AI לא זמין' });
       }
     };
 
@@ -273,7 +276,7 @@ export default function AudioTransmitter({ isOpen, onClose }) {
         body: JSON.stringify({
           audio_base64: base64,
           sample_rate: SAMPLE_RATE,
-          auto_ptt: autoPTT
+          auto_ptt: true
         })
       });
 
@@ -380,7 +383,7 @@ export default function AudioTransmitter({ isOpen, onClose }) {
         body: JSON.stringify({
           audio_base64: base64,
           sample_rate: sampleRate,
-          auto_ptt: autoPTT
+          auto_ptt: true
         })
       });
 
@@ -407,24 +410,67 @@ export default function AudioTransmitter({ isOpen, onClose }) {
   };
 
   /**
-   * Manual PTT control
+   * Send TTS text to radio
    */
-  const sendPTT = async (state) => {
-    try {
-      setIsPTTActive(state === 'START');
+  const handleTTSSend = async () => {
+    if (!ttsText.trim()) return;
 
-      const response = await fetch(`${BACKEND_URL}/api/radio/transmit/ptt`, {
+    setIsTTSProcessing(true);
+    setTransmitStatus({ message: 'ממיר טקסט לדיבור...' });
+
+    try {
+      // Call TTS service to convert text to audio
+      const ttsResponse = await fetch(`${AI_SERVICE_URL}/tts/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ state })
+        body: JSON.stringify({
+          text: ttsText,
+          language: 'he'  // Hebrew
+        })
       });
 
-      const result = await response.json();
-      if (!result.success) {
-        console.error('PTT failed:', result);
+      if (!ttsResponse.ok) {
+        throw new Error(`TTS failed: ${ttsResponse.status}`);
       }
+
+      const ttsResult = await ttsResponse.json();
+
+      if (!ttsResult.audio_base64) {
+        throw new Error('No audio returned from TTS');
+      }
+
+      setTransmitStatus({ message: 'משדר...' });
+
+      // Send the audio to radio
+      const transmitResponse = await fetch(`${BACKEND_URL}/api/radio/transmit/audio`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          audio_base64: ttsResult.audio_base64,
+          sample_rate: ttsResult.sample_rate || 16000,
+          auto_ptt: true
+        })
+      });
+
+      const transmitResult = await transmitResponse.json();
+
+      if (transmitResult.success) {
+        setTransmitStatus({
+          success: true,
+          message: `הודעה שודרה בהצלחה - ${transmitResult.packets_sent || 0} חבילות`
+        });
+        setTtsText(''); // Clear the text after successful send
+      } else {
+        setTransmitStatus({
+          error: transmitResult.message || 'שגיאה בשידור'
+        });
+      }
+
     } catch (error) {
-      console.error('PTT error:', error);
+      console.error('TTS error:', error);
+      setTransmitStatus({ error: 'שגיאה בהמרת טקסט לדיבור' });
+    } finally {
+      setIsTTSProcessing(false);
     }
   };
 
@@ -492,6 +538,42 @@ export default function AudioTransmitter({ isOpen, onClose }) {
           </div>
         </div>
 
+        {/* TTS Section */}
+        <div className="mb-6">
+          <h3 className="text-gray-300 mb-3 font-medium">הודעה קולית (טקסט לדיבור)</h3>
+          <div className="space-y-3">
+            <textarea
+              value={ttsText}
+              onChange={(e) => setTtsText(e.target.value)}
+              placeholder="הקלד הודעה בעברית לשידור..."
+              className="w-full h-24 bg-gray-700 border border-gray-600 rounded-lg p-3 text-white placeholder-gray-500 resize-none focus:outline-none focus:border-blue-500"
+              dir="rtl"
+              disabled={isTTSProcessing || isTransmitting}
+            />
+            <button
+              onClick={handleTTSSend}
+              disabled={!ttsText.trim() || isTTSProcessing || isTransmitting || isRecording}
+              className={`w-full py-3 px-4 rounded-lg font-medium flex items-center justify-center gap-2 ${
+                !ttsText.trim() || isTTSProcessing || isTransmitting || isRecording
+                  ? 'bg-gray-600 text-gray-400 cursor-not-allowed'
+                  : 'bg-green-600 hover:bg-green-700 text-white'
+              }`}
+            >
+              {isTTSProcessing ? (
+                <>
+                  <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  <span>ממיר ומשדר...</span>
+                </>
+              ) : (
+                <>
+                  <span>🔊</span>
+                  <span>שדר הודעה</span>
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+
         {/* Recording Section */}
         <div className="mb-6">
           <h3 className="text-gray-300 mb-3 font-medium">הקלטה מהמיקרופון</h3>
@@ -513,7 +595,7 @@ export default function AudioTransmitter({ isOpen, onClose }) {
           <div className="flex items-center gap-3">
             <button
               onClick={isRecording ? stopRecording : startRecording}
-              disabled={isTransmitting}
+              disabled={isTransmitting || isTTSProcessing}
               className={`flex-1 py-3 px-4 rounded-lg font-medium flex items-center justify-center gap-2 ${
                 isRecording
                   ? 'bg-red-600 hover:bg-red-700 text-white'
@@ -550,58 +632,18 @@ export default function AudioTransmitter({ isOpen, onClose }) {
         <div className="mb-6">
           <h3 className="text-gray-300 mb-3 font-medium">העלאת קובץ אודיו</h3>
           <label className={`block w-full py-3 px-4 rounded-lg border-2 border-dashed border-gray-600 hover:border-gray-500 text-center cursor-pointer ${
-            isTransmitting ? 'opacity-50 cursor-not-allowed' : ''
+            isTransmitting || isTTSProcessing ? 'opacity-50 cursor-not-allowed' : ''
           }`}>
             <input
               type="file"
               accept="audio/*"
               onChange={handleFileUpload}
-              disabled={isTransmitting || isRecording}
+              disabled={isTransmitting || isRecording || isTTSProcessing}
               className="hidden"
             />
             <span className="text-gray-400">
               📁 לחץ לבחירת קובץ (WAV, MP3, OGG)
             </span>
-          </label>
-        </div>
-
-        {/* PTT Controls */}
-        <div className="mb-6">
-          <h3 className="text-gray-300 mb-3 font-medium">שליטה ידנית ב-PTT</h3>
-          <div className="flex gap-3">
-            <button
-              onClick={() => sendPTT('START')}
-              disabled={isPTTActive}
-              className={`flex-1 py-2 px-4 rounded-lg ${
-                isPTTActive
-                  ? 'bg-green-700 text-white'
-                  : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
-              }`}
-            >
-              🎤 התחל שידור
-            </button>
-            <button
-              onClick={() => sendPTT('STOP')}
-              disabled={!isPTTActive}
-              className={`flex-1 py-2 px-4 rounded-lg ${
-                !isPTTActive
-                  ? 'bg-gray-700 text-gray-500'
-                  : 'bg-red-600 hover:bg-red-700 text-white'
-              }`}
-            >
-              ⏹️ סיים שידור
-            </button>
-          </div>
-
-          {/* Auto PTT Toggle */}
-          <label className="flex items-center gap-2 mt-3 text-sm text-gray-400 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={autoPTT}
-              onChange={(e) => setAutoPTT(e.target.checked)}
-              className="rounded border-gray-600 bg-gray-700"
-            />
-            <span>PTT אוטומטי בשידור</span>
           </label>
         </div>
 
@@ -619,7 +661,7 @@ export default function AudioTransmitter({ isOpen, onClose }) {
         )}
 
         {/* Transmitting Indicator */}
-        {isTransmitting && (
+        {(isTransmitting || isTTSProcessing) && (
           <div className="mt-4 flex items-center justify-center gap-2 text-yellow-400">
             <div className="w-2 h-2 bg-yellow-400 rounded-full animate-ping" />
             <span>משדר...</span>

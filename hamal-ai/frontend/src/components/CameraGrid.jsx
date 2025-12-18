@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import CameraManager from './CameraManager';
 
@@ -65,6 +65,7 @@ export default function CameraGrid() {
 
 function CameraThumbnail({ camera, isSelected, onSelect, aiServiceUrl }) {
   const [imgError, setImgError] = useState(false);
+  const [imgLoaded, setImgLoaded] = useState(false);
 
   const statusColors = {
     online: 'bg-green-500',
@@ -73,8 +74,17 @@ function CameraThumbnail({ camera, isSelected, onSelect, aiServiceUrl }) {
     connecting: 'bg-yellow-500 animate-pulse'
   };
 
-  // Use AI service URL for the MJPEG stream (port 8000)
-  const streamUrl = `${aiServiceUrl}/api/stream/mjpeg/${camera.cameraId}?fps=5`;
+  // Use AI service URL for a single frame snapshot instead of MJPEG stream
+  // This is more reliable for thumbnails and doesn't keep connections open
+  const snapshotUrl = `${aiServiceUrl}/api/stream/snapshot/${camera.cameraId}?t=${Date.now()}`;
+
+  // Reset error state when camera changes or comes online
+  useEffect(() => {
+    if (camera.status === 'online') {
+      setImgError(false);
+      setImgLoaded(false);
+    }
+  }, [camera.cameraId, camera.status]);
 
   return (
     <button
@@ -90,13 +100,20 @@ function CameraThumbnail({ camera, isSelected, onSelect, aiServiceUrl }) {
     >
       {/* Thumbnail image or placeholder */}
       {camera.status === 'online' && !imgError ? (
-        <img
-          src={streamUrl}
-          alt={camera.name}
-          className="w-full h-full object-cover"
-          loading="lazy"
-          onError={() => setImgError(true)}
-        />
+        <>
+          <img
+            src={snapshotUrl}
+            alt={camera.name}
+            className={`w-full h-full object-cover transition-opacity ${imgLoaded ? 'opacity-100' : 'opacity-0'}`}
+            onLoad={() => setImgLoaded(true)}
+            onError={() => setImgError(true)}
+          />
+          {!imgLoaded && (
+            <div className="absolute inset-0 flex items-center justify-center text-gray-600">
+              <span className="text-2xl animate-pulse">📷</span>
+            </div>
+          )}
+        </>
       ) : (
         <div className="w-full h-full flex items-center justify-center text-gray-600">
           <span className="text-2xl">📷</span>

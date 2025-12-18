@@ -13,6 +13,7 @@ Supports Mac MPS acceleration.
 from fastapi import FastAPI, File, UploadFile, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
+from pydantic import BaseModel
 import threading
 import time
 import torch
@@ -39,15 +40,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Import services
-from services.reid_tracker import ReIDTracker
-from services.gemini_analyzer import GeminiAnalyzer
+from services.reid import ReIDTracker
+from services.gemini import GeminiAnalyzer
 from services.tts_service import TTSService
-from services.rtsp_reader import get_rtsp_manager, RTSPConfig
+from services.streaming import get_rtsp_manager, RTSPConfig, get_ffmpeg_manager, FFmpegConfig
 from services.detection_loop import init_detection_loop, get_detection_loop, LoopConfig
+from services.detection import get_frame_buffer_manager, get_stable_tracker
 from services.radio import init_radio_service, get_radio_service, stop_radio_service
 from services.radio.radio_transmit import router as radio_transmit_router
-from services.detection import get_frame_buffer_manager, get_stable_tracker
-from services.ffmpeg_rtsp import get_ffmpeg_manager, FFmpegConfig
 
 # FastAPI app
 app = FastAPI(
@@ -1096,6 +1096,78 @@ async def text_to_speech(
         raise HTTPException(500, f"TTS error: {str(e)}")
 
 
+class TTSGenerateRequest(BaseModel):
+    """Request body for TTS generation"""
+    text: str
+    language: str = "he"
+
+
+@app.post("/tts/generate")
+async def tts_generate(request: TTSGenerateRequest):
+    """
+    Generate Hebrew TTS audio and return as base64.
+
+    This endpoint is designed for radio transmission - it returns
+    the audio as base64-encoded PCM data ready to send to the radio.
+    """
+    if not tts.is_configured():
+        raise HTTPException(503, "TTS service not configured")
+
+    try:
+        # Generate the audio file
+        audio_path = await tts.generate(request.text)
+
+        # Read and convert to base64
+        import base64
+        from pathlib import Path
+
+        audio_file = Path(audio_path)
+        if not audio_file.exists():
+            raise HTTPException(500, "Generated audio file not found")
+
+        # Check if it's MP3 and convert to PCM for radio transmission
+        if audio_file.suffix.lower() == '.mp3':
+            # Use pydub to convert MP3 to PCM
+            try:
+                from pydub import AudioSegment
+
+                audio = AudioSegment.from_mp3(str(audio_file))
+                # Convert to mono, 16kHz, 16-bit PCM
+                audio = audio.set_channels(1).set_frame_rate(16000).set_sample_width(2)
+                pcm_data = audio.raw_data
+                sample_rate = 16000
+
+            except ImportError:
+                # pydub not available, return MP3 as-is (frontend will need to handle)
+                logger.warning("pydub not available, returning MP3 as base64")
+                with open(audio_file, 'rb') as f:
+                    audio_data = f.read()
+                return {
+                    "audio_base64": base64.b64encode(audio_data).decode('utf-8'),
+                    "sample_rate": 22050,  # Typical MP3 rate
+                    "format": "mp3",
+                    "text": request.text
+                }
+        else:
+            # WAV or other format - read raw
+            with open(audio_file, 'rb') as f:
+                pcm_data = f.read()
+            sample_rate = 16000
+
+        audio_base64 = base64.b64encode(pcm_data).decode('utf-8')
+
+        return {
+            "audio_base64": audio_base64,
+            "sample_rate": sample_rate,
+            "format": "pcm_s16le",
+            "text": request.text
+        }
+
+    except Exception as e:
+        logger.error(f"TTS generate error: {e}", exc_info=True)
+        raise HTTPException(500, f"TTS error: {str(e)}")
+
+
 @app.get("/tts/file/{filename}")
 async def get_tts_file(filename: str):
     """Serve generated TTS audio file"""
@@ -1177,7 +1249,7 @@ async def refresh_analysis(
                     break
 
     if not obj:
-        raise HTTPException(404, f"Object {track_id} not found in active tracking")
+        raise HTTPException(404, "האובייקט כבר לא נמצא בסצנה. ניתן לרענן ניתוח רק עבור אובייקטים פעילים.")
 
     # Get camera_id from object if not provided
     if not camera_id:

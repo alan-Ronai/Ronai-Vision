@@ -196,10 +196,17 @@ async def get_transmission_stats():
         sender = get_sender()
         stats = sender.get_stats()
 
+        # Check both TCP command connection and UDP audio readiness
+        cmd_connected = stats.get("cmd_connected", False)
+        audio_ready = stats.get("audio_ready", False)
+        # Consider connected if either TCP is connected or audio is ready
+        # (UDP doesn't have a connection state, so audio_ready means socket is created)
+        connected = cmd_connected or audio_ready
+
         return StatsResponse(
-            connected=stats.get("connected", False),
+            connected=connected,
             host=stats.get("host", ""),
-            port=stats.get("port", 0),
+            port=stats.get("cmd_port", stats.get("port", 0)),
             sample_rate=stats.get("sample_rate", 16000),
             packets_sent=stats.get("packets_sent", 0),
             bytes_sent=stats.get("bytes_sent", 0),

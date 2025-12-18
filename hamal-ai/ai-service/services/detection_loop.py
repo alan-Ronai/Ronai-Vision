@@ -25,9 +25,7 @@ from queue import Queue, Empty
 import threading
 
 from .detection import get_bot_sort_tracker, Detection, Track
-from .osnet_reid import OSNetReID
-from .transreid_vehicle import TransReIDVehicle
-from .universal_reid import UniversalReID
+from .reid import OSNetReID, TransReIDVehicle, UniversalReID
 from . import backend_sync
 
 logger = logging.getLogger(__name__)
