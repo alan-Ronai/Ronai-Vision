@@ -36,6 +36,7 @@ class RadioService:
         min_duration: float = 1.5,
         idle_timeout: float = 2.0,
         save_audio: bool = True,
+        use_vad: bool = False,
         on_transcription: Optional[Callable[[TranscriptionResult], None]] = None
     ):
         """Initialize radio service.
@@ -51,6 +52,7 @@ class RadioService:
             min_duration: Minimum audio duration before processing
             idle_timeout: Seconds of no audio before processing buffer (handles PTT release)
             save_audio: Whether to save audio files for debugging
+            use_vad: Whether to use Voice Activity Detection for speaker segmentation
             on_transcription: Optional callback for transcriptions
         """
         # Get EC2 relay config from environment or parameters
@@ -70,7 +72,7 @@ class RadioService:
             "last_chunk_time": None,
         }
 
-        # Initialize transcriber with silence detection
+        # Initialize transcriber with silence detection and optional VAD
         self.transcriber = StreamingGeminiTranscriber(
             sample_rate=sample_rate,
             chunk_duration=chunk_duration,
@@ -79,6 +81,7 @@ class RadioService:
             min_duration=min_duration,
             idle_timeout=idle_timeout,
             save_audio=save_audio,
+            use_vad=use_vad,
             on_transcription=self._handle_transcription
         )
 
@@ -102,6 +105,7 @@ class RadioService:
         logger.info(f"  Idle Timeout: {idle_timeout}s")
         logger.info(f"  Minimum Duration: {min_duration}s")
         logger.info(f"  Save Audio Files: {save_audio}")
+        logger.info(f"  VAD Enabled: {use_vad}")
         logger.info(f"  Backend URL: {backend_url}")
         logger.info(f"  Transcriber Configured: {self.transcriber.is_configured()}")
         logger.info("=" * 60)
@@ -249,7 +253,8 @@ async def init_radio_service(
     silence_duration: float = 1.5,
     min_duration: float = 1.5,
     idle_timeout: float = 2.0,
-    save_audio: bool = True
+    save_audio: bool = True,
+    use_vad: bool = False
 ) -> RadioService:
     """Initialize and start the global radio service.
 
@@ -264,6 +269,7 @@ async def init_radio_service(
         min_duration: Minimum audio duration before processing
         idle_timeout: Seconds of no audio before processing buffer
         save_audio: Whether to save audio files for debugging
+        use_vad: Whether to use Voice Activity Detection for speaker segmentation
 
     Returns:
         RadioService instance
@@ -284,7 +290,8 @@ async def init_radio_service(
         silence_duration=silence_duration,
         min_duration=min_duration,
         idle_timeout=idle_timeout,
-        save_audio=save_audio
+        save_audio=save_audio,
+        use_vad=use_vad
     )
 
     await _service.start()

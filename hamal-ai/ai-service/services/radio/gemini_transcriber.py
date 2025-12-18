@@ -17,6 +17,7 @@ from typing import Optional, Callable, List
 from dataclasses import dataclass
 from datetime import datetime
 import numpy as np
+import torch
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,15 @@ try:
 except ImportError:
     GENAI_AVAILABLE = False
     logger.warning("google-generativeai not installed. Transcription will be disabled.")
+
+# Try to import silero-vad
+try:
+    from silero_vad import load_silero_vad, get_speech_timestamps
+
+    VAD_AVAILABLE = True
+except ImportError:
+    VAD_AVAILABLE = False
+    logger.warning("silero-vad not installed. VAD segmentation will be disabled.")
 
 
 @dataclass
@@ -72,6 +82,7 @@ class GeminiTranscriber:
         min_duration: float = 1.5,  # Minimum audio duration before processing
         idle_timeout: float = 2.0,  # Seconds of no audio before processing
         save_audio: bool = True,  # Save audio files for debugging
+        use_vad: bool = False,  # Enable Voice Activity Detection for speaker segmentation
         on_transcription: Optional[Callable[[TranscriptionResult], None]] = None,
     ):
         """Initialize Gemini transcriber.
@@ -86,6 +97,7 @@ class GeminiTranscriber:
             min_duration: Minimum seconds of audio required before processing
             idle_timeout: Seconds of no new audio before processing buffer
             save_audio: Whether to save audio files to audio_output directory
+            use_vad: Enable Voice Activity Detection for speaker/pause segmentation
             on_transcription: Callback when transcription is ready
         """
         self.api_key = api_key or os.getenv("GEMINI_API_KEY")
@@ -97,6 +109,7 @@ class GeminiTranscriber:
         self.min_duration = min_duration
         self.idle_timeout = idle_timeout
         self.save_audio = save_audio
+        self.use_vad = use_vad
         self.on_transcription = on_transcription
 
         # Configure Gemini
@@ -112,6 +125,22 @@ class GeminiTranscriber:
                 )
             else:
                 logger.warning("No Gemini API key - transcription disabled")
+
+        # Configure VAD (Voice Activity Detection)
+        self.vad_model = None
+        if self.use_vad:
+            if VAD_AVAILABLE:
+                try:
+                    self.vad_model = load_silero_vad()
+                    logger.info("VAD (Voice Activity Detection) enabled with silero-vad")
+                except Exception as e:
+                    logger.warning(f"Failed to load VAD model: {e}")
+                    self.use_vad = False
+            else:
+                logger.warning("silero-vad not available - VAD disabled")
+                self.use_vad = False
+        else:
+            logger.info("VAD (Voice Activity Detection) disabled")
 
         # Audio output directory for debugging
         if self.save_audio:
@@ -225,6 +254,67 @@ class GeminiTranscriber:
 
         return rms < self.silence_threshold
 
+    def _segment_audio_by_vad(self, audio_bytes: bytes) -> List[bytes]:
+        """Segment audio into speech regions using Voice Activity Detection.
+
+        Args:
+            audio_bytes: Raw 16-bit PCM audio bytes
+
+        Returns:
+            List of audio segments (each is a bytes object)
+        """
+        if not self.use_vad or not self.vad_model:
+            # VAD disabled, return whole audio as single segment
+            return [audio_bytes]
+
+        try:
+            # Convert bytes to torch tensor
+            samples = np.frombuffer(audio_bytes, dtype=np.int16)
+            audio_float = samples.astype(np.float32) / 32768.0  # Normalize to [-1, 1]
+            audio_tensor = torch.from_numpy(audio_float)
+
+            # Get speech timestamps from VAD
+            # Returns list of dicts: [{'start': 0, 'end': 16000}, ...]
+            speech_timestamps = get_speech_timestamps(
+                audio_tensor,
+                self.vad_model,
+                sampling_rate=self.sample_rate,
+                threshold=0.5,  # Speech probability threshold (0.0-1.0)
+                min_speech_duration_ms=250,  # Minimum speech duration
+                min_silence_duration_ms=100,  # Minimum silence between segments
+            )
+
+            if not speech_timestamps:
+                logger.debug("VAD: No speech detected in audio")
+                return []
+
+            logger.debug(f"VAD: Found {len(speech_timestamps)} speech segments")
+
+            # Extract each speech segment
+            segments = []
+            for i, ts in enumerate(speech_timestamps):
+                start_sample = ts["start"]
+                end_sample = ts["end"]
+
+                # Extract segment from original int16 samples
+                segment_samples = samples[start_sample:end_sample]
+                segment_bytes = segment_samples.tobytes()
+
+                duration = len(segment_samples) / self.sample_rate
+                logger.debug(
+                    f"VAD segment {i + 1}/{len(speech_timestamps)}: "
+                    f"{duration:.2f}s ({start_sample}-{end_sample} samples)"
+                )
+
+                segments.append(segment_bytes)
+
+            return segments
+
+        except Exception as e:
+            logger.error(f"VAD segmentation error: {e}", exc_info=True)
+            # Fall back to whole audio
+            return [audio_bytes]
+
     def add_audio(self, audio_data: bytes):
         """Add audio data to buffer.
 
@@ -326,20 +416,64 @@ class GeminiTranscriber:
             self._silence_samples = 0
             self._has_speech = False
 
-            # Transcribe
-            result = await self.transcribe_audio(audio_bytes, duration)
+            # Segment audio by VAD if enabled
+            segments = self._segment_audio_by_vad(audio_bytes)
 
-            if result and result.text:
-                self._stats["transcriptions"] += 1
-                logger.info(
-                    f"✅ Transcription successful: '{result.text}' ({len(result.text)} chars)"
+            if not segments:
+                logger.info("No speech segments found by VAD, skipping transcription")
+                self._stats["chunks_processed"] += 1
+                return
+
+            # Transcribe each segment
+            all_transcriptions = []
+            for i, segment_bytes in enumerate(segments):
+                segment_duration = len(segment_bytes) / (2 * self.sample_rate)
+
+                if self.use_vad and len(segments) > 1:
+                    logger.info(
+                        f"🎙️  Transcribing VAD segment {i + 1}/{len(segments)}: "
+                        f"{segment_duration:.2f}s"
+                    )
+
+                result = await self.transcribe_audio(segment_bytes, segment_duration)
+
+                if result and result.text:
+                    self._stats["transcriptions"] += 1
+                    all_transcriptions.append(result.text)
+                    logger.info(
+                        f"✅ Segment {i + 1} transcription: '{result.text}' "
+                        f"({len(result.text)} chars)"
+                    )
+
+            # Combine all transcriptions and send as single result
+            if all_transcriptions:
+                combined_text = " ".join(all_transcriptions)
+                combined_result = TranscriptionResult(
+                    text=combined_text,
+                    timestamp=datetime.now(),
+                    duration_seconds=duration,
+                    is_command=False,
+                    command_type=None,
                 )
 
-                # Call callback
+                # Check for commands in combined text
+                for keyword, cmd_type in VOICE_COMMANDS.items():
+                    if keyword in combined_text:
+                        combined_result.is_command = True
+                        combined_result.command_type = cmd_type
+                        logger.info(f"Voice command detected: {keyword} -> {cmd_type}")
+                        break
+
+                logger.info(
+                    f"✅ Combined transcription: '{combined_text}' "
+                    f"({len(combined_text)} chars)"
+                )
+
+                # Call callback with combined result
                 if self.on_transcription:
-                    self.on_transcription(result)
+                    self.on_transcription(combined_result)
             else:
-                logger.warning(f"⚠️  Transcription returned empty or None")
+                logger.warning("⚠️  No transcriptions from any segment")
 
             self._stats["chunks_processed"] += 1
             self._stats["total_duration"] += duration
@@ -398,17 +532,38 @@ class GeminiTranscriber:
                 audio_file = genai.upload_file(tmp_path, mime_type="audio/wav")
                 logger.debug(f"Upload successful, file: {audio_file.name}")
 
-                # Transcribe with Hebrew prompt
-                prompt = """תמלל את האודיו הזה לעברית.
+                # Transcribe with Hebrew military/security prompt
+                prompt = """אתה מתמלל שיח קשר צבאי/ביטחוני בעברית.
 
-כללים:
-- תמלל בדיוק מה שנאמר בעברית
-- אל תוסיף הסברים או הערות
-- החזר רק את הטקסט המתומלל"""
+מילון מונחים חשוב (השתמש במילים אלו כשהן נשמעות):
+- דרגות: ניצב, סגן ניצב, רב פקד, סמל, טוראי, שגריר
+- יחידות: מגב (משמר הגבול), צה"ל, משטרה, כיבוי, פאנטום
+- מקומות: דיר דבואן, ביטין, חווארה, יצהר, נבלוס
+- קריאות: שגריר, פאנטום, נשר, אריה (שמות קוד), ניצב
+- פעולות: אשרו קבלה, עד כאן, ממשיך, מתמשך, שורף
+
+כללי תמלול:
+1. תמלל בדיוק מה שנאמר
+2. אם יש מילה לא ברורה, נחש לפי ההקשר הצבאי/ביטחוני
+3. "עד כאן" = סיום שידור
+4. "אשרו קבלה" = בקשת אישור
+5. אל תוסיף הסברים או הערות
+6. החזר רק את הטקסט המתומלל בעברית
+
+תמלל את האודיו:"""
 
                 logger.debug(f"Sending to Gemini model: {self.model_name}")
+
+                # Generation config for deterministic transcription
+                generation_config = {
+                    "temperature": 0.0,  # Deterministic output
+                    "max_output_tokens": 500,  # Limit response length
+                }
+
                 response = await asyncio.to_thread(
-                    self.model.generate_content, [prompt, audio_file]
+                    self.model.generate_content,
+                    [prompt, audio_file],
+                    generation_config=generation_config
                 )
                 logger.debug(f"Gemini response received")
 

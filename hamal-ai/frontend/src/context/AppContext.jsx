@@ -277,6 +277,11 @@ export function AppProvider({ children }) {
     }
   }, [selectedCamera]);
 
+  // Clear radio transcriptions
+  const clearRadioTranscript = () => {
+    setRadioTranscript([]);
+  };
+
   const value = {
     socket,
     connected,
@@ -285,6 +290,7 @@ export function AppProvider({ children }) {
     selectedCamera,
     selectCamera,
     radioTranscript,
+    clearRadioTranscript,
     isEmergency,
     emergencyData,
     acknowledgeEmergency,

@@ -2,7 +2,7 @@ import { useApp } from '../context/AppContext';
 import { useRef, useEffect } from 'react';
 
 export default function RadioTranscript() {
-  const { radioTranscript, isEmergency } = useApp();
+  const { radioTranscript, clearRadioTranscript, isEmergency } = useApp();
   const scrollRef = useRef(null);
 
   // Auto-scroll to bottom when new transcription arrives
@@ -35,7 +35,18 @@ export default function RadioTranscript() {
             <span>חי</span>
           </div>
         </div>
-        <span className="text-sm text-gray-400">{radioTranscript.length} הודעות</span>
+        <div className="flex items-center gap-3">
+          <span className="text-sm text-gray-400">{radioTranscript.length} הודעות</span>
+          {radioTranscript.length > 0 && (
+            <button
+              onClick={clearRadioTranscript}
+              className="px-3 py-1 bg-red-600 hover:bg-red-700 rounded text-sm font-medium transition-colors"
+              title="נקה תמלולים"
+            >
+              🗑️ נקה
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Transcript content - horizontal scrolling ticker style */}

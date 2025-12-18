@@ -1285,6 +1285,7 @@ async def startup_event():
     transcription_min_duration = float(os.getenv("TRANSCRIPTION_MIN_DURATION", "1.5"))
     transcription_idle_timeout = float(os.getenv("TRANSCRIPTION_IDLE_TIMEOUT", "2.0"))
     save_transcription_audio = os.getenv("SAVE_TRANSCRIPTION_AUDIO", "true").lower() == "true"
+    use_vad = os.getenv("USE_VAD", "false").lower() == "true"
 
     if ec2_host:
         try:
@@ -1298,11 +1299,12 @@ async def startup_event():
                 silence_duration=transcription_silence_duration,
                 min_duration=transcription_min_duration,
                 idle_timeout=transcription_idle_timeout,
-                save_audio=save_transcription_audio
+                save_audio=save_transcription_audio,
+                use_vad=use_vad
             )
             logger.info(
                 f"📻 Radio service started - EC2 relay: {ec2_host}:{ec2_port}, "
-                f"idle timeout enabled"
+                f"VAD: {'enabled' if use_vad else 'disabled'}"
             )
         except Exception as e:
             logger.warning(f"Could not start radio service: {e}")
