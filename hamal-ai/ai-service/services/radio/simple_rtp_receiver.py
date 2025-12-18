@@ -72,6 +72,8 @@ class SimpleRTPReceiver:
             "bytes_received": 0,
             "payload_bytes_written": 0,
             "packets_too_short": 0,
+            "audio_callbacks": 0,
+            "audio_bytes_sent": 0,
             "start_time": None,
             "last_packet_time": None,
         }
@@ -136,8 +138,8 @@ class SimpleRTPReceiver:
         if self._socket:
             try:
                 self._socket.close()
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"Error closing socket: {e}")
 
         # Wait for threads
         if self._receive_thread:
@@ -340,10 +342,22 @@ class SimpleRTPReceiver:
 
             # Call streaming callback if provided
             if self.audio_callback:
+                self._stats["audio_callbacks"] += 1
+                self._stats["audio_bytes_sent"] += len(output_data)
+
+                # Log every 50th callback to confirm audio flow
+                if self._stats["audio_callbacks"] % 50 == 1:
+                    duration_ms = (len(output_data) / 2 / self.target_sample_rate) * 1000
+                    logger.info(
+                        f"📡 RTP audio processed: {len(output_data)} bytes, "
+                        f"{duration_ms:.1f}ms @ {self.target_sample_rate}Hz "
+                        f"(callback #{self._stats['audio_callbacks']})"
+                    )
+
                 try:
                     self.audio_callback(output_data, self.target_sample_rate)
                 except Exception as e:
-                    logger.error(f"Audio callback error: {e}")
+                    logger.error(f"Audio callback error: {e}", exc_info=True)
 
         except Exception as e:
             logger.error(f"Packet processing error: {e}", exc_info=True)

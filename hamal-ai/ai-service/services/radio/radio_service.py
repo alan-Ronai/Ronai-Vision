@@ -31,6 +31,11 @@ class RadioService:
         sample_rate: int = 16000,
         backend_url: str = "http://localhost:3000",
         chunk_duration: float = 3.0,
+        silence_threshold: float = 500.0,
+        silence_duration: float = 1.5,
+        min_duration: float = 1.5,
+        idle_timeout: float = 2.0,
+        save_audio: bool = True,
         on_transcription: Optional[Callable[[TranscriptionResult], None]] = None
     ):
         """Initialize radio service.
@@ -40,7 +45,12 @@ class RadioService:
             ec2_port: EC2 relay TCP port (default from EC2_RTP_PORT env)
             sample_rate: Audio sample rate
             backend_url: Backend API URL
-            chunk_duration: Audio chunk duration for transcription
+            chunk_duration: Maximum audio chunk duration before forcing transcription
+            silence_threshold: RMS threshold for silence detection
+            silence_duration: Seconds of silence to trigger early processing
+            min_duration: Minimum audio duration before processing
+            idle_timeout: Seconds of no audio before processing buffer (handles PTT release)
+            save_audio: Whether to save audio files for debugging
             on_transcription: Optional callback for transcriptions
         """
         # Get EC2 relay config from environment or parameters
@@ -53,10 +63,22 @@ class RadioService:
         # HTTP client for backend
         self._http_client: Optional[httpx.AsyncClient] = None
 
-        # Initialize transcriber
+        # Audio statistics
+        self._audio_stats = {
+            "chunks_received": 0,
+            "bytes_received": 0,
+            "last_chunk_time": None,
+        }
+
+        # Initialize transcriber with silence detection
         self.transcriber = StreamingGeminiTranscriber(
             sample_rate=sample_rate,
             chunk_duration=chunk_duration,
+            silence_threshold=silence_threshold,
+            silence_duration=silence_duration,
+            min_duration=min_duration,
+            idle_timeout=idle_timeout,
+            save_audio=save_audio,
             on_transcription=self._handle_transcription
         )
 
@@ -69,7 +91,20 @@ class RadioService:
         )
 
         self._running = False
-        logger.info(f"RadioService initialized - EC2 relay: {self.ec2_host}:{self.ec2_port}")
+
+        # Diagnostic logging
+        logger.info("=" * 60)
+        logger.info("RadioService Configuration:")
+        logger.info(f"  EC2 Relay: {self.ec2_host}:{self.ec2_port}")
+        logger.info(f"  Sample Rate: {sample_rate} Hz")
+        logger.info(f"  Chunk Duration: {chunk_duration}s (max)")
+        logger.info(f"  Silence Detection: threshold={silence_threshold}, duration={silence_duration}s")
+        logger.info(f"  Idle Timeout: {idle_timeout}s")
+        logger.info(f"  Minimum Duration: {min_duration}s")
+        logger.info(f"  Save Audio Files: {save_audio}")
+        logger.info(f"  Backend URL: {backend_url}")
+        logger.info(f"  Transcriber Configured: {self.transcriber.is_configured()}")
+        logger.info("=" * 60)
 
     async def start(self):
         """Start radio service."""
@@ -114,8 +149,25 @@ class RadioService:
             audio_data: Raw PCM audio bytes
             sample_rate: Sample rate
         """
-        # Feed to transcriber
-        self.transcriber.add_audio(audio_data)
+        # Update stats
+        self._audio_stats["chunks_received"] += 1
+        self._audio_stats["bytes_received"] += len(audio_data)
+        self._audio_stats["last_chunk_time"] = datetime.now()
+
+        # Log every 10th chunk to confirm audio flow
+        if self._audio_stats["chunks_received"] % 10 == 1:
+            duration_ms = (len(audio_data) / 2 / sample_rate) * 1000
+            logger.info(
+                f"🎤 Audio received: {len(audio_data)} bytes, "
+                f"{duration_ms:.1f}ms @ {sample_rate}Hz "
+                f"(chunk #{self._audio_stats['chunks_received']})"
+            )
+
+        # Feed to transcriber with error handling
+        try:
+            self.transcriber.add_audio(audio_data)
+        except Exception as e:
+            logger.error(f"Failed to add audio to transcriber: {e}", exc_info=True)
 
     def _handle_transcription(self, result: TranscriptionResult):
         """Handle transcription result.
@@ -172,6 +224,7 @@ class RadioService:
             "running": self._running,
             "ec2_host": self.ec2_host,
             "ec2_port": self.ec2_port,
+            "audio": self._audio_stats,
             "tcp_client": self.tcp_client.get_stats(),
             "transcriber": self.transcriber.get_stats()
         }
@@ -191,7 +244,12 @@ async def init_radio_service(
     ec2_port: Optional[int] = None,
     sample_rate: int = 16000,
     backend_url: str = "http://localhost:3000",
-    chunk_duration: float = 3.0
+    chunk_duration: float = 3.0,
+    silence_threshold: float = 500.0,
+    silence_duration: float = 1.5,
+    min_duration: float = 1.5,
+    idle_timeout: float = 2.0,
+    save_audio: bool = True
 ) -> RadioService:
     """Initialize and start the global radio service.
 
@@ -200,7 +258,12 @@ async def init_radio_service(
         ec2_port: EC2 relay TCP port (default from EC2_RTP_PORT env)
         sample_rate: Audio sample rate
         backend_url: Backend API URL
-        chunk_duration: Audio chunk duration for transcription
+        chunk_duration: Maximum audio chunk duration before forcing transcription
+        silence_threshold: RMS threshold for silence detection
+        silence_duration: Seconds of silence to trigger early processing
+        min_duration: Minimum audio duration before processing
+        idle_timeout: Seconds of no audio before processing buffer
+        save_audio: Whether to save audio files for debugging
 
     Returns:
         RadioService instance
@@ -216,7 +279,12 @@ async def init_radio_service(
         ec2_port=ec2_port,
         sample_rate=sample_rate,
         backend_url=backend_url,
-        chunk_duration=chunk_duration
+        chunk_duration=chunk_duration,
+        silence_threshold=silence_threshold,
+        silence_duration=silence_duration,
+        min_duration=min_duration,
+        idle_timeout=idle_timeout,
+        save_audio=save_audio
     )
 
     await _service.start()

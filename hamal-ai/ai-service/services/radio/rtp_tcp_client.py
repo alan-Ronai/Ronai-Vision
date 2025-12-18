@@ -27,7 +27,7 @@ class RTPTCPClient:
         port: int = 5005,
         target_sample_rate: int = 16000,
         audio_callback: Optional[Callable[[bytes, int], None]] = None,
-        reconnect_delay: float = 5.0
+        reconnect_delay: float = 5.0,
     ):
         """Initialize TCP client.
 
@@ -53,12 +53,22 @@ class RTPTCPClient:
         self._stats = {
             "packets_received": 0,
             "bytes_received": 0,
+            "audio_callbacks": 0,
+            "audio_bytes_sent": 0,
             "reconnects": 0,
             "errors": 0,
-            "connected": False
+            "connected": False,
+            "last_packet_time": None,
+            "connection_uptime": 0.0,
         }
 
-        logger.info(f"RTPTCPClient initialized for {host}:{port}")
+        # Connection monitoring
+        self._last_packet_time = 0.0
+        self._connection_start_time = 0.0
+
+        logger.info(
+            f"RTPTCPClient initialized for {host}:{port} @ {target_sample_rate}Hz"
+        )
 
     def start(self):
         """Start the TCP client."""
@@ -79,8 +89,8 @@ class RTPTCPClient:
         if self._socket:
             try:
                 self._socket.close()
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"Error closing socket during stop: {e}")
 
         if self._thread:
             self._thread.join(timeout=2)
@@ -95,10 +105,13 @@ class RTPTCPClient:
             self._socket.connect((self.host, self.port))
             self._stats["connected"] = True
             self._stats["reconnects"] += 1
-            logger.info(f"Connected to EC2 relay at {self.host}:{self.port}")
+            self._connection_start_time = time.time()
+            logger.info(
+                f"✅ Connected to EC2 relay at {self.host}:{self.port} (attempt #{self._stats['reconnects']})"
+            )
             return True
         except Exception as e:
-            logger.error(f"Failed to connect to {self.host}:{self.port}: {e}")
+            logger.error(f"❌ Failed to connect to {self.host}:{self.port}: {e}")
             self._stats["errors"] += 1
             self._stats["connected"] = False
             return False
@@ -132,21 +145,55 @@ class RTPTCPClient:
 
                 self._stats["packets_received"] += 1
                 self._stats["bytes_received"] += len(packet_data)
+                self._last_packet_time = time.time()
+                self._stats["last_packet_time"] = time.time()
+                self._stats["connection_uptime"] = (
+                    time.time() - self._connection_start_time
+                )
+
+                # Log connection health every 100 packets
+                if self._stats["packets_received"] % 100 == 0:
+                    uptime_mins = self._stats["connection_uptime"] / 60
+                    logger.info(
+                        f"📶 Connection healthy: {self._stats['packets_received']} packets, "
+                        f"{self._stats['bytes_received'] / 1024:.1f} KB, "
+                        f"uptime {uptime_mins:.1f}m"
+                    )
 
                 # Parse RTP and extract audio
                 self._process_rtp_packet(packet_data)
 
             except socket.timeout:
+                # Check if we haven't received packets in a while
+                if self._last_packet_time > 0:
+                    silence_duration = time.time() - self._last_packet_time
+                    if silence_duration > 30:  # 30 seconds of silence
+                        logger.warning(
+                            f"⚠️  No packets received for {silence_duration:.1f}s - "
+                            f"connection may be dead"
+                        )
                 continue
-            except Exception as e:
-                logger.error(f"Receive error: {e}")
+            except ConnectionError as e:
+                logger.error(f"🔌 Connection lost: {e}")
                 self._stats["errors"] += 1
                 self._stats["connected"] = False
                 if self._socket:
                     try:
                         self._socket.close()
-                    except:
-                        pass
+                    except Exception as close_err:
+                        logger.debug(f"Error closing socket: {close_err}")
+                    self._socket = None
+                logger.info(f"Will retry connection in {self.reconnect_delay}s...")
+                time.sleep(self.reconnect_delay)
+            except Exception as e:
+                logger.error(f"Receive error: {e}", exc_info=True)
+                self._stats["errors"] += 1
+                self._stats["connected"] = False
+                if self._socket:
+                    try:
+                        self._socket.close()
+                    except Exception as close_err:
+                        logger.debug(f"Error closing socket: {close_err}")
                     self._socket = None
                 time.sleep(1)
 
@@ -171,48 +218,91 @@ class RTPTCPClient:
         Args:
             packet: Raw RTP packet bytes
         """
-        if len(packet) < 12:
+        length = len(packet)
+
+        # Check minimum RTP header size (12 bytes)
+        if length < 12:
+            logger.warning(f"Received too short packet: {length} bytes")
+            self._stats["errors"] += 1
             return
 
-        # RTP header is 12 bytes minimum
-        # Skip header and get payload
-        header_length = 12
+        try:
+            # Parse RTP header (matching Java/simple_rtp_receiver code)
+            version = (packet[0] >> 6) & 0x03
+            payload_type = packet[1] & 0x7F
+            sequence_number = ((packet[2] & 0xFF) << 8) | (packet[3] & 0xFF)
+            timestamp = (
+                ((packet[4] & 0xFF) << 24)
+                | ((packet[5] & 0xFF) << 16)
+                | ((packet[6] & 0xFF) << 8)
+                | (packet[7] & 0xFF)
+            )
+            ssrc = (
+                ((packet[8] & 0xFF) << 24)
+                | ((packet[9] & 0xFF) << 16)
+                | ((packet[10] & 0xFF) << 8)
+                | (packet[11] & 0xFF)
+            )
 
-        # Check for header extensions
-        first_byte = packet[0]
-        has_extension = (first_byte & 0x10) != 0
+            payload_size = length - 12
 
-        if has_extension and len(packet) > 16:
-            # Extension header: 2 bytes profile + 2 bytes length
-            ext_length = struct.unpack(">H", packet[14:16])[0]
-            header_length = 16 + (ext_length * 4)
+            # Log packet info every 100 packets
+            if self._stats["packets_received"] % 100 == 0:
+                logger.debug(
+                    f"RTP Packet: ver={version}, pt={payload_type}, seq={sequence_number}, "
+                    f"ts={timestamp}, ssrc={ssrc:08X}, size={payload_size} bytes"
+                )
 
-        if len(packet) <= header_length:
-            return
+            # Extract payload (skip 12-byte header) - raw PCM data
+            payload = packet[12:length]
 
-        # Extract audio payload
-        audio_payload = packet[header_length:]
+            # Determine remote sampling rate based on payload type
+            # Matching Java: payloadType == 4 ? AUDIO_SAMPLING_RATE_LOW : AUDIO_SAMPLING_RATE
+            if payload_type == 4 or payload_type == 0:  # PCMU
+                # logger.warning("payload type 0/4 (8000) detected")
+                remote_sample_rate = 8000  # Low sample rate
+            else:
+                # Raw PCM or other format - assume target rate
+                # logger.warning(f"payload type {payload_type} ({self.target_sample_rate}) detected")
+                remote_sample_rate = self.target_sample_rate
 
-        # Decode based on payload type (usually G.711 μ-law or PCM)
-        payload_type = packet[1] & 0x7F
+            # Handle sampling rate conversion if needed
+            if self.target_sample_rate == remote_sample_rate:
+                # No conversion needed
+                output_data = payload
+            else:
+                # Upsample if needed
+                output_data = self._upsample(
+                    payload, remote_sample_rate, self.target_sample_rate
+                )
 
-        if payload_type == 0:
-            # G.711 μ-law - decode to PCM
-            audio_data = self._decode_ulaw(audio_payload)
-        elif payload_type == 8:
-            # G.711 A-law - decode to PCM
-            audio_data = self._decode_alaw(audio_payload)
-        else:
-            # Assume raw PCM 16-bit
-            audio_data = audio_payload
+            # Call audio callback
+            if self.audio_callback and output_data:
+                self._stats["audio_callbacks"] += 1
+                self._stats["audio_bytes_sent"] += len(output_data)
 
-        if self.audio_callback and audio_data:
-            self.audio_callback(audio_data, self.target_sample_rate)
+                # Log every 50th callback to confirm audio flow
+                if self._stats["audio_callbacks"] % 50 == 1:
+                    duration_ms = (
+                        len(output_data) / 2 / self.target_sample_rate
+                    ) * 1000
+                    logger.info(
+                        f"📡 RTP audio decoded: {len(output_data)} bytes, "
+                        f"{duration_ms:.1f}ms @ {self.target_sample_rate}Hz, PT={payload_type}, "
+                        f"seq={sequence_number} (callback #{self._stats['audio_callbacks']})"
+                    )
+
+                self.audio_callback(output_data, self.target_sample_rate)
+
+        except Exception as e:
+            logger.error(f"RTP packet processing error: {e}", exc_info=True)
+            self._stats["errors"] += 1
 
     def _decode_ulaw(self, data: bytes) -> bytes:
         """Decode μ-law audio to 16-bit PCM."""
         try:
             import audioop
+
             return audioop.ulaw2lin(data, 2)
         except ImportError:
             # Manual μ-law decode
@@ -224,9 +314,14 @@ class RTPTCPClient:
         """Decode A-law audio to 16-bit PCM."""
         try:
             import audioop
+
             return audioop.alaw2lin(data, 2)
         except ImportError:
-            # Fallback - return as-is
+            logger.warning("audioop not available, A-law decoding disabled")
+            # Fallback - return as-is (will sound wrong but won't crash)
+            return data
+        except Exception as e:
+            logger.error(f"A-law decode error: {e}")
             return data
 
     def _build_ulaw_table(self) -> list:
@@ -245,11 +340,50 @@ class RTPTCPClient:
             table.append(sample)
         return table
 
+    def _upsample(self, audio_data: bytes, from_rate: int, to_rate: int) -> bytes:
+        """Upsample audio data from one sample rate to another.
+
+        Args:
+            audio_data: Input audio bytes
+            from_rate: Source sample rate
+            to_rate: Target sample rate
+
+        Returns:
+            Resampled audio bytes
+        """
+        try:
+            # Convert bytes to numpy array (assuming 16-bit PCM)
+            # logger.warning(f"Upsampling from {from_rate}Hz to {to_rate}Hz")
+            samples = np.frombuffer(audio_data, dtype=np.int16)
+
+            # Calculate resampling ratio
+            ratio = to_rate / from_rate
+
+            # Simple linear interpolation for upsampling
+            num_samples = len(samples)
+            new_num_samples = int(num_samples * ratio)
+
+            # Create new sample indices
+            old_indices = np.arange(num_samples)
+            new_indices = np.linspace(0, num_samples - 1, new_num_samples)
+
+            # Interpolate
+            resampled = np.interp(new_indices, old_indices, samples)
+
+            # Convert back to int16
+            resampled = resampled.astype(np.int16)
+
+            return resampled.tobytes()
+
+        except Exception as e:
+            logger.error(f"Upsampling error: {e}")
+            return audio_data  # Return original on error
+
     def get_stats(self) -> dict:
         """Get client statistics."""
         return {
             "host": self.host,
             "port": self.port,
             "running": self._running,
-            **self._stats
+            **self._stats,
         }

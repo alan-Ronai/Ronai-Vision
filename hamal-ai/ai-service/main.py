@@ -1279,6 +1279,12 @@ async def startup_event():
     # Start radio service for RTP audio transcription via EC2 relay
     ec2_host = os.getenv("EC2_RTP_HOST")
     ec2_port = int(os.getenv("EC2_RTP_PORT", "5005"))
+    transcription_chunk_duration = float(os.getenv("TRANSCRIPTION_CHUNK_DURATION", "8.0"))
+    transcription_silence_threshold = float(os.getenv("TRANSCRIPTION_SILENCE_THRESHOLD", "500.0"))
+    transcription_silence_duration = float(os.getenv("TRANSCRIPTION_SILENCE_DURATION", "1.5"))
+    transcription_min_duration = float(os.getenv("TRANSCRIPTION_MIN_DURATION", "1.5"))
+    transcription_idle_timeout = float(os.getenv("TRANSCRIPTION_IDLE_TIMEOUT", "2.0"))
+    save_transcription_audio = os.getenv("SAVE_TRANSCRIPTION_AUDIO", "true").lower() == "true"
 
     if ec2_host:
         try:
@@ -1287,9 +1293,17 @@ async def startup_event():
                 ec2_port=ec2_port,
                 sample_rate=16000,
                 backend_url=BACKEND_URL,
-                chunk_duration=3.0
+                chunk_duration=transcription_chunk_duration,
+                silence_threshold=transcription_silence_threshold,
+                silence_duration=transcription_silence_duration,
+                min_duration=transcription_min_duration,
+                idle_timeout=transcription_idle_timeout,
+                save_audio=save_transcription_audio
             )
-            logger.info(f"📻 Radio service started - EC2 relay: {ec2_host}:{ec2_port}")
+            logger.info(
+                f"📻 Radio service started - EC2 relay: {ec2_host}:{ec2_port}, "
+                f"idle timeout enabled"
+            )
         except Exception as e:
             logger.warning(f"Could not start radio service: {e}")
     else:
