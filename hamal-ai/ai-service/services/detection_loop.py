@@ -18,11 +18,13 @@ import cv2
 import numpy as np
 import httpx
 import base64
+import os
 from typing import Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
 from queue import Queue, Empty
 import threading
+from collections import OrderedDict
 
 from .detection import get_bot_sort_tracker, Detection, Track
 from .reid import OSNetReID, TransReIDVehicle, UniversalReID
@@ -32,7 +34,7 @@ from .recording import get_frame_buffer, get_recording_manager
 
 logger = logging.getLogger(__name__)
 
-# Detection Recovery Configuration
+# Detection Recovery Configuration (configurable via env vars)
 RECOVERY_CONFIDENCE = (
     0.20  # Low threshold for recovery pass (raised from 0.15 to reduce noise)
 )
@@ -43,7 +45,79 @@ RECOVERY_REID_THRESH = (
     0.5  # Minimum ReID similarity (for persons) (lowered for better recovery)
 )
 RECOVERY_MIN_TRACK_CONFIDENCE = 0.25  # Only recover tracks with decent history
-RECOVERY_EVERY_N_FRAMES = 3  # Run recovery every N frames (throttle for performance)
+# Configurable via RECOVERY_EVERY_N_FRAMES env var (default: 3)
+RECOVERY_EVERY_N_FRAMES = int(os.environ.get("RECOVERY_EVERY_N_FRAMES", "3"))
+# Recovery YOLO input size - smaller = faster (default: 480, options: 320, 480, 640)
+RECOVERY_YOLO_IMGSZ = int(os.environ.get("RECOVERY_YOLO_IMGSZ", "480"))
+
+
+class ReIDFeatureCache:
+    """LRU cache for ReID features to avoid redundant extractions.
+
+    Caches features by track_id with TTL to handle re-appearances.
+    """
+
+    def __init__(self, max_size: int = 200, ttl_seconds: float = 30.0):
+        self._cache: OrderedDict = OrderedDict()
+        self._timestamps: Dict[int, float] = {}
+        self._max_size = max_size
+        self._ttl = ttl_seconds
+        self._hits = 0
+        self._misses = 0
+
+    def get(self, track_id: int) -> Optional[np.ndarray]:
+        """Get cached feature for track, returns None if not found or expired."""
+        if track_id not in self._cache:
+            self._misses += 1
+            return None
+
+        # Check TTL
+        if time.time() - self._timestamps[track_id] > self._ttl:
+            self._evict(track_id)
+            self._misses += 1
+            return None
+
+        # Move to end (most recently used)
+        self._cache.move_to_end(track_id)
+        self._hits += 1
+        return self._cache[track_id]
+
+    def put(self, track_id: int, feature: np.ndarray):
+        """Cache a feature for a track."""
+        if track_id in self._cache:
+            self._cache.move_to_end(track_id)
+        else:
+            # Evict oldest if at capacity
+            while len(self._cache) >= self._max_size:
+                oldest = next(iter(self._cache))
+                self._evict(oldest)
+
+        self._cache[track_id] = feature
+        self._timestamps[track_id] = time.time()
+
+    def _evict(self, track_id: int):
+        """Remove a track from cache."""
+        if track_id in self._cache:
+            del self._cache[track_id]
+        if track_id in self._timestamps:
+            del self._timestamps[track_id]
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get cache statistics."""
+        total = self._hits + self._misses
+        hit_rate = (self._hits / total * 100) if total > 0 else 0
+        return {
+            "size": len(self._cache),
+            "max_size": self._max_size,
+            "hits": self._hits,
+            "misses": self._misses,
+            "hit_rate": f"{hit_rate:.1f}%",
+        }
+
+    def clear(self):
+        """Clear the cache."""
+        self._cache.clear()
+        self._timestamps.clear()
 
 # Class Filtering Configuration
 ALLOWED_CLASSES = {"person", "car", "truck", "bus", "motorcycle", "bicycle"}
@@ -254,8 +328,13 @@ class LoopConfig:
     """Detection loop configuration."""
 
     backend_url: str = "http://localhost:3000"
-    detection_fps: int = 20  # Process all frames (15 FPS) for continuous analysis
-    stream_fps: int = 20  # Stream at 15 fps for smooth viewing
+
+    # FPS Settings
+    detection_fps: int = 20  # How often to run YOLO detection (affects CPU/GPU usage)
+    stream_fps: int = 20  # FPS for streaming annotated video to frontend
+    reader_fps: int = 25  # FPS for reading from RTSP camera (affects network/decoding)
+    recording_fps: int = 15  # FPS for saved recordings
+
     alert_cooldown: float = 30.0
     gemini_cooldown: float = 5.0  # Don't analyze same track more than once per 5 sec
     event_cooldown: float = 5.0  # Minimum seconds between events per camera
@@ -357,6 +436,19 @@ class DetectionLoop:
             logger.info(f"  {cls}: {thresh:.2f}")
         logger.info("========================================")
 
+        # ReID Feature Extraction Settings
+        # Extracting features for every detection is SLOW on CPU but improves accuracy
+        # Set USE_REID_FEATURES=false to skip ReID and get better FPS (but more ghost tracks)
+        self.use_reid_features = os.environ.get("USE_REID_FEATURES", "true").lower() == "true"
+        self.max_reid_per_frame = int(os.environ.get("MAX_REID_PER_FRAME", "0"))  # 0 = unlimited
+
+        if not self.use_reid_features:
+            logger.info("⚠️ ReID feature extraction DISABLED for better FPS")
+        else:
+            logger.info("✅ ReID feature extraction ENABLED for all detections (best accuracy)")
+            if self.max_reid_per_frame > 0:
+                logger.info(f"⚠️ ReID limited to {self.max_reid_per_frame} extractions per frame")
+
         # Use BoT-SORT tracker for advanced tracking
         self.bot_sort = get_bot_sort_tracker() if self.config.use_bot_sort else None
 
@@ -393,10 +485,28 @@ class DetectionLoop:
             "events_rate_limited": 0,
             "gemini_calls": 0,
             "frames_dropped_stale": 0,  # Count of stale frames dropped
+            "reid_extractions": 0,  # ReID feature extractions
+            "reid_recoveries": 0,  # Successful ReID recoveries
         }
+
+        # Timing stats (rolling averages in milliseconds)
+        self._timing_stats = {
+            "yolo_ms": 0.0,
+            "reid_ms": 0.0,
+            "tracker_ms": 0.0,
+            "recovery_ms": 0.0,
+            "drawing_ms": 0.0,
+            "total_frame_ms": 0.0,
+        }
+        self._timing_samples = 0
+        self._timing_alpha = 0.1  # Exponential moving average factor
 
         # Recovery throttling
         self._recovery_counter = 0
+
+        # ReID Feature Cache for faster lookups
+        self._reid_cache = ReIDFeatureCache(max_size=200, ttl_seconds=30.0)
+        logger.info(f"ReID feature cache initialized (max_size=200, ttl=30s)")
 
         # Stale frame threshold (configurable)
         self._stale_frame_threshold = float(os.environ.get("STALE_FRAME_THRESHOLD_MS", "300")) / 1000.0
@@ -404,6 +514,7 @@ class DetectionLoop:
         # Rule Engine for configurable event handling
         self.rule_engine = get_rule_engine()
         logger.info("Rule Engine initialized")
+        logger.info(f"Recovery config: every {RECOVERY_EVERY_N_FRAMES} frames, YOLO imgsz={RECOVERY_YOLO_IMGSZ}")
 
     def on_frame(self, camera_id: str, frame: np.ndarray):
         """Callback when frame received from RTSP reader.
@@ -447,6 +558,7 @@ class DetectionLoop:
             return
 
         self._running = True
+        self._start_time = time.time()
         self._http_client = httpx.AsyncClient(timeout=30.0)
 
         # Start processing thread
@@ -570,10 +682,13 @@ class DetectionLoop:
         5. Draw annotations and return results
         """
         try:
+            frame_start = time.time()
+
             # STEP 1: Run YOLO with LOW base confidence
             # We use the minimum of all class thresholds, then filter per-class below
             base_confidence = min(self.class_confidence.values()) if self.class_confidence else self.config.yolo_confidence
 
+            yolo_start = time.time()
             yolo_results = self.yolo(
                 frame,
                 verbose=False,
@@ -582,8 +697,11 @@ class DetectionLoop:
                 max_det=50,  # Allow more detections
                 agnostic_nms=True,  # Merge overlapping boxes across classes
             )[0]
+            yolo_elapsed = (time.time() - yolo_start) * 1000
+            self._update_timing("yolo_ms", yolo_elapsed)
 
             # Separate detections by class
+            reid_start = time.time()
             vehicle_detections = []
             person_detections = []
             vehicle_classes = ["car", "truck", "bus", "motorcycle", "bicycle"]
@@ -620,12 +738,19 @@ class DetectionLoop:
                 # - Persons: OSNet (512-dim)
                 # - Vehicles: TransReID (768-dim)
                 # - Others: CLIP Universal (768-dim)
+                # NOTE: ReID extraction is SLOW on CPU (~100ms per detection)
+                # ALWAYS extract ReID for accuracy - prevents ghost tracks
                 feature = None
-                try:
-                    # Extract ReID embedding using appropriate encoder
-                    feature = self._extract_reid_feature(frame, xyxy, label)
-                except Exception as e:
-                    logger.debug(f"ReID extraction failed for {label}: {e}")
+                if self.use_reid_features:
+                    # Check max_reid_per_frame limit
+                    current_reid_count = len(vehicle_detections) + len(person_detections)
+                    if self.max_reid_per_frame == 0 or current_reid_count < self.max_reid_per_frame:
+                        try:
+                            # Extract ReID embedding using appropriate encoder
+                            feature = self._extract_reid_feature(frame, xyxy, label)
+                            self._stats["reid_extractions"] += 1
+                        except Exception as e:
+                            logger.debug(f"ReID extraction failed for {label}: {e}")
 
                 # Create Detection object
                 det = Detection(
@@ -644,9 +769,13 @@ class DetectionLoop:
             self._stats["detections"] += len(vehicle_detections) + len(
                 person_detections
             )
+            # Note: reid_extractions is now counted inside the loop only when extraction actually happens
+            reid_elapsed = (time.time() - reid_start) * 1000
+            self._update_timing("reid_ms", reid_elapsed)
 
             # STEP 2: Run detection recovery BEFORE tracker update (if enabled)
             # This avoids double Kalman prediction
+            recovery_start = time.time()
             if self.bot_sort and self.config.use_reid_recovery:
                 # Get current active tracks to identify lost tracks (filtered by camera)
                 current_vehicles = self.bot_sort.get_active_tracks(
@@ -679,8 +808,13 @@ class DetectionLoop:
                 if recovered_persons:
                     logger.debug(f"Recovered {len(recovered_persons)} person detections")
                     person_detections.extend(recovered_persons)
+                    self._stats["reid_recoveries"] += len(recovered_persons)
+
+            recovery_elapsed = (time.time() - recovery_start) * 1000
+            self._update_timing("recovery_ms", recovery_elapsed)
 
             # STEP 3: Single BoT-SORT tracker update with merged detections
+            tracker_start = time.time()
             tracked_vehicles = []
             tracked_persons = []
             new_vehicles = []
@@ -736,6 +870,9 @@ class DetectionLoop:
                 ]
                 new_vehicles = tracked_vehicles.copy()
                 new_persons = tracked_persons.copy()
+
+            tracker_elapsed = (time.time() - tracker_start) * 1000
+            self._update_timing("tracker_ms", tracker_elapsed)
 
             # STEP 4: Weapon Detection - detect firearms and mark nearby persons as armed
             detected_weapons = []
@@ -822,6 +959,7 @@ class DetectionLoop:
                         armed_persons.append(p)
 
             # Draw annotations
+            draw_start = time.time()
             annotated_frame = None
             if self.config.draw_bboxes:
                 annotated_frame = frame.copy()
@@ -865,6 +1003,14 @@ class DetectionLoop:
                     len(tracked_persons),
                     len(armed_persons),
                 )
+
+            draw_elapsed = (time.time() - draw_start) * 1000
+            self._update_timing("drawing_ms", draw_elapsed)
+
+            # Total frame time
+            total_elapsed = (time.time() - frame_start) * 1000
+            self._update_timing("total_frame_ms", total_elapsed)
+            self._timing_samples += 1
 
             return DetectionResult(
                 camera_id=camera_id,
@@ -952,6 +1098,38 @@ class DetectionLoop:
             logger.debug(f"ReID feature extraction error for {class_name}: {e}")
             return None
 
+    def _extract_reid_feature_cached(
+        self, frame: np.ndarray, xyxy: List[float], class_name: str, track_id: int = None
+    ) -> Optional[np.ndarray]:
+        """Extract ReID feature with caching support.
+
+        If track_id is provided and a cached feature exists, returns the cached version.
+        Otherwise extracts a new feature and caches it.
+
+        Args:
+            frame: Full frame image (BGR format)
+            xyxy: Bounding box in [x1, y1, x2, y2] format
+            class_name: Object class (e.g., "person", "car", "truck")
+            track_id: Optional track ID for cache lookup
+
+        Returns:
+            ReID feature vector (L2-normalized) or None if extraction fails
+        """
+        # Try cache first if track_id provided
+        if track_id is not None:
+            cached = self._reid_cache.get(track_id)
+            if cached is not None:
+                return cached
+
+        # Extract new feature
+        feature = self._extract_reid_feature(frame, xyxy, class_name)
+
+        # Cache if successful and track_id provided
+        if feature is not None and track_id is not None:
+            self._reid_cache.put(track_id, feature)
+
+        return feature
+
     def _track_to_dict(self, track: Track) -> dict:
         """Convert Track object to dictionary for compatibility with rest of pipeline.
 
@@ -1026,36 +1204,50 @@ class DetectionLoop:
             List of recovered Detection objects
         """
         try:
-            # Throttle recovery to run every N frames for performance
+            # OPTIMIZATION 1: Quick check - skip if no active tracks at all
+            if not active_tracks:
+                return []
+
+            # OPTIMIZATION 2: Throttle recovery to run every N frames for performance
             self._recovery_counter += 1
             if self._recovery_counter % RECOVERY_EVERY_N_FRAMES != 0:
                 return []
 
-            # STEP 1: Identify tracks that need recovery
+            # STEP 1: Identify tracks that need recovery (OPTIMIZED - early exit)
+            # Use generator with any() for early termination check
+            has_lost_tracks = any(
+                t.time_since_update > 0
+                and t.avg_confidence > RECOVERY_MIN_TRACK_CONFIDENCE
+                and t.state == "confirmed"
+                for t in active_tracks
+            )
+
+            if not has_lost_tracks:
+                return []
+
+            # Now build the full list (we know there's at least one)
             lost_tracks = [
                 t
                 for t in active_tracks
-                if t.time_since_update > 0  # Lost detection this frame
-                and t.avg_confidence
-                > RECOVERY_MIN_TRACK_CONFIDENCE  # Good track history
-                and t.state == "confirmed"  # Only recover confirmed tracks
+                if t.time_since_update > 0
+                and t.avg_confidence > RECOVERY_MIN_TRACK_CONFIDENCE
+                and t.state == "confirmed"
             ]
-
-            if not lost_tracks:
-                return []
 
             logger.debug(
                 f"Recovery for {object_type}: {len(lost_tracks)} lost tracks out of {len(active_tracks)} active"
             )
 
-            # STEP 2: Run low-threshold YOLO detection with NMS
+            # STEP 2: Run low-threshold YOLO detection with smaller input size
+            # OPTIMIZATION 3: Use smaller imgsz for faster inference
             low_conf_results = self.yolo(
                 frame,
                 verbose=False,
                 conf=self.config.recovery_confidence,  # Configurable recovery confidence
                 iou=0.4,  # Stricter NMS
-                max_det=30,  # Limit recovery detections
+                max_det=20,  # Reduced from 30 - we only need a few candidates
                 agnostic_nms=True,  # Merge across classes
+                imgsz=RECOVERY_YOLO_IMGSZ,  # Smaller input = faster inference
             )[0]
 
             recovery_candidates = []
@@ -1079,10 +1271,10 @@ class DetectionLoop:
                 x1, y1, x2, y2 = xyxy
                 bbox = (x1, y1, x2 - x1, y2 - y1)
 
-                # Extract ReID feature for ALL classes using appropriate encoder
+                # Extract ReID feature - OPTIMIZATION 4: Use cache when possible
                 feature = None
                 try:
-                    feature = self._extract_reid_feature(frame, xyxy, label)
+                    feature = self._extract_reid_feature_cached(frame, xyxy, label)
                 except Exception as e:
                     logger.debug(f"Recovery ReID extraction failed for {label}: {e}")
 
@@ -1669,17 +1861,41 @@ class DetectionLoop:
 
         return "זוהו: " + ", ".join(parts) if parts else "זיהוי חדש"
 
+    def _update_timing(self, key: str, elapsed_ms: float):
+        """Update timing stat with exponential moving average."""
+        if self._timing_samples < 10:
+            # Use simple average for first 10 samples
+            self._timing_stats[key] = (
+                (self._timing_stats[key] * self._timing_samples + elapsed_ms)
+                / (self._timing_samples + 1)
+            )
+        else:
+            # Use exponential moving average after warmup
+            self._timing_stats[key] = (
+                self._timing_alpha * elapsed_ms
+                + (1 - self._timing_alpha) * self._timing_stats[key]
+            )
+
     def get_stats(self) -> dict:
         """Get loop statistics."""
+        # Calculate FPS from frames processed
+        uptime = time.time() - getattr(self, '_start_time', time.time())
+        actual_fps = self._stats["frames_processed"] / max(1, uptime)
+
         stats = {
             **self._stats,
             "running": self._running,
             "pending_frames": len(self._latest_frames),
             "result_queue_size": self._result_queue.qsize(),
             "active_cameras": list(self._annotated_frames.keys()),
+            "actual_fps": round(actual_fps, 1),
+            "uptime_seconds": round(uptime, 1),
+            "timing": self._timing_stats,
             "config": {
                 "detection_fps": self.config.detection_fps,
                 "stream_fps": self.config.stream_fps,
+                "reader_fps": self.config.reader_fps,
+                "recording_fps": self.config.recording_fps,
                 "use_reid_recovery": self.config.use_reid_recovery,
                 "yolo_confidence": self.config.yolo_confidence,
                 "weapon_confidence": self.config.weapon_confidence,
@@ -1691,16 +1907,31 @@ class DetectionLoop:
         if self.bot_sort:
             stats["bot_sort"] = self.bot_sort.get_stats()
 
+        # Include ReID cache stats
+        stats["reid_cache"] = self._reid_cache.get_stats()
+
+        # Include recovery config
+        stats["recovery_config"] = {
+            "every_n_frames": RECOVERY_EVERY_N_FRAMES,
+            "yolo_imgsz": RECOVERY_YOLO_IMGSZ,
+        }
+
         return stats
 
     def set_fps(
-        self, detection_fps: Optional[int] = None, stream_fps: Optional[int] = None
+        self,
+        detection_fps: Optional[int] = None,
+        stream_fps: Optional[int] = None,
+        reader_fps: Optional[int] = None,
+        recording_fps: Optional[int] = None
     ):
         """Change FPS settings dynamically.
 
         Args:
-            detection_fps: New detection FPS (1-30)
-            stream_fps: New stream FPS (1-30)
+            detection_fps: How often to run YOLO detection (1-30)
+            stream_fps: FPS for streaming annotated video (1-30)
+            reader_fps: FPS for reading from RTSP camera (1-30)
+            recording_fps: FPS for saved recordings (1-30)
         """
         if detection_fps is not None:
             detection_fps = max(1, min(30, detection_fps))
@@ -1711,6 +1942,16 @@ class DetectionLoop:
             stream_fps = max(1, min(30, stream_fps))
             self.config.stream_fps = stream_fps
             logger.info(f"Stream FPS changed to: {stream_fps}")
+
+        if reader_fps is not None:
+            reader_fps = max(1, min(30, reader_fps))
+            self.config.reader_fps = reader_fps
+            logger.info(f"Reader FPS changed to: {reader_fps}")
+
+        if recording_fps is not None:
+            recording_fps = max(1, min(30, recording_fps))
+            self.config.recording_fps = recording_fps
+            logger.info(f"Recording FPS changed to: {recording_fps}")
 
     def set_reid_recovery(self, enabled: bool):
         """Toggle ReID recovery on/off.

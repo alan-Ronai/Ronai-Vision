@@ -56,9 +56,14 @@ export function AppProvider({ children }) {
       console.log('New event:', event);
       setEvents(prev => [event, ...prev].slice(0, 100));
 
-      // Check for simulation events
-      if (event.type === 'simulation' && event.details?.simulation) {
-        setSimulationPopup(event.details.simulation);
+      // Check for simulation events - support multiple field locations
+      if (event.type === 'simulation') {
+        const simulationType = event.simulationType ||
+                               event.details?.simulation ||
+                               event.metadata?.simulation;
+        if (simulationType) {
+          setSimulationPopup(simulationType);
+        }
       }
     });
 

@@ -264,11 +264,20 @@ export default function GlobalIDStore({ isOpen, onClose }) {
                   >
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-3">
-                        <span className="text-2xl">
-                          {obj.type === 'person'
-                            ? (obj.isArmed || obj.analysis?.armed ? '🔫' : '👤')
-                            : '🚗'}
-                        </span>
+                        {/* Cutout thumbnail or fallback icon */}
+                        {obj.analysis?.cutout_image ? (
+                          <img
+                            src={`data:image/jpeg;base64,${obj.analysis.cutout_image}`}
+                            alt=""
+                            className="w-10 h-10 object-cover rounded border border-gray-600"
+                          />
+                        ) : (
+                          <span className="text-2xl">
+                            {obj.type === 'person'
+                              ? (obj.isArmed || obj.analysis?.armed ? '🔫' : '👤')
+                              : '🚗'}
+                          </span>
+                        )}
                         <div>
                           <div className="font-bold">
                             GID #{obj.gid}
@@ -358,24 +367,35 @@ function ObjectDetail({ object, onRefreshAnalysis }) {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center gap-4">
-        <span className="text-5xl">
-          {object.type === 'person' ? (isArmed ? '🔫' : '👤') : '🚗'}
-        </span>
-        <div>
+      {/* Header with Cutout Image */}
+      <div className="flex items-start gap-4">
+        {/* Cutout image or fallback icon */}
+        {object.analysis?.cutout_image ? (
+          <img
+            src={`data:image/jpeg;base64,${object.analysis.cutout_image}`}
+            alt="Object cutout"
+            className="w-24 h-24 object-cover rounded-lg border-2 border-gray-600"
+          />
+        ) : (
+          <div className="w-24 h-24 flex items-center justify-center bg-gray-700 rounded-lg border-2 border-gray-600">
+            <span className="text-5xl">
+              {object.type === 'person' ? (isArmed ? '🔫' : '👤') : '🚗'}
+            </span>
+          </div>
+        )}
+        <div className="flex-1">
           <h3 className="text-2xl font-bold">GID #{object.gid}</h3>
           <p className="text-gray-400">
             {object.type === 'person' ? 'אדם' : 'רכב'}
             {object.subType && ` (${object.subType})`}
             {object.class && ` - ${object.class}`}
           </p>
+          {isArmed && (
+            <span className="inline-block mt-2 bg-red-600 px-3 py-1 rounded-full text-sm">
+              ⚠️ מזוהה כחמוש
+            </span>
+          )}
         </div>
-        {isArmed && (
-          <span className="bg-red-600 px-3 py-1 rounded-full text-sm">
-            ⚠️ מזוהה כחמוש
-          </span>
-        )}
       </div>
 
       {/* Status */}
@@ -456,7 +476,22 @@ function ObjectDetail({ object, onRefreshAnalysis }) {
             שגיאה: {refreshError}
           </div>
         )}
-        <div className="grid grid-cols-2 gap-2 text-sm">
+
+        {/* Analysis content with image */}
+        <div className="flex gap-4">
+          {/* Cutout image in analysis section */}
+          {object.analysis?.cutout_image && (
+            <div className="flex-shrink-0">
+              <img
+                src={`data:image/jpeg;base64,${object.analysis.cutout_image}`}
+                alt="Analysis cutout"
+                className="w-32 h-32 object-cover rounded-lg border-2 border-gray-600"
+              />
+            </div>
+          )}
+
+          {/* Analysis details */}
+          <div className="flex-1 grid grid-cols-2 gap-2 text-sm">
           {object.type === 'person' && (
             <>
               <div>
@@ -556,6 +591,7 @@ function ObjectDetail({ object, onRefreshAnalysis }) {
               לא בוצע ניתוח עדיין. לחץ על "רענן ניתוח" כדי לנתח את האובייקט.
             </div>
           )}
+          </div>
         </div>
       </div>
 

@@ -1,11 +1,14 @@
 import { useApp } from '../context/AppContext';
 
-export default function StatusBar() {
+export default function StatusBar({ onOpenAIStats }) {
   const { connected, cameras, events, isEmergency } = useApp();
 
   const onlineCameras = cameras.filter(c => c.status === 'online').length;
   const criticalEvents = events.filter(e => e.severity === 'critical' && !e.acknowledged).length;
   const warningEvents = events.filter(e => e.severity === 'warning' && !e.acknowledged).length;
+
+  // Check if dev mode is enabled (via VITE_DEV_MODE env variable)
+  const isDevMode = import.meta.env.VITE_DEV_MODE === 'true';
 
   const currentTime = new Date().toLocaleTimeString('he-IL', {
     hour: '2-digit',
@@ -62,6 +65,18 @@ export default function StatusBar() {
             <span>⚠️</span>
             <span className="text-sm">{warningEvents} אזהרות</span>
           </div>
+        )}
+
+        {/* AI Stats button - dev mode only */}
+        {isDevMode && onOpenAIStats && (
+          <button
+            onClick={onOpenAIStats}
+            className="flex items-center gap-1 bg-green-700 hover:bg-green-600 px-2 py-1 rounded text-sm transition-colors"
+            title="סטטיסטיקות AI (Dev Mode)"
+          >
+            <span>📊</span>
+            <span>AI Stats</span>
+          </button>
         )}
       </div>
 

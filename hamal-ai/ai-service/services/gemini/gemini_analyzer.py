@@ -16,6 +16,7 @@ import json
 import cv2
 import asyncio
 import logging
+import base64
 from io import BytesIO
 from typing import Dict, Any, Optional, List
 from PIL import Image
@@ -95,6 +96,46 @@ class GeminiAnalyzer:
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         return Image.fromarray(rgb)
 
+    def _get_cutout_base64(self, frame, bbox: List[float], max_size: int = 200) -> Optional[str]:
+        """
+        Get a base64 encoded JPEG of the cropped bbox area.
+
+        Args:
+            frame: OpenCV BGR numpy array
+            bbox: Bounding box [x1, y1, x2, y2]
+            max_size: Maximum dimension for the thumbnail
+
+        Returns:
+            Base64 encoded JPEG string or None on error
+        """
+        try:
+            x1, y1, x2, y2 = map(int, bbox)
+            # Clamp to frame bounds
+            h, w = frame.shape[:2]
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(w, x2), min(h, y2)
+
+            if x2 <= x1 or y2 <= y1:
+                return None
+
+            # Crop the region
+            crop = frame[y1:y2, x1:x2]
+
+            # Resize if too large (keep aspect ratio)
+            crop_h, crop_w = crop.shape[:2]
+            if crop_w > max_size or crop_h > max_size:
+                scale = max_size / max(crop_w, crop_h)
+                new_w, new_h = int(crop_w * scale), int(crop_h * scale)
+                crop = cv2.resize(crop, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+            # Encode to JPEG
+            _, buffer = cv2.imencode('.jpg', crop, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            return base64.b64encode(buffer).decode('utf-8')
+
+        except Exception as e:
+            logger.error(f"Failed to create cutout: {e}")
+            return None
+
     def _parse_json(self, text: str) -> Dict[str, Any]:
         """Parse JSON from Gemini response, handling markdown code blocks"""
         try:
@@ -116,7 +157,8 @@ class GeminiAnalyzer:
     async def analyze_vehicle(
         self,
         frame,
-        bbox: List[float]
+        bbox: List[float],
+        include_cutout: bool = True
     ) -> Dict[str, Any]:
         """
         Analyze a vehicle in the frame.
@@ -124,9 +166,10 @@ class GeminiAnalyzer:
         Args:
             frame: OpenCV frame (BGR numpy array)
             bbox: Bounding box [x1, y1, x2, y2]
+            include_cutout: Whether to include base64 image cutout
 
         Returns:
-            Dict with: color, model, manufacturer, licensePlate, vehicleType
+            Dict with: color, model, manufacturer, licensePlate, vehicleType, cutout_image
         """
         if not self.model:
             return {"error": "Gemini not configured"}
@@ -151,6 +194,15 @@ class GeminiAnalyzer:
             response = await self.model.generate_content_async([prompt, img])
             result = self._parse_json(response.text)
 
+            # Add cutout image if requested
+            if include_cutout:
+                cutout = self._get_cutout_base64(frame, bbox)
+                if cutout:
+                    result["cutout_image"] = cutout
+                    logger.debug(f"Added cutout image to vehicle analysis ({len(cutout)} bytes)")
+                else:
+                    logger.warning("Failed to generate cutout image for vehicle")
+
             logger.info(f"Vehicle analyzed: {result.get('color', '?')} {result.get('manufacturer', '?')}")
             return result
 
@@ -161,7 +213,8 @@ class GeminiAnalyzer:
     async def analyze_person(
         self,
         frame,
-        bbox: List[float]
+        bbox: List[float],
+        include_cutout: bool = True
     ) -> Dict[str, Any]:
         """
         Analyze a person in the frame - clothing and armed status.
@@ -169,9 +222,10 @@ class GeminiAnalyzer:
         Args:
             frame: OpenCV frame (BGR numpy array)
             bbox: Bounding box [x1, y1, x2, y2]
+            include_cutout: Whether to include base64 image cutout
 
         Returns:
-            Dict with: shirtColor, pantsColor, headwear, armed, weaponType
+            Dict with: shirtColor, pantsColor, headwear, armed, weaponType, cutout_image
         """
         if not self.model:
             return {"error": "Gemini not configured"}
@@ -200,6 +254,15 @@ class GeminiAnalyzer:
 
             response = await self.model.generate_content_async([prompt, img])
             result = self._parse_json(response.text)
+
+            # Add cutout image if requested
+            if include_cutout:
+                cutout = self._get_cutout_base64(frame, bbox)
+                if cutout:
+                    result["cutout_image"] = cutout
+                    logger.debug(f"Added cutout image to person analysis ({len(cutout)} bytes)")
+                else:
+                    logger.warning("Failed to generate cutout image for person")
 
             if result.get("armed"):
                 logger.warning(f"⚠️ Armed person detected! Weapon: {result.get('weaponType')}")

@@ -13,6 +13,7 @@ import DetectionSettings from './components/DetectionSettings';
 import GlobalIDStore from './components/GlobalIDStore';
 import AudioTransmitter from './components/AudioTransmitter';
 import EventRuleManager from './components/EventRuleManager';
+import AIStatsPanel from './components/AIStatsPanel';
 
 function Dashboard() {
   const { isEmergency, simulationPopup, loading } = useApp();
@@ -21,6 +22,7 @@ function Dashboard() {
   const [showGlobalIDStore, setShowGlobalIDStore] = useState(false);
   const [showAudioTransmitter, setShowAudioTransmitter] = useState(false);
   const [showEventRules, setShowEventRules] = useState(false);
+  const [showAIStats, setShowAIStats] = useState(false);
 
   if (loading) {
     return (
@@ -54,7 +56,7 @@ function Dashboard() {
       )}
 
       {/* Status bar */}
-      <StatusBar />
+      <StatusBar onOpenAIStats={() => setShowAIStats(true)} />
 
       {/* Main content */}
       <div className={`flex-1 p-3 grid grid-cols-12 gap-3 min-h-0`}>
@@ -142,6 +144,12 @@ function Dashboard() {
       <EventRuleManager
         isOpen={showEventRules}
         onClose={() => setShowEventRules(false)}
+      />
+
+      {/* AI Stats Panel Modal */}
+      <AIStatsPanel
+        isOpen={showAIStats}
+        onClose={() => setShowAIStats(false)}
       />
 
       {/* Emergency popup */}

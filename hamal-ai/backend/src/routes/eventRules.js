@@ -19,6 +19,31 @@ import eventRuleTypes, {
 
 const router = express.Router();
 
+// AI Service URL for rule reload notifications
+const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://localhost:8000';
+
+/**
+ * Notify AI service to reload rules.
+ * Called when rules are created, updated, or deleted.
+ */
+async function notifyAIServiceRulesChanged() {
+  try {
+    const response = await fetch(`${AI_SERVICE_URL}/api/rules/reload`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(5000) // 5 second timeout
+    });
+    if (response.ok) {
+      const data = await response.json();
+      console.log(`[EventRules] AI service reloaded ${data.rules_count} rules`);
+    } else {
+      console.warn(`[EventRules] AI service reload failed: ${response.status}`);
+    }
+  } catch (error) {
+    console.warn(`[EventRules] Failed to notify AI service: ${error.message}`);
+  }
+}
+
 // =============================================================================
 // GET /api/event-rules
 // List all event rules with optional filtering
@@ -186,7 +211,10 @@ router.post('/', async (req, res) => {
       tags: tags || []
     });
 
-    // Notify AI service to reload rules via socket
+    // Notify AI service to reload rules
+    notifyAIServiceRulesChanged();
+
+    // Also emit socket event for frontend
     const io = req.app.get('io');
     if (io) {
       io.emit('event-rules:updated', { action: 'created', ruleId: rule._id });
@@ -257,7 +285,10 @@ router.put('/:id', async (req, res) => {
       ...(tags !== undefined && { tags })
     });
 
-    // Notify AI service
+    // Notify AI service to reload rules
+    notifyAIServiceRulesChanged();
+
+    // Also emit socket event for frontend
     const io = req.app.get('io');
     if (io) {
       io.emit('event-rules:updated', { action: 'updated', ruleId: updatedRule._id });
@@ -288,7 +319,10 @@ router.patch('/:id/toggle', async (req, res) => {
       enabled: !rule.enabled
     });
 
-    // Notify AI service
+    // Notify AI service to reload rules
+    notifyAIServiceRulesChanged();
+
+    // Also emit socket event for frontend
     const io = req.app.get('io');
     if (io) {
       io.emit('event-rules:updated', { action: 'toggled', ruleId: updatedRule._id });
@@ -321,7 +355,10 @@ router.delete('/:id', async (req, res) => {
       return res.status(500).json({ error: 'Failed to delete rule' });
     }
 
-    // Notify AI service
+    // Notify AI service to reload rules
+    notifyAIServiceRulesChanged();
+
+    // Also emit socket event for frontend
     const io = req.app.get('io');
     if (io) {
       io.emit('event-rules:updated', { action: 'deleted', ruleId: req.params.id });

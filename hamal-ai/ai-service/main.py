@@ -49,11 +49,19 @@ from services.reid import ReIDTracker
 from services.gemini import GeminiAnalyzer
 from services.tts_service import TTSService
 from services.streaming import get_rtsp_manager, RTSPConfig, get_ffmpeg_manager, FFmpegConfig
+from services.streaming import get_gstreamer_manager, GStreamerConfig, is_gstreamer_available
 from services.detection_loop import init_detection_loop, get_detection_loop, LoopConfig
 from services.detection import get_frame_buffer_manager, get_stable_tracker
 from services.radio import init_radio_service, get_radio_service, stop_radio_service
 from services.radio.radio_transmit import router as radio_transmit_router
 from services.recording import init_recording_manager, get_recording_manager
+
+# RTSP Backend selection
+RTSP_BACKEND = os.getenv("RTSP_BACKEND", "ffmpeg").lower()
+if RTSP_BACKEND == "gstreamer" and not is_gstreamer_available():
+    logger.warning("GStreamer requested but not available, falling back to FFmpeg")
+    RTSP_BACKEND = "ffmpeg"
+logger.info(f"RTSP Backend: {RTSP_BACKEND}")
 
 # FastAPI app
 app = FastAPI(
@@ -1252,6 +1260,7 @@ async def refresh_analysis(
         Updated analysis or error if object not visible
     """
     from services.backend_sync import parse_gid
+    from services.detection import get_bot_sort_tracker
 
     # Parse track ID to get numeric GID
     gid = parse_gid(track_id)
@@ -1263,50 +1272,113 @@ async def refresh_analysis(
     if not detection_loop:
         raise HTTPException(503, "Detection loop not running")
 
-    # Get the stable tracker to find the object
+    # Get both trackers - BoT-SORT (main) and StableTracker (backup)
+    bot_sort = get_bot_sort_tracker()
     stable_tracker = get_stable_tracker()
 
     # Determine object type and get object
     obj = None
     obj_type = None
+    bbox = None
 
     # Check if it's a person (track IDs starting with 't_' or 'p_')
     if track_id.startswith('t_') or track_id.startswith('p_'):
         obj_type = 'person'
-        for person in stable_tracker.get_all_persons():
-            if person.track_id == gid:
-                obj = person
-                break
+        # First check BoT-SORT (main tracker)
+        if bot_sort:
+            for track in bot_sort.get_active_tracks('person'):
+                if track.track_id == gid:
+                    obj = track
+                    bbox = track.bbox  # (x, y, w, h) format
+                    if not camera_id:
+                        camera_id = track.last_seen_camera
+                    break
+        # Fallback to stable tracker
+        if not obj:
+            for person in stable_tracker.get_all_persons():
+                if person.track_id == gid:
+                    obj = person
+                    bbox = person.bbox
+                    if not camera_id:
+                        camera_id = person.camera_id
+                    break
+
     # Check if it's a vehicle
     elif track_id.startswith('v_'):
         obj_type = 'vehicle'
-        for vehicle in stable_tracker.get_all_vehicles():
-            if vehicle.track_id == gid:
-                obj = vehicle
-                break
+        # First check BoT-SORT (main tracker)
+        if bot_sort:
+            for track in bot_sort.get_active_tracks('vehicle'):
+                if track.track_id == gid:
+                    obj = track
+                    bbox = track.bbox  # (x, y, w, h) format
+                    if not camera_id:
+                        camera_id = track.last_seen_camera
+                    break
+        # Fallback to stable tracker
+        if not obj:
+            for vehicle in stable_tracker.get_all_vehicles():
+                if vehicle.track_id == gid:
+                    obj = vehicle
+                    bbox = vehicle.bbox
+                    if not camera_id:
+                        camera_id = vehicle.camera_id
+                    break
     else:
-        # Try both
-        for person in stable_tracker.get_all_persons():
-            if person.track_id == gid:
-                obj = person
-                obj_type = 'person'
-                break
+        # Try both types in BoT-SORT first
+        if bot_sort:
+            for track in bot_sort.get_active_tracks('person'):
+                if track.track_id == gid:
+                    obj = track
+                    obj_type = 'person'
+                    bbox = track.bbox
+                    if not camera_id:
+                        camera_id = track.last_seen_camera
+                    break
+            if not obj:
+                for track in bot_sort.get_active_tracks('vehicle'):
+                    if track.track_id == gid:
+                        obj = track
+                        obj_type = 'vehicle'
+                        bbox = track.bbox
+                        if not camera_id:
+                            camera_id = track.last_seen_camera
+                        break
+        # Fallback to stable tracker
+        if not obj:
+            for person in stable_tracker.get_all_persons():
+                if person.track_id == gid:
+                    obj = person
+                    obj_type = 'person'
+                    bbox = person.bbox
+                    if not camera_id:
+                        camera_id = person.camera_id
+                    break
         if not obj:
             for vehicle in stable_tracker.get_all_vehicles():
                 if vehicle.track_id == gid:
                     obj = vehicle
                     obj_type = 'vehicle'
+                    bbox = vehicle.bbox
+                    if not camera_id:
+                        camera_id = vehicle.camera_id
                     break
 
     if not obj:
         raise HTTPException(404, "האובייקט כבר לא נמצא בסצנה. ניתן לרענן ניתוח רק עבור אובייקטים פעילים.")
 
-    # Get camera_id from object if not provided
-    if not camera_id:
-        camera_id = obj.camera_id
-
     if not camera_id:
         raise HTTPException(400, "Camera ID not provided and object has no camera")
+
+    if not bbox:
+        raise HTTPException(400, "Object has no bounding box")
+
+    # Convert bbox to [x1, y1, x2, y2] format if it's in (x, y, w, h) format
+    if len(bbox) == 4:
+        x, y, w, h = bbox
+        if w < 100 and h < 100:  # Likely already in (x, y, w, h) format
+            bbox = [x, y, x + w, y + h]
+        # else assume it's already [x1, y1, x2, y2]
 
     # Get current frame from RTSP manager
     rtsp_manager = get_rtsp_manager()
@@ -1314,11 +1386,6 @@ async def refresh_analysis(
 
     if frame is None:
         raise HTTPException(503, f"No frame available from camera {camera_id}")
-
-    # Get bbox from object
-    bbox = obj.bbox if hasattr(obj, 'bbox') else None
-    if not bbox:
-        raise HTTPException(400, "Object has no bounding box")
 
     # Run Gemini analysis
     try:
@@ -1328,7 +1395,8 @@ async def refresh_analysis(
             analysis = await gemini.analyze_person(frame, bbox)
 
         # Update tracker metadata
-        obj.metadata['analysis'] = analysis
+        if hasattr(obj, 'metadata'):
+            obj.metadata['analysis'] = analysis
 
         # Sync to backend
         from services import backend_sync
@@ -1686,6 +1754,104 @@ async def detection_stats():
     }
 
 
+@app.get("/api/stats/realtime")
+async def realtime_stats():
+    """Get comprehensive real-time statistics for all AI components.
+
+    Returns detailed performance metrics including:
+    - YOLO detection timing and counts
+    - ReID feature extraction timing
+    - Tracker (BoT-SORT) performance
+    - Recovery attempts and successes
+    - Frame processing rates
+    - Memory/CPU pressure indicators
+    """
+    detection_loop = get_detection_loop()
+    rtsp_manager = get_rtsp_manager()
+    recording_manager = get_recording_manager()
+
+    # Get detection loop stats (includes timing)
+    detection_stats = detection_loop.get_stats() if detection_loop else {}
+
+    # Get ReID tracker stats
+    reid_stats = tracker.get_stats() if tracker else {}
+
+    # Get stable tracker stats
+    stable = get_stable_tracker()
+    stable_stats = stable.get_stats() if stable else {}
+
+    # Get recording stats
+    recording_stats = {}
+    if recording_manager:
+        recording_stats = recording_manager.get_stats()
+
+    # Get RTSP reader stats
+    rtsp_stats = rtsp_manager.get_all_stats() if rtsp_manager else {}
+
+    # Get frame buffer stats
+    from services.recording import get_frame_buffer
+    frame_buffer = get_frame_buffer()
+    buffer_stats = frame_buffer.get_stats() if frame_buffer else {}
+
+    # Build comprehensive response
+    timing = detection_stats.get("timing", {})
+    config = detection_stats.get("config", {})
+
+    return {
+        "timestamp": time.time(),
+        "uptime_seconds": detection_stats.get("uptime_seconds", 0),
+
+        # Performance metrics (timing in ms)
+        "performance": {
+            "yolo_ms": round(timing.get("yolo_ms", 0), 1),
+            "reid_ms": round(timing.get("reid_ms", 0), 1),
+            "tracker_ms": round(timing.get("tracker_ms", 0), 1),
+            "recovery_ms": round(timing.get("recovery_ms", 0), 1),
+            "drawing_ms": round(timing.get("drawing_ms", 0), 1),
+            "total_frame_ms": round(timing.get("total_frame_ms", 0), 1),
+            "actual_fps": detection_stats.get("actual_fps", 0),
+            "target_fps": config.get("detection_fps", 15),
+        },
+
+        # Counters
+        "counters": {
+            "frames_processed": detection_stats.get("frames_processed", 0),
+            "detections": detection_stats.get("detections", 0),
+            "reid_extractions": detection_stats.get("reid_extractions", 0),
+            "reid_recoveries": detection_stats.get("reid_recoveries", 0),
+            "events_sent": detection_stats.get("events_sent", 0),
+            "gemini_calls": detection_stats.get("gemini_calls", 0),
+            "frames_dropped": detection_stats.get("frames_dropped_stale", 0),
+        },
+
+        # Tracker stats
+        "tracker": {
+            "bot_sort": detection_stats.get("bot_sort", {}),
+            "reid": reid_stats,
+            "stable": stable_stats,
+        },
+
+        # Queue/buffer pressure
+        "pressure": {
+            "pending_frames": detection_stats.get("pending_frames", 0),
+            "result_queue_size": detection_stats.get("result_queue_size", 0),
+            "active_cameras": detection_stats.get("active_cameras", []),
+        },
+
+        # Configuration
+        "config": config,
+
+        # Recording stats
+        "recording": recording_stats,
+
+        # Buffer stats
+        "frame_buffer": buffer_stats,
+
+        # RTSP readers
+        "rtsp_readers": rtsp_stats,
+    }
+
+
 @app.get("/detection/fps")
 async def get_fps_config():
     """
@@ -1898,6 +2064,8 @@ async def get_detection_config():
     return {
         "detection_fps": detection_loop.config.detection_fps,
         "stream_fps": detection_loop.config.stream_fps,
+        "reader_fps": detection_loop.config.reader_fps,
+        "recording_fps": detection_loop.config.recording_fps,
         "use_reid_recovery": detection_loop.config.use_reid_recovery,
         "use_bot_sort": detection_loop.config.use_bot_sort,
         "draw_bboxes": detection_loop.config.draw_bboxes,
@@ -1911,7 +2079,9 @@ async def get_detection_config():
 @app.post("/detection/config/fps")
 async def set_detection_fps(
     detection_fps: Optional[int] = Query(None, description="Detection FPS (1-30)", ge=1, le=30),
-    stream_fps: Optional[int] = Query(None, description="Stream FPS (1-30)", ge=1, le=30)
+    stream_fps: Optional[int] = Query(None, description="Stream FPS (1-30)", ge=1, le=30),
+    reader_fps: Optional[int] = Query(None, description="Reader FPS (1-30)", ge=1, le=30),
+    recording_fps: Optional[int] = Query(None, description="Recording FPS (1-30)", ge=1, le=30)
 ):
     """Change FPS settings dynamically.
 
@@ -1919,22 +2089,26 @@ async def set_detection_fps(
     with new FPS parameter to see the change.
 
     Args:
-        detection_fps: New detection processing FPS (1-30)
-        stream_fps: New streaming FPS (1-30)
+        detection_fps: How often to run YOLO detection (affects CPU/GPU usage)
+        stream_fps: FPS for streaming annotated video to frontend
+        reader_fps: FPS for reading from RTSP camera (affects network/decoding)
+        recording_fps: FPS for saved recordings
     """
     detection_loop = get_detection_loop()
     if not detection_loop:
         raise HTTPException(503, "Detection loop not running")
 
-    if detection_fps is None and stream_fps is None:
+    if detection_fps is None and stream_fps is None and reader_fps is None and recording_fps is None:
         raise HTTPException(400, "Must provide at least one FPS value")
 
-    detection_loop.set_fps(detection_fps, stream_fps)
+    detection_loop.set_fps(detection_fps, stream_fps, reader_fps, recording_fps)
 
     return {
         "message": "FPS settings updated",
         "detection_fps": detection_loop.config.detection_fps,
         "stream_fps": detection_loop.config.stream_fps,
+        "reader_fps": detection_loop.config.reader_fps,
+        "recording_fps": detection_loop.config.recording_fps,
         "note": "Frontend streams should reconnect to see changes"
     }
 
@@ -1998,6 +2172,29 @@ async def set_confidence_thresholds(
         "recovery_confidence": detection_loop.config.recovery_confidence,
         "note": "Changes take effect immediately on next frame"
     }
+
+
+# ============== RULES ENDPOINTS ==============
+
+@app.post("/api/rules/reload")
+async def reload_event_rules():
+    """Reload event rules from backend.
+
+    Called by the backend when rules are created/updated/deleted.
+    This avoids the need to poll for rule changes.
+    """
+    from services.rules import get_rule_engine
+
+    try:
+        engine = get_rule_engine()
+        await engine.reload_rules()
+        return {
+            "status": "reloaded",
+            "rules_count": len(engine.rules)
+        }
+    except Exception as e:
+        logger.error(f"Failed to reload rules: {e}")
+        raise HTTPException(500, str(e))
 
 
 # ============== RADIO ENDPOINTS ==============

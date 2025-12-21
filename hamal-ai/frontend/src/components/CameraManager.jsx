@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+const AI_SERVICE_URL = import.meta.env.VITE_AI_SERVICE_URL || 'http://localhost:8000';
 
 export default function CameraManager({ isOpen, onClose }) {
   const [cameras, setCameras] = useState([]);
@@ -130,6 +131,48 @@ export default function CameraManager({ isOpen, onClose }) {
       webcam: 'מצלמת רשת'
     };
     return labels[type] || type;
+  };
+
+  // Camera preview component
+  const CameraPreview = ({ cameraId, status }) => {
+    const [previewUrl, setPreviewUrl] = useState(null);
+    const [previewError, setPreviewError] = useState(false);
+    const [loading, setLoading] = useState(true);
+
+    useEffect(() => {
+      // Generate a new URL with timestamp to avoid caching
+      const url = `${AI_SERVICE_URL}/api/stream/snapshot/${cameraId}?t=${Date.now()}`;
+      setPreviewUrl(url);
+      setPreviewError(false);
+      setLoading(true);
+    }, [cameraId, status]);
+
+    return (
+      <div className="w-24 h-16 bg-gray-800 rounded overflow-hidden flex-shrink-0 relative">
+        {loading && !previewError && (
+          <div className="absolute inset-0 flex items-center justify-center">
+            <div className="w-4 h-4 border-2 border-gray-500 border-t-blue-500 rounded-full animate-spin" />
+          </div>
+        )}
+        {previewUrl && !previewError && (
+          <img
+            src={previewUrl}
+            alt={`Preview ${cameraId}`}
+            className={`w-full h-full object-cover ${loading ? 'opacity-0' : 'opacity-100'} transition-opacity`}
+            onLoad={() => setLoading(false)}
+            onError={() => {
+              setPreviewError(true);
+              setLoading(false);
+            }}
+          />
+        )}
+        {previewError && (
+          <div className="absolute inset-0 flex items-center justify-center text-gray-500">
+            <span className="text-2xl">📹</span>
+          </div>
+        )}
+      </div>
+    );
   };
 
   if (!isOpen) return null;
@@ -303,6 +346,9 @@ export default function CameraManager({ isOpen, onClose }) {
                     key={camera._id || camera.cameraId}
                     className="bg-gray-700 rounded-lg p-4 flex items-center gap-4"
                   >
+                    {/* Camera Preview */}
+                    <CameraPreview cameraId={camera.cameraId} status={camera.status} />
+
                     {/* Status Indicator */}
                     <div className={`w-3 h-3 rounded-full flex-shrink-0 ${statusInfo.color}`} />
 

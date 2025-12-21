@@ -252,8 +252,8 @@ class RuleEngine:
 
         while self._periodic_timer_running:
             try:
-                # Ensure rules are loaded
-                await self.load_rules()
+                # Note: Rules are loaded once at startup and reloaded via reload_rules()
+                # when rules are created/updated/deleted. No need to reload here.
 
                 # Find rules that have ONLY periodic_interval conditions
                 periodic_rules = self._get_periodic_only_rules()
@@ -401,8 +401,8 @@ class RuleEngine:
         Returns:
             List of action results from triggered rules
         """
-        # Ensure rules are loaded
-        await self.load_rules()
+        # Note: Rules are loaded once at startup and reloaded via reload_rules()
+        # when rules are created/updated/deleted. No need to reload on every event.
 
         results = []
 
@@ -1325,12 +1325,46 @@ class RuleEngine:
         logger.info(f"Webhook called: {method} {url}")
 
     async def _action_log_event(self, params: Dict, ctx: RuleContext):
-        """Log event."""
+        """Log event to the system (saves to database and shows in event log)."""
         message = self._interpolate(params.get("message", ""), ctx)
         level = params.get("level", "info")
+        title = self._interpolate(params.get("title", "רישום ביומן"), ctx)
 
+        # Map log level to severity
+        severity_map = {
+            "debug": "info",
+            "info": "info",
+            "warning": "warning",
+            "error": "critical",
+            "critical": "critical"
+        }
+        severity = severity_map.get(level, "info")
+
+        # Log to Python logger
         log_func = getattr(logger, level, logger.info)
         log_func(f"[RuleEngine] {message}")
+
+        # Also create an event in the database
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.post(
+                    f"{BACKEND_URL}/api/events",
+                    json={
+                        "type": "system",
+                        "severity": severity,
+                        "title": title,
+                        "description": message,
+                        "cameraId": ctx.camera_id,
+                        "metadata": {
+                            "source": "rule_engine",
+                            "action": "log_event",
+                            "level": level
+                        }
+                    },
+                    timeout=5.0
+                )
+        except Exception as e:
+            logger.debug(f"Failed to save log event: {e}")
 
     async def _action_play_sound(self, params: Dict, ctx: RuleContext):
         """Play sound (notify frontend via socket)."""

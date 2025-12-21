@@ -103,8 +103,24 @@ router.get('/:id', async (req, res) => {
  */
 router.post('/', async (req, res) => {
   try {
+    // Default title based on event type if not provided
+    const defaultTitles = {
+      detection: 'זיהוי חדש',
+      alert: 'התראה',
+      system: 'הודעת מערכת',
+      radio: 'תעתיק קשר',
+      simulation: 'סימולציה',
+      upload: 'קובץ הועלה',
+      armed_person: 'אדם חמוש',
+      vehicle: 'רכב',
+      suspicious_activity: 'פעילות חשודה',
+      video: 'הקלטה נשמרה'
+    };
+
     const eventData = {
       ...req.body,
+      // Ensure title is always set - use default based on type if not provided
+      title: req.body.title || defaultTitles[req.body.type] || 'אירוע',
       timestamp: new Date()
     };
 

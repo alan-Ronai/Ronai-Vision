@@ -31,3 +31,11 @@ aiohttp>=3.9.0
 
 # Utilities
 python-dotenv>=1.0.0
+
+# GStreamer (optional - for improved RTSP streaming)
+# Python bindings are not needed - we use gst-launch-1.0 subprocess
+# Install GStreamer system libraries:
+#   macOS:   brew install gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly
+#   Ubuntu:  apt install gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav
+#   Windows: https://gstreamer.freedesktop.org/download/
+PyGObject

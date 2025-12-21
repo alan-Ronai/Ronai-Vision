@@ -6,6 +6,8 @@ export default function DetectionSettings({ isOpen, onClose }) {
   const [config, setConfig] = useState({
     detection_fps: 15,
     stream_fps: 15,
+    reader_fps: 25,
+    recording_fps: 15,
     use_reid_recovery: false,
     yolo_confidence: 0.35,
     weapon_confidence: 0.40,
@@ -28,6 +30,8 @@ export default function DetectionSettings({ isOpen, onClose }) {
       setConfig({
         detection_fps: data.detection_fps || 15,
         stream_fps: data.stream_fps || 15,
+        reader_fps: data.reader_fps || 25,
+        recording_fps: data.recording_fps || 15,
         use_reid_recovery: data.use_reid_recovery || false,
         yolo_confidence: data.yolo_confidence || 0.35,
         weapon_confidence: data.weapon_confidence || 0.40,
@@ -46,6 +50,8 @@ export default function DetectionSettings({ isOpen, onClose }) {
       const params = new URLSearchParams({
         detection_fps: config.detection_fps,
         stream_fps: config.stream_fps,
+        reader_fps: config.reader_fps,
+        recording_fps: config.recording_fps,
       });
 
       const res = await fetch(`${AI_SERVICE_URL}/detection/config/fps?${params}`, {
@@ -111,13 +117,19 @@ export default function DetectionSettings({ isOpen, onClose }) {
 
   const applyFPSPreset = (preset) => {
     const presets = {
-      high: { detection: 30, stream: 30 },
-      balanced: { detection: 15, stream: 15 },
-      low: { detection: 10, stream: 10 },
-      power: { detection: 5, stream: 5 },
+      high: { detection: 25, stream: 25, reader: 30, recording: 25 },
+      balanced: { detection: 15, stream: 15, reader: 20, recording: 15 },
+      low: { detection: 10, stream: 10, reader: 15, recording: 10 },
+      power: { detection: 5, stream: 5, reader: 10, recording: 10 },
     };
-    const { detection, stream } = presets[preset];
-    setConfig({ ...config, detection_fps: detection, stream_fps: stream });
+    const { detection, stream, reader, recording } = presets[preset];
+    setConfig({
+      ...config,
+      detection_fps: detection,
+      stream_fps: stream,
+      reader_fps: reader,
+      recording_fps: recording,
+    });
   };
 
   const applyConfidencePreset = (preset) => {
@@ -197,7 +209,7 @@ export default function DetectionSettings({ isOpen, onClose }) {
                   {/* Detection FPS */}
                   <div>
                     <label className="block text-sm text-gray-300 mb-2">
-                      FPS זיהוי (עיבוד): {config.detection_fps}
+                      <span className="text-yellow-400">🤖</span> FPS זיהוי (AI): {config.detection_fps}
                     </label>
                     <input
                       type="range"
@@ -210,14 +222,14 @@ export default function DetectionSettings({ isOpen, onClose }) {
                       className="w-full h-2 bg-gray-600 rounded-lg appearance-none cursor-pointer"
                     />
                     <p className="text-xs text-gray-400 mt-1">
-                      כמה פריימים לעבד בשנייה
+                      כמה פעמים להריץ YOLO בשנייה (משפיע על CPU/GPU)
                     </p>
                   </div>
 
                   {/* Stream FPS */}
                   <div>
                     <label className="block text-sm text-gray-300 mb-2">
-                      FPS הזרמה (וידאו): {config.stream_fps}
+                      <span className="text-blue-400">📺</span> FPS הזרמה (וידאו): {config.stream_fps}
                     </label>
                     <input
                       type="range"
@@ -230,7 +242,47 @@ export default function DetectionSettings({ isOpen, onClose }) {
                       className="w-full h-2 bg-gray-600 rounded-lg appearance-none cursor-pointer"
                     />
                     <p className="text-xs text-gray-400 mt-1">
-                      כמה פריימים להציג בשנייה
+                      כמה פריימים להציג בממשק (חלקות הוידאו)
+                    </p>
+                  </div>
+
+                  {/* Reader FPS */}
+                  <div>
+                    <label className="block text-sm text-gray-300 mb-2">
+                      <span className="text-green-400">📡</span> FPS קריאה (RTSP): {config.reader_fps}
+                    </label>
+                    <input
+                      type="range"
+                      min="1"
+                      max="30"
+                      value={config.reader_fps}
+                      onChange={(e) =>
+                        setConfig({ ...config, reader_fps: Number(e.target.value) })
+                      }
+                      className="w-full h-2 bg-gray-600 rounded-lg appearance-none cursor-pointer"
+                    />
+                    <p className="text-xs text-gray-400 mt-1">
+                      כמה פריימים לקרוא מהמצלמה (משפיע על רשת/דקודינג)
+                    </p>
+                  </div>
+
+                  {/* Recording FPS */}
+                  <div>
+                    <label className="block text-sm text-gray-300 mb-2">
+                      <span className="text-red-400">🔴</span> FPS הקלטה: {config.recording_fps}
+                    </label>
+                    <input
+                      type="range"
+                      min="1"
+                      max="30"
+                      value={config.recording_fps}
+                      onChange={(e) =>
+                        setConfig({ ...config, recording_fps: Number(e.target.value) })
+                      }
+                      className="w-full h-2 bg-gray-600 rounded-lg appearance-none cursor-pointer"
+                    />
+                    <p className="text-xs text-gray-400 mt-1">
+                      כמה פריימים לשמור בהקלטות (גודל קבצים)
                     </p>
                   </div>
                 </div>
