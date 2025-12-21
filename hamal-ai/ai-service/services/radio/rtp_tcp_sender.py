@@ -257,6 +257,15 @@ class RTPAudioSender:
         try:
             # Split audio into chunks (20ms at sample rate)
             chunk_size = self._samples_per_packet * 2  # bytes per chunk
+            total_packets = (len(audio_data) + chunk_size - 1) // chunk_size
+            duration_ms = (len(audio_data) / 2 / self.sample_rate) * 1000
+
+            logger.info(
+                f"📤 Starting RTP audio send: {len(audio_data)} bytes, "
+                f"~{total_packets} packets, {duration_ms:.0f}ms @ {self.sample_rate}Hz"
+            )
+
+            packets_sent_before = self._stats["packets_sent"]
 
             for i in range(0, len(audio_data), chunk_size):
                 chunk = audio_data[i:i + chunk_size]
@@ -276,13 +285,12 @@ class RTPAudioSender:
                 time.sleep(0.018)
 
             self._stats["last_send_time"] = time.time()
+            packets_sent = self._stats["packets_sent"] - packets_sent_before
 
-            # Log every 50 packets
-            if self._stats["packets_sent"] % 50 == 0:
-                logger.info(
-                    f"TX: {self._stats['packets_sent']} packets, "
-                    f"{self._stats['bytes_sent'] / 1024:.1f} KB sent"
-                )
+            logger.info(
+                f"📤 RTP audio send complete: {packets_sent} packets sent to "
+                f"{self.host}:{self.audio_port}"
+            )
 
             return True
 

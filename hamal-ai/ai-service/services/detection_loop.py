@@ -31,6 +31,8 @@ from .reid import OSNetReID, TransReIDVehicle, UniversalReID
 from . import backend_sync
 from .rules import RuleEngine, RuleContext, get_rule_engine
 from .recording import get_frame_buffer, get_recording_manager
+from .frame_selection import get_analysis_buffer, AnalysisBuffer, get_image_enhancer, ImageEnhancer
+from .scenario import get_scenario_hooks, VehicleData, PersonData
 
 logger = logging.getLogger(__name__)
 
@@ -515,6 +517,25 @@ class DetectionLoop:
         self.rule_engine = get_rule_engine()
         logger.info("Rule Engine initialized")
         logger.info(f"Recovery config: every {RECOVERY_EVERY_N_FRAMES} frames, YOLO imgsz={RECOVERY_YOLO_IMGSZ}")
+
+        # Frame Selection Buffer for optimal Gemini analysis timing
+        # Instead of analyzing the first frame, we buffer frames and select the best one
+        self.analysis_buffer = get_analysis_buffer()
+        self.image_enhancer = get_image_enhancer()
+        self._use_frame_selection = os.environ.get("USE_FRAME_SELECTION", "true").lower() == "true"
+        self._use_image_enhancement = os.environ.get("USE_IMAGE_ENHANCEMENT", "true").lower() == "true"
+        if self._use_frame_selection:
+            logger.info("✅ Frame selection ENABLED - will buffer frames for optimal Gemini analysis")
+        else:
+            logger.info("⚠️ Frame selection DISABLED - using first frame for analysis")
+        if self._use_image_enhancement:
+            logger.info("✅ Image enhancement ENABLED - will enhance frames before Gemini analysis")
+        else:
+            logger.info("⚠️ Image enhancement DISABLED")
+
+        # Scenario hooks for Armed Attack demo integration
+        self.scenario_hooks = get_scenario_hooks()
+        logger.info("✅ Scenario hooks initialized for Armed Attack demo")
 
     def on_frame(self, camera_id: str, frame: np.ndarray):
         """Callback when frame received from RTSP reader.
@@ -1255,6 +1276,79 @@ class DetectionLoop:
             "is_predicted": False,
         }
 
+    def _generate_enhanced_cutout(
+        self,
+        frame: np.ndarray,
+        bbox: tuple,
+        class_name: str = "unknown",
+        max_size: int = 400,
+        jpeg_quality: int = 90,
+        margin_percent: float = 0.25,
+    ) -> Optional[str]:
+        """Generate an enhanced cutout image for frontend display.
+
+        This creates the image that appears in GlobalIDStore UI.
+        It's the ENHANCED optimal frame, not the first detection frame.
+
+        Args:
+            frame: Enhanced frame (BGR numpy array)
+            bbox: Bounding box (x1, y1, x2, y2)
+            class_name: Object class for logging
+            max_size: Maximum dimension for output
+            jpeg_quality: JPEG quality (1-100)
+            margin_percent: Margin around bbox as fraction
+
+        Returns:
+            Base64 encoded JPEG string, or None on error
+        """
+        try:
+            if frame is None or frame.size == 0:
+                return None
+
+            x1, y1, x2, y2 = [int(v) for v in bbox]
+            h, w = frame.shape[:2]
+
+            # Calculate bbox dimensions
+            bbox_w = x2 - x1
+            bbox_h = y2 - y1
+
+            if bbox_w <= 0 or bbox_h <= 0:
+                return None
+
+            # Add margin around the bbox
+            margin_x = int(bbox_w * margin_percent)
+            margin_y = int(bbox_h * margin_percent)
+
+            # Expand bbox with margin, clamped to frame bounds
+            x1 = max(0, x1 - margin_x)
+            y1 = max(0, y1 - margin_y)
+            x2 = min(w, x2 + margin_x)
+            y2 = min(h, y2 + margin_y)
+
+            if x2 <= x1 or y2 <= y1:
+                return None
+
+            # Crop the region with margin
+            crop = frame[y1:y2, x1:x2]
+
+            # Resize if too large (keep aspect ratio)
+            crop_h, crop_w = crop.shape[:2]
+            if crop_w > max_size or crop_h > max_size:
+                scale = max_size / max(crop_w, crop_h)
+                new_w, new_h = int(crop_w * scale), int(crop_h * scale)
+                crop = cv2.resize(crop, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+            # Encode to JPEG with good quality
+            _, buffer = cv2.imencode('.jpg', crop, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
+            base64_str = base64.b64encode(buffer).decode('utf-8')
+
+            logger.debug(f"Generated enhanced cutout for {class_name}: {len(base64_str)} bytes")
+            return base64_str
+
+        except Exception as e:
+            logger.warning(f"Failed to generate enhanced cutout: {e}")
+            return None
+
     def _recover_missing_detections(
         self,
         frame: np.ndarray,
@@ -1593,7 +1687,303 @@ class DetectionLoop:
                 logger.error(f"Result handler error: {e}")
 
     async def _analyze_new_objects(self, result: DetectionResult):
-        """Analyze new and unanalyzed objects with Gemini."""
+        """Analyze new and unanalyzed objects with Gemini.
+
+        OPTIMAL FRAME SELECTION:
+        Instead of immediately analyzing the first frame of a new track,
+        we buffer frames and select the best quality frame for analysis.
+        This dramatically improves results for license plates, clothing, etc.
+        """
+        if self._use_frame_selection:
+            await self._analyze_with_frame_selection(result)
+        else:
+            await self._analyze_immediate(result)
+
+    async def _analyze_with_frame_selection(self, result: DetectionResult):
+        """Analyze objects using optimal frame selection.
+
+        New tracks are added to the analysis buffer. Each frame updates the buffer
+        with quality scores. When the buffer triggers (threshold, timeout, or full),
+        the best frame is sent to Gemini.
+        """
+        # STEP 1: Start buffers for NEW tracks
+        for v in result.new_vehicles:
+            track_id = v.get("track_id")
+            if track_id and not self.analysis_buffer.is_buffering(track_id):
+                if not self.analysis_buffer.has_been_analyzed(track_id):
+                    self.analysis_buffer.start_buffer(
+                        track_id=track_id,
+                        object_class=v.get("class", "vehicle"),
+                        camera_id=result.camera_id,
+                    )
+
+        for p in result.new_persons:
+            track_id = p.get("track_id")
+            if track_id and not self.analysis_buffer.is_buffering(track_id):
+                if not self.analysis_buffer.has_been_analyzed(track_id):
+                    self.analysis_buffer.start_buffer(
+                        track_id=track_id,
+                        object_class="person",
+                        camera_id=result.camera_id,
+                    )
+
+        # STEP 2: Add frames to buffers for ALL tracked objects (not just new)
+        # This allows the buffer to collect multiple frames and select the best
+        analysis_tasks = []
+
+        for v in result.tracked_vehicles:
+            track_id = v.get("track_id")
+            if not track_id:
+                continue
+
+            # Skip if already analyzed
+            if self.analysis_buffer.has_been_analyzed(track_id):
+                continue
+
+            # Add frame to buffer
+            trigger_result = self.analysis_buffer.add_frame(
+                track_id=track_id,
+                frame=result.frame,
+                bbox=tuple(v.get("bbox", [0, 0, 0, 0])),
+                confidence=v.get("confidence", 0.5),
+            )
+
+            # If buffer triggered, queue analysis
+            if trigger_result:
+                best_frame, best_bbox, metadata = trigger_result
+                analysis_tasks.append(
+                    self._run_vehicle_analysis(track_id, best_frame, best_bbox, metadata, result)
+                )
+
+        for p in result.tracked_persons:
+            track_id = p.get("track_id")
+            if not track_id:
+                continue
+
+            # Skip if already analyzed
+            if self.analysis_buffer.has_been_analyzed(track_id):
+                continue
+
+            # Add frame to buffer
+            trigger_result = self.analysis_buffer.add_frame(
+                track_id=track_id,
+                frame=result.frame,
+                bbox=tuple(p.get("bbox", [0, 0, 0, 0])),
+                confidence=p.get("confidence", 0.5),
+            )
+
+            # If buffer triggered, queue analysis
+            if trigger_result:
+                best_frame, best_bbox, metadata = trigger_result
+                analysis_tasks.append(
+                    self._run_person_analysis(track_id, best_frame, best_bbox, metadata, result)
+                )
+
+        # STEP 3: Run triggered analyses (limit concurrent to avoid overloading Gemini)
+        if analysis_tasks:
+            # Limit to 3 concurrent analyses
+            for task in analysis_tasks[:3]:
+                await task
+
+    async def _run_vehicle_analysis(
+        self,
+        track_id: int,
+        frame: np.ndarray,
+        bbox: tuple,
+        frame_metadata: dict,
+        result: DetectionResult,
+    ):
+        """Run Gemini analysis on optimal vehicle frame with image enhancement."""
+        try:
+            # Cooldown check
+            if time.time() - self._last_gemini.get(track_id, 0) < self.config.gemini_cooldown:
+                return
+
+            # ENHANCEMENT: Enhance the frame before Gemini analysis
+            if self._use_image_enhancement and self.image_enhancer:
+                enhanced_frame = self.image_enhancer.enhance(frame, class_name="vehicle")
+            else:
+                enhanced_frame = frame
+
+            # Run Gemini analysis on the ENHANCED optimal frame
+            analysis = await self.gemini.analyze_vehicle(enhanced_frame, list(bbox))
+
+            # CRITICAL: Generate enhanced cutout for frontend display
+            # This is the image that will appear in GlobalIDStore UI
+            enhanced_cutout_b64 = self._generate_enhanced_cutout(
+                enhanced_frame, bbox, class_name="vehicle"
+            )
+            if enhanced_cutout_b64:
+                analysis["cutout_image"] = enhanced_cutout_b64
+
+            # Add frame selection metadata to analysis
+            analysis["_frame_selection"] = {
+                "quality_score": frame_metadata.get("quality_score", 0),
+                "trigger_reason": frame_metadata.get("trigger_reason", "unknown"),
+                "frames_buffered": frame_metadata.get("frames_buffered", 0),
+                "enhanced": self._use_image_enhancement,
+            }
+
+            metadata = {
+                "type": "vehicle",
+                "analysis": analysis,
+                "camera_id": result.camera_id,
+            }
+
+            # Update tracker with metadata
+            if self.bot_sort:
+                for track in self.bot_sort.get_active_tracks("vehicle", camera_id=result.camera_id):
+                    if track.track_id == track_id:
+                        track.metadata.update(metadata)
+                        break
+
+            self._last_gemini[track_id] = time.time()
+
+            logger.info(
+                f"Analyzed vehicle {track_id} (optimal frame): "
+                f"{analysis.get('manufacturer', '?')} {analysis.get('color', '?')} "
+                f"plate={analysis.get('licensePlate', '?')} "
+                f"quality={frame_metadata.get('quality_score', 0):.2f} enhanced={self._use_image_enhancement}"
+            )
+
+            # Sync analysis to backend (includes enhanced cutout)
+            try:
+                await backend_sync.update_analysis(gid=track_id, analysis=analysis)
+            except Exception as sync_error:
+                logger.debug(f"Backend sync error: {sync_error}")
+
+            # SCENARIO HOOK: Report vehicle with license plate to scenario manager
+            # This will trigger the Armed Attack scenario if the plate is stolen
+            license_plate = analysis.get("licensePlate") or analysis.get("לוחית_רישוי")
+            if license_plate and license_plate not in ["לא זוהה", "?", "", None]:
+                try:
+                    vehicle_data = VehicleData(
+                        license_plate=license_plate,
+                        color=analysis.get("color") or analysis.get("צבע"),
+                        make=analysis.get("manufacturer") or analysis.get("יצרן"),
+                        model=analysis.get("model") or analysis.get("דגם"),
+                        camera_id=result.camera_id,
+                        track_id=track_id,
+                        confidence=frame_metadata.get("quality_score", 0),
+                        bbox=list(bbox) if bbox else None,
+                    )
+                    await self.scenario_hooks.report_vehicle_detection(vehicle_data)
+                except Exception as scenario_error:
+                    logger.debug(f"Scenario vehicle hook error: {scenario_error}")
+
+        except Exception as e:
+            logger.error(f"Gemini vehicle analysis error: {e}")
+
+    async def _run_person_analysis(
+        self,
+        track_id: int,
+        frame: np.ndarray,
+        bbox: tuple,
+        frame_metadata: dict,
+        result: DetectionResult,
+    ):
+        """Run Gemini analysis on optimal person frame with image enhancement."""
+        try:
+            # Cooldown check
+            if time.time() - self._last_gemini.get(track_id, 0) < self.config.gemini_cooldown:
+                return
+
+            # ENHANCEMENT: Enhance the frame before Gemini analysis
+            if self._use_image_enhancement and self.image_enhancer:
+                enhanced_frame = self.image_enhancer.enhance(frame, class_name="person")
+            else:
+                enhanced_frame = frame
+
+            # Run Gemini analysis on the ENHANCED optimal frame
+            analysis = await self.gemini.analyze_person(enhanced_frame, list(bbox))
+
+            # CRITICAL: Generate enhanced cutout for frontend display
+            # This is the image that will appear in GlobalIDStore UI
+            enhanced_cutout_b64 = self._generate_enhanced_cutout(
+                enhanced_frame, bbox, class_name="person"
+            )
+            if enhanced_cutout_b64:
+                analysis["cutout_image"] = enhanced_cutout_b64
+
+            # Add frame selection metadata to analysis
+            analysis["_frame_selection"] = {
+                "quality_score": frame_metadata.get("quality_score", 0),
+                "trigger_reason": frame_metadata.get("trigger_reason", "unknown"),
+                "frames_buffered": frame_metadata.get("frames_buffered", 0),
+                "enhanced": self._use_image_enhancement,
+            }
+
+            metadata = {
+                "type": "person",
+                "analysis": analysis,
+                "camera_id": result.camera_id,
+            }
+
+            # Update tracker with metadata
+            if self.bot_sort:
+                for track in self.bot_sort.get_active_tracks("person", camera_id=result.camera_id):
+                    if track.track_id == track_id:
+                        track.metadata.update(metadata)
+                        break
+
+            self._last_gemini[track_id] = time.time()
+
+            logger.info(
+                f"Analyzed person {track_id} (optimal frame): "
+                f"armed={analysis.get('armed', False)} "
+                f"quality={frame_metadata.get('quality_score', 0):.2f} enhanced={self._use_image_enhancement}"
+            )
+
+            # Sync analysis to backend (includes enhanced cutout)
+            try:
+                await backend_sync.update_analysis(gid=track_id, analysis=analysis)
+            except Exception as sync_error:
+                logger.debug(f"Backend sync error: {sync_error}")
+
+            # Check if armed
+            is_armed = analysis.get("armed") or analysis.get("חמוש")
+            if is_armed:
+                # Find the person dict in result and update it
+                for p in result.tracked_persons:
+                    if p.get("track_id") == track_id:
+                        p["metadata"] = metadata
+                        result.armed_persons.append(p)
+                        break
+
+                # Immediately sync armed status to backend
+                try:
+                    await backend_sync.mark_armed(
+                        gid=track_id,
+                        weapon_type=analysis.get("weaponType", analysis.get("סוג_נשק")),
+                    )
+                except Exception as sync_error:
+                    logger.debug(f"Backend armed sync error: {sync_error}")
+
+                # SCENARIO HOOK: Report armed person to scenario manager
+                # This will count toward the armed persons threshold
+                try:
+                    person_data = PersonData(
+                        track_id=track_id,
+                        armed=True,
+                        weapon_type=analysis.get("weaponType") or analysis.get("סוג_נשק"),
+                        clothing=analysis.get("clothingDescription") or analysis.get("תיאור_ביגוד"),
+                        clothing_color=analysis.get("clothingColor") or analysis.get("צבע_ביגוד"),
+                        confidence=frame_metadata.get("quality_score", 0),
+                        camera_id=result.camera_id,
+                        bbox=list(bbox) if bbox else None,
+                    )
+                    await self.scenario_hooks.report_armed_person(person_data)
+                except Exception as scenario_error:
+                    logger.debug(f"Scenario armed person hook error: {scenario_error}")
+
+        except Exception as e:
+            logger.error(f"Gemini person analysis error: {e}")
+
+    async def _analyze_immediate(self, result: DetectionResult):
+        """Legacy immediate analysis (no frame selection).
+
+        Analyzes the first frame immediately when a new track is detected.
+        """
         # Collect all vehicles that need analysis (new + existing without analysis)
         vehicles_to_analyze = []
 
@@ -1999,6 +2389,14 @@ class DetectionLoop:
             "yolo_imgsz": RECOVERY_YOLO_IMGSZ,
         }
 
+        # Include frame selection stats
+        if self._use_frame_selection and self.analysis_buffer:
+            stats["frame_selection"] = self.analysis_buffer.get_stats()
+
+        # Include image enhancement stats
+        if self._use_image_enhancement and self.image_enhancer:
+            stats["image_enhancement"] = self.image_enhancer.get_stats()
+
         return stats
 
     def set_fps(
@@ -2090,3 +2488,11 @@ def init_detection_loop(
 def get_detection_loop() -> Optional[DetectionLoop]:
     """Get the global detection loop."""
     return _detection_loop
+
+
+def get_active_camera_ids() -> List[str]:
+    """Get list of active camera IDs from the detection loop."""
+    if _detection_loop:
+        stats = _detection_loop.get_stats()
+        return stats.get('active_cameras', [])
+    return []

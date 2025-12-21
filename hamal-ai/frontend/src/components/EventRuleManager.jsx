@@ -1,7 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import { useApp } from '../context/AppContext';
+import { useScenario } from '../context/ScenarioContext';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+const AI_API_URL = import.meta.env.VITE_AI_API_URL || 'http://localhost:8000';
 
 // Available placeholders that can be used in templates
 const AVAILABLE_PLACEHOLDERS = [
@@ -32,6 +34,12 @@ const AVAILABLE_PLACEHOLDERS = [
  */
 export default function EventRuleManager({ isOpen, onClose }) {
   const { cameras } = useApp();
+  const { scenario } = useScenario();
+
+  // Main tab: 'events' or 'scenarios'
+  const [mainTab, setMainTab] = useState('events');
+
+  // Event rules state
   const [rules, setRules] = useState([]);
   const [types, setTypes] = useState({ conditions: {}, pipeline: {}, actions: {}, categories: {} });
   const [loading, setLoading] = useState(true);
@@ -40,12 +48,17 @@ export default function EventRuleManager({ isOpen, onClose }) {
   const [filter, setFilter] = useState('all'); // 'all' | 'enabled' | 'disabled'
   const [stats, setStats] = useState({});
 
+  // Scenario rules state
+  const [scenarioRules, setScenarioRules] = useState([]);
+  const [scenarioLoading, setScenarioLoading] = useState(true);
+
   // Fetch rules and types on open
   useEffect(() => {
     if (isOpen) {
       fetchRules();
       fetchTypes();
       fetchStats();
+      fetchScenarioRules();
     }
   }, [isOpen]);
 
@@ -79,6 +92,21 @@ export default function EventRuleManager({ isOpen, onClose }) {
       setStats(data);
     } catch (error) {
       console.error('Failed to fetch stats:', error);
+    }
+  };
+
+  const fetchScenarioRules = async () => {
+    try {
+      setScenarioLoading(true);
+      const res = await fetch(`${AI_API_URL}/scenario-rules`);
+      if (res.ok) {
+        const data = await res.json();
+        setScenarioRules(data.scenarios || []);
+      }
+    } catch (error) {
+      console.error('Failed to fetch scenario rules:', error);
+    } finally {
+      setScenarioLoading(false);
     }
   };
 
@@ -177,7 +205,7 @@ export default function EventRuleManager({ isOpen, onClose }) {
         <div className="bg-gray-700 px-6 py-4 flex items-center justify-between flex-shrink-0">
           <h2 className="text-xl font-bold flex items-center gap-2">
             <span>⚡</span>
-            <span>ניהול חוקי אירועים</span>
+            <span>ניהול חוקים ותרחישים</span>
           </h2>
           <div className="flex items-center gap-4">
             {view !== 'list' && (
@@ -194,40 +222,90 @@ export default function EventRuleManager({ isOpen, onClose }) {
           </div>
         </div>
 
+        {/* Main Tabs */}
+        <div className="bg-gray-750 px-6 py-2 flex gap-2 border-b border-gray-600">
+          <button
+            onClick={() => setMainTab('events')}
+            className={`px-4 py-2 rounded-t-lg font-medium transition-colors ${
+              mainTab === 'events'
+                ? 'bg-gray-800 text-white border-b-2 border-blue-500'
+                : 'text-gray-400 hover:text-white'
+            }`}
+          >
+            <span className="mr-2">📋</span>
+            אירועים בודדים
+          </button>
+          <button
+            onClick={() => setMainTab('scenarios')}
+            className={`px-4 py-2 rounded-t-lg font-medium transition-colors flex items-center gap-2 ${
+              mainTab === 'scenarios'
+                ? 'bg-gray-800 text-white border-b-2 border-orange-500'
+                : 'text-gray-400 hover:text-white'
+            }`}
+          >
+            <span>🎬</span>
+            תרחישים מורכבים
+            {scenario.active && (
+              <span className="bg-orange-500 text-white text-xs px-2 py-0.5 rounded-full animate-pulse">
+                פעיל
+              </span>
+            )}
+          </button>
+        </div>
+
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-6">
-          {view === 'list' && (
-            <RuleList
-              rules={filteredRules}
-              types={types}
-              stats={stats}
-              filter={filter}
-              setFilter={setFilter}
-              loading={loading}
-              onEdit={handleEdit}
-              onCreate={handleCreate}
-              onToggle={handleToggle}
-              onDelete={handleDelete}
-              onDuplicate={handleDuplicate}
-              onSeed={handleSeedRules}
-            />
+          {mainTab === 'events' && (
+            <>
+              {view === 'list' && (
+                <RuleList
+                  rules={filteredRules}
+                  types={types}
+                  stats={stats}
+                  filter={filter}
+                  setFilter={setFilter}
+                  loading={loading}
+                  onEdit={handleEdit}
+                  onCreate={handleCreate}
+                  onToggle={handleToggle}
+                  onDelete={handleDelete}
+                  onDuplicate={handleDuplicate}
+                  onSeed={handleSeedRules}
+                />
+              )}
+              {(view === 'edit' || view === 'create') && (
+                <RuleEditor
+                  rule={editingRule}
+                  types={types}
+                  cameras={cameras}
+                  onSave={handleSave}
+                  onCancel={() => { setView('list'); setEditingRule(null); }}
+                />
+              )}
+            </>
           )}
-          {(view === 'edit' || view === 'create') && (
-            <RuleEditor
-              rule={editingRule}
-              types={types}
-              cameras={cameras}
-              onSave={handleSave}
-              onCancel={() => { setView('list'); setEditingRule(null); }}
+
+          {mainTab === 'scenarios' && (
+            <ScenarioList
+              scenarios={scenarioRules}
+              loading={scenarioLoading}
+              activeScenario={scenario}
+              onRefresh={fetchScenarioRules}
             />
           )}
         </div>
 
         {/* Footer */}
-        {view === 'list' && (
+        {view === 'list' && mainTab === 'events' && (
           <div className="bg-gray-700 px-6 py-3 flex justify-between items-center text-sm text-gray-400 flex-shrink-0">
             <span>{rules.length} חוקים | {stats.enabled || 0} פעילים</span>
             <span>סה"כ הפעלות: {stats.totalTriggers || 0}</span>
+          </div>
+        )}
+        {mainTab === 'scenarios' && (
+          <div className="bg-gray-700 px-6 py-3 flex justify-between items-center text-sm text-gray-400 flex-shrink-0">
+            <span>{scenarioRules.length} תרחישים מוגדרים</span>
+            <span>{scenario.active ? `תרחיש פעיל: ${scenario.stage}` : 'אין תרחיש פעיל'}</span>
           </div>
         )}
       </div>
@@ -1218,6 +1296,976 @@ function PlaceholderHelp() {
             </div>
           </div>
         </>
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// Scenario List Component - Shows available scenarios and their stages
+// ============================================================================
+function ScenarioList({ scenarios, loading, activeScenario, onRefresh }) {
+  const [expandedScenario, setExpandedScenario] = useState(null);
+  const [expandedStage, setExpandedStage] = useState(null);
+  const [viewTab, setViewTab] = useState('flow'); // 'flow' | 'stages' | 'config'
+
+  const getStageStatusColor = (stageId, scenario) => {
+    if (!activeScenario.active || activeScenario.scenarioId !== scenario._id) {
+      return 'bg-gray-600';
+    }
+
+    const stages = scenario.stages || [];
+    const currentIndex = stages.findIndex(s => s.id === activeScenario.stage);
+    const stageIndex = stages.findIndex(s => s.id === stageId);
+
+    if (stageIndex < currentIndex) {
+      return 'bg-green-500';
+    } else if (stageIndex === currentIndex) {
+      return 'bg-orange-500 animate-pulse';
+    } else {
+      return 'bg-gray-600';
+    }
+  };
+
+  const handleTestStart = async (scenarioId) => {
+    try {
+      const res = await fetch(`${API_URL}/api/scenario/test/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cameraId: 'cam-1' })
+      });
+      if (res.ok) {
+        console.log('Test scenario started');
+      }
+    } catch (error) {
+      console.error('Failed to start test scenario:', error);
+    }
+  };
+
+  const handleReset = async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/scenario/reset`, { method: 'POST' });
+      if (res.ok) {
+        console.log('Scenario reset');
+      }
+    } catch (error) {
+      console.error('Failed to reset scenario:', error);
+    }
+  };
+
+  if (loading) {
+    return <div className="text-center py-8 text-gray-400">טוען תרחישים...</div>;
+  }
+
+  return (
+    <div>
+      {/* Actions Bar */}
+      <div className="flex items-center gap-4 mb-4">
+        <button
+          onClick={onRefresh}
+          className="bg-gray-600 hover:bg-gray-500 px-4 py-2 rounded-lg flex items-center gap-2"
+        >
+          🔄 רענן
+        </button>
+        {activeScenario.active && (
+          <button
+            onClick={handleReset}
+            className="bg-red-600 hover:bg-red-700 px-4 py-2 rounded-lg flex items-center gap-2"
+          >
+            ⏹️ עצור תרחיש
+          </button>
+        )}
+        <div className="flex-1" />
+        <span className="text-gray-500 text-sm">
+          בקרוב: יצירת תרחישים מותאמים אישית
+        </span>
+      </div>
+
+      {/* Active Scenario Banner */}
+      {activeScenario.active && (
+        <div className="bg-orange-900/50 border-2 border-orange-500 rounded-lg p-4 mb-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <span className="text-2xl">🎬</span>
+              <div>
+                <h3 className="font-bold text-orange-300">תרחיש פעיל</h3>
+                <p className="text-sm text-orange-200">
+                  שלב נוכחי: <span className="font-bold">{activeScenario.stage}</span>
+                </p>
+              </div>
+            </div>
+            <div className="text-left">
+              <p className="text-xs text-orange-400">חמושים שזוהו</p>
+              <p className="text-2xl font-bold text-orange-300">{activeScenario.armedCount || 0}</p>
+            </div>
+          </div>
+
+          {/* Stage Progress */}
+          {scenarios.find(s => s._id === activeScenario.scenarioId)?.stages && (
+            <div className="mt-4">
+              <div className="flex items-center gap-1 overflow-x-auto pb-2">
+                {scenarios.find(s => s._id === activeScenario.scenarioId).stages.map((stage, i) => {
+                  const isCurrent = stage.id === activeScenario.stage;
+                  const isPast = scenarios.find(s => s._id === activeScenario.scenarioId).stages
+                    .findIndex(s => s.id === activeScenario.stage) > i;
+
+                  return (
+                    <div key={stage.id} className="flex items-center">
+                      <div
+                        className={`
+                          px-2 py-1 rounded text-xs whitespace-nowrap
+                          ${isCurrent ? 'bg-orange-500 text-white font-bold' : ''}
+                          ${isPast ? 'bg-green-600 text-white' : ''}
+                          ${!isCurrent && !isPast ? 'bg-gray-700 text-gray-400' : ''}
+                        `}
+                        title={stage.description}
+                      >
+                        {stage.name}
+                      </div>
+                      {i < scenarios.find(s => s._id === activeScenario.scenarioId).stages.length - 1 && (
+                        <span className={`mx-1 ${isPast ? 'text-green-500' : 'text-gray-600'}`}>→</span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Scenario List */}
+      {scenarios.length === 0 ? (
+        <div className="text-center py-12 text-gray-400">
+          <div className="text-6xl mb-4">🎬</div>
+          <p className="text-xl mb-2">אין תרחישים מוגדרים</p>
+          <p className="text-sm">תרחישים מוגדרים בקובץ scenario_rules.json</p>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {scenarios.map((scenario) => (
+            <div
+              key={scenario._id}
+              className={`bg-gray-700 rounded-lg overflow-hidden ${
+                !scenario.enabled ? 'opacity-60' : ''
+              }`}
+            >
+              {/* Scenario Header */}
+              <div
+                className="p-4 cursor-pointer hover:bg-gray-650"
+                onClick={() => {
+                  setExpandedScenario(expandedScenario === scenario._id ? null : scenario._id);
+                  setExpandedStage(null);
+                }}
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <span className="text-2xl">🎬</span>
+                    <div>
+                      <h3 className="font-bold text-lg">{scenario.name}</h3>
+                      <p className="text-sm text-gray-400">{scenario.description}</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <span className={`px-2 py-1 rounded text-xs ${
+                      scenario.enabled ? 'bg-green-600' : 'bg-gray-600'
+                    }`}>
+                      {scenario.enabled ? 'פעיל' : 'מושבת'}
+                    </span>
+                    <div className="flex gap-2 text-xs text-gray-400">
+                      <span className="bg-gray-600 px-2 py-1 rounded">{scenario.stages?.length || 0} שלבים</span>
+                      <span className="bg-gray-600 px-2 py-1 rounded">
+                        {scenario.stages?.reduce((sum, s) => sum + (s.onEnter?.length || 0), 0)} פעולות
+                      </span>
+                    </div>
+                    <span className="text-gray-400 text-xl">
+                      {expandedScenario === scenario._id ? '▼' : '▶'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Expanded Content */}
+              {expandedScenario === scenario._id && (
+                <div className="border-t border-gray-600">
+                  {/* Tab Navigation */}
+                  <div className="flex border-b border-gray-600">
+                    <button
+                      onClick={() => setViewTab('flow')}
+                      className={`px-4 py-2 text-sm font-medium ${
+                        viewTab === 'flow'
+                          ? 'bg-gray-800 text-white border-b-2 border-orange-500'
+                          : 'text-gray-400 hover:text-white'
+                      }`}
+                    >
+                      🔀 זרימה ויזואלית
+                    </button>
+                    <button
+                      onClick={() => setViewTab('stages')}
+                      className={`px-4 py-2 text-sm font-medium ${
+                        viewTab === 'stages'
+                          ? 'bg-gray-800 text-white border-b-2 border-orange-500'
+                          : 'text-gray-400 hover:text-white'
+                      }`}
+                    >
+                      📋 שלבים מפורטים
+                    </button>
+                    <button
+                      onClick={() => setViewTab('config')}
+                      className={`px-4 py-2 text-sm font-medium ${
+                        viewTab === 'config'
+                          ? 'bg-gray-800 text-white border-b-2 border-orange-500'
+                          : 'text-gray-400 hover:text-white'
+                      }`}
+                    >
+                      ⚙️ הגדרות
+                    </button>
+                    <div className="flex-1" />
+                    <button
+                      onClick={() => handleTestStart(scenario._id)}
+                      disabled={activeScenario.active}
+                      className="px-4 py-2 text-sm bg-orange-600 hover:bg-orange-700 disabled:bg-gray-600 disabled:cursor-not-allowed"
+                    >
+                      ▶️ הפעל הדגמה
+                    </button>
+                  </div>
+
+                  <div className="p-4">
+                    {/* Flow View - Visual representation */}
+                    {viewTab === 'flow' && (
+                      <ScenarioFlowView
+                        scenario={scenario}
+                        activeScenario={activeScenario}
+                        onStageClick={(stageId) => {
+                          setViewTab('stages');
+                          setExpandedStage(stageId);
+                        }}
+                      />
+                    )}
+
+                    {/* Detailed Stages View */}
+                    {viewTab === 'stages' && (
+                      <ScenarioStagesView
+                        scenario={scenario}
+                        activeScenario={activeScenario}
+                        expandedStage={expandedStage}
+                        setExpandedStage={setExpandedStage}
+                        getStageStatusColor={getStageStatusColor}
+                      />
+                    )}
+
+                    {/* Configuration View */}
+                    {viewTab === 'config' && (
+                      <ScenarioConfigView scenario={scenario} />
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// Scenario Flow View - Visual flowchart with RTL support
+// ============================================================================
+function ScenarioFlowView({ scenario, activeScenario, onStageClick }) {
+  const stages = scenario.stages || [];
+
+  // Get stage status
+  const getStageStatus = (stage, index) => {
+    if (!activeScenario.active || activeScenario.scenarioId !== scenario._id) {
+      return 'pending';
+    }
+    const currentIndex = stages.findIndex(s => s.id === activeScenario.stage);
+    if (index < currentIndex) return 'completed';
+    if (index === currentIndex) return 'active';
+    return 'pending';
+  };
+
+  // Get readable trigger description in Hebrew
+  const getTriggerDescription = (trigger) => {
+    if (!trigger) return '';
+    switch (trigger.type) {
+      case 'detection':
+        const conditions = trigger.conditions || {};
+        if (conditions.objectType === 'vehicle' && conditions.plateInStolenList) {
+          return 'זיהוי רכב גנוב';
+        }
+        return 'זיהוי אובייקט';
+      case 'threshold':
+        const thresholdCond = trigger.conditions || {};
+        if (thresholdCond.armedPersonCount) {
+          const op = Object.keys(thresholdCond.armedPersonCount)[0];
+          const val = thresholdCond.armedPersonCount[op];
+          return `${val}+ חמושים זוהו`;
+        }
+        return 'הגעה לסף';
+      case 'timeout':
+        const seconds = Math.round((trigger.timeout || 0) / 1000);
+        return `לאחר ${seconds} שניות`;
+      case 'manual':
+        if (trigger.action === 'acknowledge') return 'אישור משתמש';
+        if (trigger.action === 'false_alarm') return 'אזעקת שווא';
+        if (trigger.action === 'end_scenario') return 'סיום ידני';
+        return 'פעולה ידנית';
+      case 'transcription':
+        const keywords = trigger.keywords || [];
+        return `מילת קוד: "${keywords[0] || ''}"`;
+      case 'upload':
+        return 'העלאת קובץ';
+      case 'auto':
+        return 'אוטומטי';
+      default:
+        return trigger.type;
+    }
+  };
+
+  // Get action summary in Hebrew
+  const getActionsSummary = (actions) => {
+    if (!actions || actions.length === 0) return [];
+    const summaries = [];
+    for (const action of actions) {
+      switch (action.type) {
+        case 'alert_popup':
+          summaries.push('🚨 התראה');
+          break;
+        case 'danger_mode':
+          summaries.push(action.params?.active ? '⚠️ מצב סכנה' : '✅ ביטול סכנה');
+          break;
+        case 'emergency_modal':
+          summaries.push('🆘 מודאל חירום');
+          break;
+        case 'tts':
+          summaries.push('🔊 הקראה');
+          break;
+        case 'play_sound':
+          summaries.push('🔔 צליל');
+          break;
+        case 'journal':
+          summaries.push('📝 יומן');
+          break;
+        case 'camera_focus':
+          summaries.push('📹 מיקוד מצלמה');
+          break;
+        case 'simulation':
+          summaries.push('🎭 סימולציה');
+          break;
+        case 'start_recording':
+          summaries.push('⏺️ הקלטה');
+          break;
+        default:
+          break;
+      }
+    }
+    return [...new Set(summaries)].slice(0, 4); // Unique, max 4
+  };
+
+  return (
+    <div dir="rtl">
+      <p className="text-gray-400 text-sm mb-4">
+        לחץ על שלב כדי לראות פרטים מלאים. התרחיש מתקדם מימין לשמאל.
+      </p>
+
+      {/* Flowchart Container */}
+      <div className="bg-gray-800 rounded-lg p-6 overflow-x-auto">
+        <div className="space-y-6 min-w-max">
+          {stages.map((stage, index) => {
+            const status = getStageStatus(stage, index);
+            const actionsSummary = getActionsSummary(stage.onEnter);
+            const nextStage = stages[index + 1];
+
+            return (
+              <div key={stage.id} className="relative">
+                {/* Stage Row */}
+                <div className="flex items-start gap-4">
+                  {/* Stage Number Circle */}
+                  <div className={`
+                    flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center text-lg font-bold
+                    ${status === 'completed' ? 'bg-green-500 text-white' : ''}
+                    ${status === 'active' ? 'bg-orange-500 text-white animate-pulse' : ''}
+                    ${status === 'pending' ? 'bg-gray-600 text-gray-300' : ''}
+                  `}>
+                    {status === 'completed' ? '✓' : index + 1}
+                  </div>
+
+                  {/* Stage Card */}
+                  <div
+                    onClick={() => onStageClick(stage.id)}
+                    className={`
+                      flex-1 cursor-pointer rounded-lg border-2 transition-all overflow-hidden
+                      ${status === 'active' ? 'border-orange-500 bg-orange-900/30 shadow-lg shadow-orange-500/20' : ''}
+                      ${status === 'completed' ? 'border-green-500 bg-green-900/20' : ''}
+                      ${status === 'pending' ? 'border-gray-600 bg-gray-700 hover:border-gray-500' : ''}
+                    `}
+                  >
+                    {/* Stage Header */}
+                    <div className="p-3 border-b border-gray-600/50">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h4 className={`font-bold text-lg ${status === 'active' ? 'text-orange-300' : ''}`}>
+                          {stage.name}
+                        </h4>
+                        {stage.isInitial && (
+                          <span className="bg-blue-600 text-white px-2 py-0.5 rounded text-xs">🚀 התחלה</span>
+                        )}
+                        {stage.isFinal && (
+                          <span className="bg-purple-600 text-white px-2 py-0.5 rounded text-xs">🏁 סיום</span>
+                        )}
+                        {stage.autoTransition && (
+                          <span className="bg-yellow-600 text-white px-2 py-0.5 rounded text-xs">
+                            ⚡ אוטומטי
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-sm text-gray-400 mt-1">{stage.description}</p>
+                    </div>
+
+                    {/* Stage Content - Actions */}
+                    {actionsSummary.length > 0 && (
+                      <div className="p-3 bg-gray-800/50">
+                        <div className="text-xs text-gray-500 mb-1">פעולות בכניסה:</div>
+                        <div className="flex flex-wrap gap-2">
+                          {actionsSummary.map((action, i) => (
+                            <span key={i} className="bg-gray-700 px-2 py-1 rounded text-sm">
+                              {action}
+                            </span>
+                          ))}
+                          {stage.onEnter?.length > 4 && (
+                            <span className="text-gray-500 text-sm">
+                              +{stage.onEnter.length - 4} עוד
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Transitions to next stages */}
+                {stage.transitions?.length > 0 && !stage.isFinal && (
+                  <div className="mr-5 mt-2 mb-2 pr-5 border-r-2 border-gray-600">
+                    {stage.transitions.map((transition, tIndex) => {
+                      const targetStage = stages.find(s => s.id === transition.to);
+                      const targetIndex = stages.findIndex(s => s.id === transition.to);
+                      const isMainPath = targetIndex === index + 1;
+                      const triggerDesc = getTriggerDescription(transition.trigger);
+
+                      return (
+                        <div
+                          key={tIndex}
+                          className={`
+                            flex items-center gap-2 py-1 text-sm
+                            ${isMainPath ? 'text-gray-300' : 'text-gray-500'}
+                          `}
+                        >
+                          {/* Arrow pointing left (RTL) */}
+                          <span className={`text-lg ${status === 'completed' ? 'text-green-500' : 'text-gray-500'}`}>
+                            ←
+                          </span>
+
+                          {/* Trigger condition */}
+                          <span className={`
+                            px-2 py-0.5 rounded text-xs
+                            ${transition.trigger?.type === 'detection' ? 'bg-blue-900 text-blue-300' : ''}
+                            ${transition.trigger?.type === 'threshold' ? 'bg-purple-900 text-purple-300' : ''}
+                            ${transition.trigger?.type === 'timeout' ? 'bg-yellow-900 text-yellow-300' : ''}
+                            ${transition.trigger?.type === 'manual' ? 'bg-green-900 text-green-300' : ''}
+                            ${transition.trigger?.type === 'transcription' ? 'bg-pink-900 text-pink-300' : ''}
+                            ${transition.trigger?.type === 'auto' ? 'bg-gray-700 text-gray-300' : ''}
+                            ${!transition.trigger?.type ? 'bg-gray-700 text-gray-300' : ''}
+                          `}>
+                            {triggerDesc || 'תנאי לא ידוע'}
+                          </span>
+
+                          <span className="text-gray-500">⟵</span>
+
+                          {/* Target stage */}
+                          <span className={`
+                            font-medium
+                            ${isMainPath ? 'text-white' : 'text-gray-400'}
+                          `}>
+                            {targetStage?.name || transition.to}
+                          </span>
+
+                          {/* Branching indicator */}
+                          {!isMainPath && (
+                            <span className="text-xs text-gray-600">(מסלול חלופי)</span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Vertical connector line */}
+                {index < stages.length - 1 && !stage.isFinal && (
+                  <div className="mr-5 flex justify-center">
+                    <div className={`
+                      w-0.5 h-4
+                      ${status === 'completed' ? 'bg-green-500' : 'bg-gray-600'}
+                    `}></div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Legend */}
+      <div className="mt-4 bg-gray-800 rounded-lg p-4">
+        <h5 className="text-sm font-bold text-gray-400 mb-3">מקרא:</h5>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+          <div className="flex items-center gap-2">
+            <span className="w-4 h-4 rounded-full bg-green-500 flex items-center justify-center text-white text-xs">✓</span>
+            <span className="text-gray-400">שלב הושלם</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="w-4 h-4 rounded-full bg-orange-500 animate-pulse"></span>
+            <span className="text-gray-400">שלב נוכחי</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="w-4 h-4 rounded-full bg-gray-600"></span>
+            <span className="text-gray-400">שלב ממתין</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-gray-500">←</span>
+            <span className="text-gray-400">מעבר בין שלבים</span>
+          </div>
+        </div>
+        <div className="mt-3 pt-3 border-t border-gray-700">
+          <div className="text-xs text-gray-500 mb-2">סוגי טריגרים:</div>
+          <div className="flex flex-wrap gap-2">
+            <span className="bg-blue-900 text-blue-300 px-2 py-0.5 rounded text-xs">👁️ זיהוי</span>
+            <span className="bg-purple-900 text-purple-300 px-2 py-0.5 rounded text-xs">📊 סף</span>
+            <span className="bg-yellow-900 text-yellow-300 px-2 py-0.5 rounded text-xs">⏱️ זמן</span>
+            <span className="bg-green-900 text-green-300 px-2 py-0.5 rounded text-xs">👆 ידני</span>
+            <span className="bg-pink-900 text-pink-300 px-2 py-0.5 rounded text-xs">🎤 מילת קוד</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// Scenario Stages View - Detailed list of stages with actions
+// ============================================================================
+function ScenarioStagesView({ scenario, activeScenario, expandedStage, setExpandedStage, getStageStatusColor }) {
+  const stages = scenario.stages || [];
+
+  return (
+    <div className="space-y-3">
+      {stages.map((stage, index) => {
+        const isExpanded = expandedStage === stage.id;
+        const isActive = activeScenario.active &&
+                        activeScenario.scenarioId === scenario._id &&
+                        activeScenario.stage === stage.id;
+
+        return (
+          <div
+            key={stage.id}
+            className={`bg-gray-800 rounded-lg overflow-hidden ${
+              isActive ? 'ring-2 ring-orange-500' : ''
+            }`}
+          >
+            {/* Stage Header */}
+            <div
+              className="p-3 cursor-pointer hover:bg-gray-750 flex items-center gap-3"
+              onClick={() => setExpandedStage(isExpanded ? null : stage.id)}
+            >
+              <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${
+                getStageStatusColor(stage.id, scenario)
+              }`}>
+                {index + 1}
+              </div>
+              <div className="flex-1">
+                <div className="flex items-center gap-2">
+                  <h5 className="font-bold">{stage.name}</h5>
+                  {stage.isInitial && (
+                    <span className="text-xs bg-blue-600 px-1.5 py-0.5 rounded">התחלה</span>
+                  )}
+                  {stage.isFinal && (
+                    <span className="text-xs bg-purple-600 px-1.5 py-0.5 rounded">סיום</span>
+                  )}
+                  {stage.autoTransition && (
+                    <span className="text-xs bg-yellow-600 px-1.5 py-0.5 rounded">
+                      אוטומטי {stage.autoTransitionDelay ? `(${stage.autoTransitionDelay}ms)` : ''}
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-gray-400">{stage.description}</p>
+              </div>
+              <div className="flex gap-2 text-xs text-gray-400">
+                <span>{stage.transitions?.length || 0} מעברים</span>
+                <span>{stage.onEnter?.length || 0} פעולות</span>
+              </div>
+              <span className="text-gray-400">{isExpanded ? '▼' : '▶'}</span>
+            </div>
+
+            {/* Expanded Stage Details */}
+            {isExpanded && (
+              <div className="border-t border-gray-700 p-4 space-y-4">
+                {/* Transitions Section */}
+                {stage.transitions?.length > 0 && (
+                  <div>
+                    <h6 className="text-sm font-bold text-blue-400 mb-2 flex items-center gap-2">
+                      <span>🔀</span> מעברים ({stage.transitions.length})
+                    </h6>
+                    <div className="space-y-2">
+                      {stage.transitions.map((transition, i) => (
+                        <TransitionCard key={i} transition={transition} stages={stages} />
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* OnEnter Actions */}
+                {stage.onEnter?.length > 0 && (
+                  <div>
+                    <h6 className="text-sm font-bold text-green-400 mb-2 flex items-center gap-2">
+                      <span>⚡</span> פעולות בכניסה לשלב ({stage.onEnter.length})
+                    </h6>
+                    <div className="space-y-2">
+                      {stage.onEnter.map((action, i) => (
+                        <ActionCard key={i} action={action} index={i} />
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* WhileActive Actions */}
+                {stage.whileActive?.length > 0 && (
+                  <div>
+                    <h6 className="text-sm font-bold text-yellow-400 mb-2 flex items-center gap-2">
+                      <span>🔄</span> פעולות מתמשכות ({stage.whileActive.length})
+                    </h6>
+                    <div className="space-y-2">
+                      {stage.whileActive.map((action, i) => (
+                        <ActionCard key={i} action={action} index={i} />
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* No content message */}
+                {!stage.transitions?.length && !stage.onEnter?.length && !stage.whileActive?.length && (
+                  <p className="text-gray-500 text-sm text-center py-4">
+                    אין פעולות או מעברים מוגדרים לשלב זה
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ============================================================================
+// Transition Card - Shows a single transition with trigger details
+// ============================================================================
+function TransitionCard({ transition, stages }) {
+  const targetStage = stages.find(s => s.id === transition.to);
+
+  return (
+    <div className="bg-gray-700 rounded p-3">
+      <div className="flex items-center gap-2 mb-2">
+        <TriggerBadge trigger={transition.trigger} />
+        <span className="text-gray-400">→</span>
+        <span className="bg-gray-600 px-2 py-1 rounded text-sm">
+          {targetStage?.name || transition.to}
+        </span>
+      </div>
+
+      {/* Trigger Details */}
+      {transition.trigger && (
+        <TriggerDetails trigger={transition.trigger} />
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// Trigger Badge - Colored badge showing trigger type
+// ============================================================================
+function TriggerBadge({ trigger, small = false }) {
+  const triggerInfo = {
+    detection: { label: 'זיהוי', color: 'bg-blue-600', icon: '👁️' },
+    threshold: { label: 'סף', color: 'bg-purple-600', icon: '📊' },
+    timeout: { label: 'זמן קצוב', color: 'bg-yellow-600', icon: '⏱️' },
+    manual: { label: 'ידני', color: 'bg-green-600', icon: '👆' },
+    transcription: { label: 'תמלול', color: 'bg-pink-600', icon: '🎤' },
+    upload: { label: 'העלאה', color: 'bg-cyan-600', icon: '📤' },
+    auto: { label: 'אוטומטי', color: 'bg-gray-500', icon: '🔄' },
+  };
+
+  const info = triggerInfo[trigger?.type] || { label: trigger?.type || 'לא ידוע', color: 'bg-gray-600', icon: '❓' };
+
+  return (
+    <span className={`${info.color} ${small ? 'px-1.5 py-0.5 text-xs' : 'px-2 py-1 text-sm'} rounded inline-flex items-center gap-1`}>
+      <span>{info.icon}</span>
+      <span>{info.label}</span>
+    </span>
+  );
+}
+
+// ============================================================================
+// Trigger Details - Shows detailed trigger conditions
+// ============================================================================
+function TriggerDetails({ trigger }) {
+  if (!trigger) return null;
+
+  const renderConditions = (conditions) => {
+    if (!conditions) return null;
+
+    return (
+      <div className="text-xs text-gray-400 space-y-1">
+        {Object.entries(conditions).map(([key, value]) => (
+          <div key={key} className="flex gap-2">
+            <span className="text-gray-500">{key}:</span>
+            <span className="text-gray-300">
+              {typeof value === 'object' ? JSON.stringify(value) : String(value)}
+            </span>
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  return (
+    <div className="text-xs mt-2 bg-gray-800 rounded p-2">
+      {trigger.type === 'detection' && trigger.conditions && (
+        <div>
+          <span className="text-gray-500 block mb-1">תנאי זיהוי:</span>
+          {renderConditions(trigger.conditions)}
+        </div>
+      )}
+
+      {trigger.type === 'threshold' && trigger.conditions && (
+        <div>
+          <span className="text-gray-500 block mb-1">תנאי סף:</span>
+          {renderConditions(trigger.conditions)}
+        </div>
+      )}
+
+      {trigger.type === 'timeout' && (
+        <div className="text-gray-400">
+          זמן קצוב: <span className="text-white">{trigger.timeout}ms</span>
+          {trigger.reason && <span className="text-gray-500"> ({trigger.reason})</span>}
+        </div>
+      )}
+
+      {trigger.type === 'manual' && trigger.action && (
+        <div className="text-gray-400">
+          פעולה: <span className="text-white">{trigger.action}</span>
+        </div>
+      )}
+
+      {trigger.type === 'transcription' && trigger.keywords && (
+        <div className="text-gray-400">
+          מילות מפתח: {trigger.keywords.map((kw, i) => (
+            <span key={i} className="bg-pink-900 text-pink-300 px-1.5 py-0.5 rounded mr-1">
+              {kw}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {trigger.type === 'upload' && trigger.endpoint && (
+        <div className="text-gray-400">
+          נקודת קצה: <span className="text-white">{trigger.endpoint}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// Action Card - Shows a single action with parameters
+// ============================================================================
+function ActionCard({ action, index }) {
+  const [expanded, setExpanded] = useState(false);
+
+  const actionInfo = {
+    alert_popup: { label: 'התראה קופצת', color: 'bg-red-600', icon: '🚨' },
+    danger_mode: { label: 'מצב סכנה', color: 'bg-red-700', icon: '⚠️' },
+    emergency_modal: { label: 'מודאל חירום', color: 'bg-red-800', icon: '🆘' },
+    close_modal: { label: 'סגור מודאל', color: 'bg-gray-600', icon: '✖️' },
+    journal: { label: 'יומן', color: 'bg-blue-600', icon: '📝' },
+    tts: { label: 'הקראה', color: 'bg-green-600', icon: '🔊' },
+    play_sound: { label: 'נגן צליל', color: 'bg-purple-600', icon: '🔔' },
+    stop_all_sounds: { label: 'עצור צלילים', color: 'bg-gray-600', icon: '🔇' },
+    camera_focus: { label: 'מיקוד מצלמה', color: 'bg-cyan-600', icon: '📹' },
+    simulation: { label: 'סימולציה', color: 'bg-yellow-600', icon: '🎭' },
+    store_context: { label: 'שמור הקשר', color: 'bg-indigo-600', icon: '💾' },
+    track_armed_persons: { label: 'עקוב אחר חמושים', color: 'bg-orange-600', icon: '🎯' },
+    delay: { label: 'השהייה', color: 'bg-gray-500', icon: '⏳' },
+    start_recording: { label: 'התחל הקלטה', color: 'bg-red-600', icon: '⏺️' },
+    stop_recording: { label: 'עצור הקלטה', color: 'bg-gray-600', icon: '⏹️' },
+    soldier_video_panel: { label: 'פאנל וידאו', color: 'bg-blue-700', icon: '📺' },
+    new_camera_dialog: { label: 'דיאלוג מצלמה', color: 'bg-cyan-700', icon: '➕' },
+    summary_popup: { label: 'סיכום', color: 'bg-green-700', icon: '📊' },
+    cleanup: { label: 'ניקוי', color: 'bg-gray-600', icon: '🧹' },
+  };
+
+  const info = actionInfo[action.type] || { label: action.type, color: 'bg-gray-600', icon: '⚙️' };
+  const hasParams = action.params && Object.keys(action.params).length > 0;
+
+  return (
+    <div className="bg-gray-700 rounded overflow-hidden">
+      <div
+        className={`p-2 flex items-center gap-2 ${hasParams ? 'cursor-pointer hover:bg-gray-650' : ''}`}
+        onClick={() => hasParams && setExpanded(!expanded)}
+      >
+        <span className="text-gray-500 text-xs w-5">{index + 1}.</span>
+        <span className={`${info.color} px-2 py-0.5 rounded text-xs inline-flex items-center gap-1`}>
+          <span>{info.icon}</span>
+          <span>{info.label}</span>
+        </span>
+        {hasParams && (
+          <>
+            <span className="text-gray-500 text-xs">({Object.keys(action.params).length} פרמטרים)</span>
+            <span className="text-gray-400 mr-auto">{expanded ? '▼' : '▶'}</span>
+          </>
+        )}
+      </div>
+
+      {/* Expanded Parameters */}
+      {expanded && hasParams && (
+        <div className="border-t border-gray-600 p-3 bg-gray-800">
+          <div className="text-xs space-y-1">
+            {Object.entries(action.params).map(([key, value]) => (
+              <div key={key} className="flex gap-2">
+                <span className="text-gray-500 min-w-[80px]">{key}:</span>
+                <span className="text-gray-300 break-all">
+                  {typeof value === 'object' ? (
+                    <pre className="bg-gray-900 p-1 rounded text-xs overflow-x-auto">
+                      {JSON.stringify(value, null, 2)}
+                    </pre>
+                  ) : (
+                    String(value)
+                  )}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// Scenario Config View - Shows scenario configuration
+// ============================================================================
+function ScenarioConfigView({ scenario }) {
+  const config = scenario.config || {};
+  const context = scenario.context || {};
+
+  return (
+    <div className="space-y-4">
+      {/* General Settings */}
+      <div className="bg-gray-800 rounded-lg p-4">
+        <h6 className="font-bold text-gray-300 mb-3 flex items-center gap-2">
+          <span>⚙️</span> הגדרות כלליות
+        </h6>
+        <div className="grid grid-cols-2 gap-4 text-sm">
+          <div>
+            <span className="text-gray-500">מזהה:</span>
+            <span className="text-white mr-2 font-mono">{scenario._id}</span>
+          </div>
+          <div>
+            <span className="text-gray-500">גרסה:</span>
+            <span className="text-white mr-2">{scenario.version || '1.0.0'}</span>
+          </div>
+          <div>
+            <span className="text-gray-500">מופע יחיד:</span>
+            <span className={`mr-2 ${scenario.singleInstance ? 'text-green-400' : 'text-gray-400'}`}>
+              {scenario.singleInstance ? 'כן' : 'לא'}
+            </span>
+          </div>
+          <div>
+            <span className="text-gray-500">מופעל:</span>
+            <span className={`mr-2 ${scenario.enabled ? 'text-green-400' : 'text-red-400'}`}>
+              {scenario.enabled ? 'כן' : 'לא'}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* Thresholds & Limits */}
+      {(config.armedThreshold || config.stolenVehicles) && (
+        <div className="bg-gray-800 rounded-lg p-4">
+          <h6 className="font-bold text-gray-300 mb-3 flex items-center gap-2">
+            <span>📊</span> ספים וגבולות
+          </h6>
+          <div className="grid grid-cols-2 gap-4 text-sm">
+            {config.armedThreshold && (
+              <div>
+                <span className="text-gray-500">סף חמושים:</span>
+                <span className="text-orange-400 mr-2 font-bold">{config.armedThreshold}</span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Stolen Vehicles List */}
+      {config.stolenVehicles?.length > 0 && (
+        <div className="bg-gray-800 rounded-lg p-4">
+          <h6 className="font-bold text-gray-300 mb-3 flex items-center gap-2">
+            <span>🚗</span> רכבים גנובים ({config.stolenVehicles.length})
+          </h6>
+          <div className="space-y-2">
+            {config.stolenVehicles.map((vehicle, i) => (
+              <div key={i} className="bg-gray-700 rounded p-2 flex gap-4 text-sm">
+                <span className="font-mono text-red-400">{vehicle.plate}</span>
+                <span className="text-gray-400">{vehicle.color}</span>
+                <span className="text-gray-400">{vehicle.make} {vehicle.model}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Keywords */}
+      {config.keywords && Object.keys(config.keywords).length > 0 && (
+        <div className="bg-gray-800 rounded-lg p-4">
+          <h6 className="font-bold text-gray-300 mb-3 flex items-center gap-2">
+            <span>🎤</span> מילות מפתח לזיהוי קולי
+          </h6>
+          <div className="space-y-2">
+            {Object.entries(config.keywords).map(([category, words]) => (
+              <div key={category} className="flex items-center gap-2">
+                <span className="text-gray-500 min-w-[60px]">{category}:</span>
+                <div className="flex flex-wrap gap-1">
+                  {(Array.isArray(words) ? words : [words]).map((word, i) => (
+                    <span key={i} className="bg-pink-900 text-pink-300 px-2 py-0.5 rounded text-sm">
+                      {word}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Initial Context */}
+      {Object.keys(context).length > 0 && (
+        <div className="bg-gray-800 rounded-lg p-4">
+          <h6 className="font-bold text-gray-300 mb-3 flex items-center gap-2">
+            <span>💾</span> הקשר התחלתי
+          </h6>
+          <pre className="bg-gray-900 rounded p-3 text-xs text-gray-400 overflow-x-auto">
+            {JSON.stringify(context, null, 2)}
+          </pre>
+        </div>
       )}
     </div>
   );

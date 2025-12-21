@@ -1177,15 +1177,16 @@ class TTSGenerateRequest(BaseModel):
     """Request body for TTS generation"""
     text: str
     language: str = "he"
+    transmit_radio: bool = True  # Whether to transmit via radio
 
 
 @app.post("/tts/generate")
 async def tts_generate(request: TTSGenerateRequest):
     """
-    Generate Hebrew TTS audio and return as base64.
+    Generate Hebrew TTS audio and optionally transmit via radio.
 
-    This endpoint is designed for radio transmission - it returns
-    the audio as base64-encoded PCM data ready to send to the radio.
+    This endpoint generates TTS audio using Gemini and can automatically
+    transmit it via the radio module.
     """
     if not tts.is_configured():
         raise HTTPException(503, "TTS service not configured")
@@ -1202,42 +1203,45 @@ async def tts_generate(request: TTSGenerateRequest):
         if not audio_file.exists():
             raise HTTPException(500, "Generated audio file not found")
 
-        # Check if it's MP3 and convert to PCM for radio transmission
-        if audio_file.suffix.lower() == '.mp3':
-            # Use pydub to convert MP3 to PCM
+        # Read the audio file
+        with open(audio_file, 'rb') as f:
+            audio_data = f.read()
+
+        # Get sample rate from WAV header if possible
+        sample_rate = 24000  # Default for Gemini TTS
+        if audio_file.suffix.lower() == '.wav' and len(audio_data) > 44:
+            import struct
+            # WAV sample rate is at bytes 24-28
             try:
-                from pydub import AudioSegment
+                sample_rate = struct.unpack('<I', audio_data[24:28])[0]
+            except:
+                pass
 
-                audio = AudioSegment.from_mp3(str(audio_file))
-                # Convert to mono, 16kHz, 16-bit PCM
-                audio = audio.set_channels(1).set_frame_rate(16000).set_sample_width(2)
-                pcm_data = audio.raw_data
-                sample_rate = 16000
+        audio_base64 = base64.b64encode(audio_data).decode('utf-8')
 
+        # Transmit via radio if requested and audio is valid
+        radio_transmitted = False
+        if request.transmit_radio and len(audio_data) > 100:
+            try:
+                from services.radio.radio_transmit import transmit_audio_internal
+                radio_result = await transmit_audio_internal(audio_data, "wav", "high")
+                radio_transmitted = radio_result.get("success", False)
+                if radio_transmitted:
+                    logger.info(f"TTS transmitted via radio: {request.text[:50]}...")
+                else:
+                    logger.warning(f"Radio transmission failed: {radio_result.get('error', 'unknown')}")
             except ImportError:
-                # pydub not available, return MP3 as-is (frontend will need to handle)
-                logger.warning("pydub not available, returning MP3 as base64")
-                with open(audio_file, 'rb') as f:
-                    audio_data = f.read()
-                return {
-                    "audio_base64": base64.b64encode(audio_data).decode('utf-8'),
-                    "sample_rate": 22050,  # Typical MP3 rate
-                    "format": "mp3",
-                    "text": request.text
-                }
-        else:
-            # WAV or other format - read raw
-            with open(audio_file, 'rb') as f:
-                pcm_data = f.read()
-            sample_rate = 16000
-
-        audio_base64 = base64.b64encode(pcm_data).decode('utf-8')
+                logger.warning("Radio transmit module not available")
+            except Exception as radio_err:
+                logger.error(f"Radio transmission error: {radio_err}")
 
         return {
             "audio_base64": audio_base64,
             "sample_rate": sample_rate,
-            "format": "pcm_s16le",
-            "text": request.text
+            "format": "wav",
+            "text": request.text,
+            "file_path": str(audio_path),
+            "radio_transmitted": radio_transmitted
         }
 
     except Exception as e:
@@ -2322,6 +2326,68 @@ async def ffmpeg_stats():
         "streams": ffmpeg_manager.get_all_stats(),
         "active_count": len(ffmpeg_manager.get_active_cameras())
     }
+
+
+# ============== SCENARIO RULES ENDPOINTS ==============
+
+@app.get("/scenario-rules")
+async def get_scenario_rules():
+    """Get all defined scenario rules."""
+    try:
+        from services.scenario import get_scenario_rule_engine
+        engine = get_scenario_rule_engine()
+        return {
+            "scenarios": engine.get_all_scenarios(),
+            "activeScenario": engine.get_active_scenario()
+        }
+    except Exception as e:
+        logger.error(f"Failed to get scenario rules: {e}")
+        return {"scenarios": [], "activeScenario": None, "error": str(e)}
+
+
+@app.get("/scenario-rules/{scenario_id}")
+async def get_scenario_rule(scenario_id: str):
+    """Get a specific scenario rule by ID."""
+    try:
+        from services.scenario import get_scenario_rule_engine
+        engine = get_scenario_rule_engine()
+        scenario = engine.get_scenario(scenario_id)
+        if scenario:
+            return scenario
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get scenario rule: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/scenario-rules/active/status")
+async def get_active_scenario_status():
+    """Get the status of the currently active scenario."""
+    try:
+        from services.scenario import get_scenario_rule_engine
+        engine = get_scenario_rule_engine()
+        return {
+            "active": engine.is_active(),
+            "scenario": engine.get_active_scenario()
+        }
+    except Exception as e:
+        logger.error(f"Failed to get scenario status: {e}")
+        return {"active": False, "scenario": None, "error": str(e)}
+
+
+@app.post("/scenario-rules/reload")
+async def reload_scenario_rules():
+    """Reload scenario rules from config file."""
+    try:
+        from services.scenario import get_scenario_rule_engine
+        engine = get_scenario_rule_engine()
+        engine.reload_config()
+        return {"message": "Scenario rules reloaded", "count": len(engine.get_all_scenarios())}
+    except Exception as e:
+        logger.error(f"Failed to reload scenario rules: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/ffmpeg/stop/{camera_id}")

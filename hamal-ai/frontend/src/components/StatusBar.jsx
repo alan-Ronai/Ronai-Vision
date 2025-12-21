@@ -1,7 +1,9 @@
 import { useApp } from '../context/AppContext';
+import { useScenario } from '../context/ScenarioContext';
 
 export default function StatusBar({ onOpenAIStats }) {
   const { connected, cameras, events, isEmergency } = useApp();
+  const { soundVolume, setSoundVolume, soundMuted, setSoundMuted } = useScenario();
 
   const onlineCameras = cameras.filter(c => c.status === 'online').length;
   const criticalEvents = events.filter(e => e.severity === 'critical' && !e.acknowledged).length;
@@ -78,6 +80,36 @@ export default function StatusBar({ onOpenAIStats }) {
             <span>AI Stats</span>
           </button>
         )}
+
+        {/* Volume controls */}
+        <div className="flex items-center gap-2 bg-gray-700 px-3 py-1 rounded">
+          <button
+            onClick={() => setSoundMuted(!soundMuted)}
+            className={`text-lg hover:opacity-80 transition-opacity ${soundMuted ? 'text-red-400' : 'text-white'}`}
+            title={soundMuted ? 'בטל השתקה' : 'השתק'}
+          >
+            {soundMuted || soundVolume === 0 ? '🔇' : soundVolume < 0.5 ? '🔉' : '🔊'}
+          </button>
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.1"
+            value={soundMuted ? 0 : soundVolume}
+            onChange={(e) => {
+              const newVolume = parseFloat(e.target.value);
+              setSoundVolume(newVolume);
+              if (soundMuted && newVolume > 0) {
+                setSoundMuted(false);
+              }
+            }}
+            className="w-20 h-1.5 bg-gray-600 rounded-lg appearance-none cursor-pointer accent-blue-500"
+            title={`עוצמה: ${Math.round(soundVolume * 100)}%`}
+          />
+          <span className="text-xs text-gray-400 w-8">
+            {soundMuted ? 'OFF' : `${Math.round(soundVolume * 100)}%`}
+          </span>
+        </div>
       </div>
 
       {/* Date and time */}

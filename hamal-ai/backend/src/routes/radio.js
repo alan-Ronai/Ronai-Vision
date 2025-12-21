@@ -2,6 +2,7 @@ import express from 'express';
 import mongoose from 'mongoose';
 import fetch from 'node-fetch';
 import Event from '../models/Event.js';
+import { getScenarioManager } from '../services/scenarioManager.js';
 
 const router = express.Router();
 
@@ -55,6 +56,20 @@ router.post('/transcription', async (req, res) => {
       timestamp: transcription.timestamp,
       source: transcription.source
     });
+
+    // Forward to Scenario Manager for keyword detection
+    // This handles stage-specific keywords for the Armed Attack scenario
+    try {
+      const scenarioManager = getScenarioManager();
+      if (scenarioManager && scenarioManager.isActive()) {
+        const keywordMatched = await scenarioManager.handleTranscription(text);
+        if (keywordMatched) {
+          console.log('[Radio] Scenario keyword matched:', text.substring(0, 50));
+        }
+      }
+    } catch (scenarioError) {
+      console.debug('[Radio] Scenario transcription error:', scenarioError.message);
+    }
 
     // Check for command keywords (legacy behavior - rules can also handle this)
     const commands = checkForCommands(text);

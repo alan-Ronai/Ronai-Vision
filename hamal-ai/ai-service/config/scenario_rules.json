@@ -1,0 +1,567 @@
+{
+  "scenarios": [
+    {
+      "_id": "armed-attack-scenario",
+      "name": "התקפה חמושה",
+      "description": "תרחיש מלא של זיהוי רכב גנוב וחמושים - מזיהוי ראשוני ועד סיום האירוע",
+      "enabled": true,
+      "singleInstance": true,
+      "stages": [
+        {
+          "id": "IDLE",
+          "name": "מצב רגיל",
+          "description": "מערכת במצב ניטור רגיל",
+          "isInitial": true,
+          "transitions": [
+            {
+              "to": "VEHICLE_DETECTED",
+              "trigger": {
+                "type": "detection",
+                "conditions": {
+                  "objectType": "vehicle",
+                  "hasLicensePlate": true,
+                  "plateInStolenList": true
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": "VEHICLE_DETECTED",
+          "name": "רכב זוהה",
+          "description": "רכב גנוב זוהה במערכת",
+          "autoTransition": true,
+          "autoTransitionDelay": 0,
+          "transitions": [
+            {
+              "to": "VEHICLE_ALERT",
+              "trigger": {
+                "type": "auto"
+              }
+            }
+          ],
+          "onEnter": [
+            {
+              "type": "store_context",
+              "params": {
+                "key": "vehicle",
+                "fromDetection": true
+              }
+            },
+            {
+              "type": "journal",
+              "params": {
+                "severity": "info",
+                "title": "רכב גנוב נכנס לתמונה",
+                "description": "לוחית רישוי: {vehicle.licensePlate}\nצבע: {vehicle.color}\nיצרן: {vehicle.make} {vehicle.model}"
+              }
+            }
+          ]
+        },
+        {
+          "id": "VEHICLE_ALERT",
+          "name": "התראת רכב",
+          "description": "התראה על רכב גנוב - ממתין לזיהוי חמושים",
+          "transitions": [
+            {
+              "to": "EMERGENCY_MODE",
+              "trigger": {
+                "type": "threshold",
+                "conditions": {
+                  "armedPersonCount": { "gte": 3 }
+                }
+              }
+            },
+            {
+              "to": "SITUATION_END",
+              "trigger": {
+                "type": "timeout",
+                "timeout": 120000,
+                "reason": "timeout_no_armed"
+              }
+            },
+            {
+              "to": "SITUATION_END",
+              "trigger": {
+                "type": "manual",
+                "action": "false_alarm"
+              }
+            }
+          ],
+          "onEnter": [
+            {
+              "type": "alert_popup",
+              "params": {
+                "alertType": "vehicle",
+                "type": "warning",
+                "title": "רכב גנוב זוהה!",
+                "autoDismiss": false
+              }
+            },
+            {
+              "type": "journal",
+              "params": {
+                "severity": "warning",
+                "title": "רכב גנוב זוהה",
+                "description": "לוחית רישוי: {vehicle.licensePlate}\nצבע: {vehicle.color}\nיצרן/דגם: {vehicle.make} {vehicle.model}\nמצלמה: {vehicle.cameraId}"
+              }
+            },
+            {
+              "type": "tts",
+              "params": {
+                "message": "רכב גנוב זוהה! צבע {vehicle.color}, {vehicle.make} {vehicle.model}, מספר רכב {vehicle.licensePlate}",
+                "priority": "high"
+              }
+            },
+            {
+              "type": "camera_focus",
+              "params": {
+                "cameraId": "{vehicle.cameraId}",
+                "reason": "זיהוי רכב גנוב"
+              }
+            },
+            {
+              "type": "play_sound",
+              "params": {
+                "sound": "alert",
+                "loop": false
+              }
+            }
+          ],
+          "whileActive": [
+            {
+              "type": "track_armed_persons",
+              "params": {
+                "storeAs": "persons",
+                "countAs": "armedCount"
+              }
+            }
+          ]
+        },
+        {
+          "id": "EMERGENCY_MODE",
+          "name": "מצב חירום",
+          "description": "זוהו 3+ חמושים - מצב חירום פעיל",
+          "transitions": [
+            {
+              "to": "RESPONSE_INITIATED",
+              "trigger": {
+                "type": "manual",
+                "action": "acknowledge"
+              }
+            },
+            {
+              "to": "RESPONSE_INITIATED",
+              "trigger": {
+                "type": "timeout",
+                "timeout": 15000
+              }
+            },
+            {
+              "to": "SITUATION_END",
+              "trigger": {
+                "type": "manual",
+                "action": "false_alarm"
+              }
+            }
+          ],
+          "onEnter": [
+            {
+              "type": "danger_mode",
+              "params": {
+                "active": true
+              }
+            },
+            {
+              "type": "emergency_modal",
+              "params": {
+                "title": "חדירה ודאית!",
+                "subtitle": "{armedCount} חמושים זוהו",
+                "showVehicle": true,
+                "showPersons": true
+              }
+            },
+            {
+              "type": "journal",
+              "params": {
+                "severity": "critical",
+                "title": "חדירה ודאית",
+                "description": "זוהו {armedCount} חמושים\n\nפרטי רכב:\nלוחית רישוי: {vehicle.licensePlate}\nצבע: {vehicle.color}\nיצרן/דגם: {vehicle.make} {vehicle.model}\n\nחמושים:\n{persons_summary}"
+              }
+            },
+            {
+              "type": "tts",
+              "params": {
+                "message": "זוהו {armedCount} חמושים. {persons_descriptions}",
+                "priority": "critical"
+              }
+            },
+            {
+              "type": "play_sound",
+              "params": {
+                "sound": "alarm",
+                "repeatCount": 2
+              }
+            },
+            {
+              "type": "start_recording",
+              "params": {
+                "preBuffer": 5,
+                "duration": 10
+              }
+            }
+          ]
+        },
+        {
+          "id": "RESPONSE_INITIATED",
+          "name": "תגובה הופעלה",
+          "description": "משתמש אישר - מפעיל תגובה",
+          "transitions": [
+            {
+              "to": "DRONE_DISPATCHED",
+              "trigger": {
+                "type": "transcription",
+                "keywords": ["רחפן"]
+              }
+            },
+            {
+              "to": "DRONE_DISPATCHED",
+              "trigger": {
+                "type": "timeout",
+                "timeout": 120000
+              }
+            }
+          ],
+          "onEnter": [
+            {
+              "type": "close_modal",
+              "params": {}
+            },
+            {
+              "type": "tts",
+              "params": {
+                "message": "כיתת כוננות, יש לנו חדירה ודאית",
+                "priority": "critical"
+              }
+            },
+            {
+              "type": "simulation",
+              "params": {
+                "type": "phone_call",
+                "title": "מתקשר למפקד תורן..."
+              }
+            },
+            {
+              "type": "play_sound",
+              "params": {
+                "sound": "phoneDial",
+                "loop": false
+              }
+            },
+            {
+              "type": "delay",
+              "params": {
+                "ms": 3000
+              }
+            },
+            {
+              "type": "play_sound",
+              "params": {
+                "sound": "phoneRing",
+                "repeatCount": 3
+              }
+            },
+            {
+              "type": "delay",
+              "params": {
+                "ms": 3000
+              }
+            },
+            {
+              "type": "simulation",
+              "params": {
+                "type": "phone_connected",
+                "title": "מפקד תורן בקו"
+              }
+            },
+            {
+              "type": "journal",
+              "params": {
+                "severity": "info",
+                "title": "התקשרות למפקד תורן",
+                "description": "הופעלה התקשרות אוטומטית למפקד תורן"
+              }
+            }
+          ]
+        },
+        {
+          "id": "DRONE_DISPATCHED",
+          "name": "רחפן הוקפץ",
+          "description": "רחפן בדרך לאזור האירוע",
+          "autoTransition": true,
+          "autoTransitionDelay": 5000,
+          "transitions": [
+            {
+              "to": "CIVILIAN_ALERT",
+              "trigger": {
+                "type": "auto"
+              }
+            }
+          ],
+          "onEnter": [
+            {
+              "type": "simulation",
+              "params": {
+                "type": "drone_dispatch",
+                "title": "רחפן מוקפץ"
+              }
+            },
+            {
+              "type": "play_sound",
+              "params": {
+                "sound": "droneTakeoff",
+                "loop": false
+              }
+            },
+            {
+              "type": "journal",
+              "params": {
+                "severity": "info",
+                "title": "רחפן הוקפץ",
+                "description": "רחפן הוקפץ לאזור האירוע"
+              }
+            },
+            {
+              "type": "delay",
+              "params": {
+                "ms": 3000
+              }
+            },
+            {
+              "type": "simulation",
+              "params": {
+                "type": "drone_enroute",
+                "title": "רחפן בדרך ליעד"
+              }
+            }
+          ]
+        },
+        {
+          "id": "CIVILIAN_ALERT",
+          "name": "כריזה למגורים",
+          "description": "ממתין למילת קוד לשידור",
+          "transitions": [
+            {
+              "to": "CODE_BROADCAST",
+              "trigger": {
+                "type": "transcription",
+                "keywords": ["צפרדע"]
+              }
+            },
+            {
+              "to": "CODE_BROADCAST",
+              "trigger": {
+                "type": "timeout",
+                "timeout": 60000
+              }
+            }
+          ],
+          "onEnter": [
+            {
+              "type": "tts",
+              "params": {
+                "message": "תושבים יקרים, מתקיים אירוע ביטחוני באזור. נא להיכנס למרחב מוגן ולהישאר בתוכו עד להודעה חדשה.",
+                "priority": "critical"
+              }
+            },
+            {
+              "type": "simulation",
+              "params": {
+                "type": "pa_announcement",
+                "title": "כריזה למגורים בוצעה"
+              }
+            },
+            {
+              "type": "journal",
+              "params": {
+                "severity": "warning",
+                "title": "כריזה למגורים",
+                "description": "בוצעה כריזת התרעה למגורים"
+              }
+            }
+          ]
+        },
+        {
+          "id": "CODE_BROADCAST",
+          "name": "קוד שודר",
+          "description": "ממתין לסרטון מלוחם",
+          "transitions": [
+            {
+              "to": "SOLDIER_VIDEO",
+              "trigger": {
+                "type": "upload",
+                "endpoint": "soldier-video"
+              }
+            },
+            {
+              "to": "NEW_CAMERA",
+              "trigger": {
+                "type": "timeout",
+                "timeout": 60000
+              }
+            }
+          ],
+          "onEnter": [
+            {
+              "type": "tts",
+              "params": {
+                "message": "צפרדע צפרדע צפרדע",
+                "priority": "high"
+              }
+            },
+            {
+              "type": "simulation",
+              "params": {
+                "type": "code_broadcast",
+                "title": "קוד שודר: צפרדע"
+              }
+            },
+            {
+              "type": "journal",
+              "params": {
+                "severity": "info",
+                "title": "קוד שודר",
+                "description": "קוד \"צפרדע\" שודר 3 פעמים"
+              }
+            }
+          ]
+        },
+        {
+          "id": "SOLDIER_VIDEO",
+          "name": "סרטון מלוחם",
+          "description": "מציג סרטון מלוחם עם תמלול",
+          "transitions": [
+            {
+              "to": "NEW_CAMERA",
+              "trigger": {
+                "type": "manual",
+                "action": "close_video_panel"
+              }
+            }
+          ],
+          "onEnter": [
+            {
+              "type": "soldier_video_panel",
+              "params": {
+                "open": true
+              }
+            },
+            {
+              "type": "journal",
+              "params": {
+                "severity": "info",
+                "title": "סרטון מלוחם התקבל",
+                "description": "סרטון מלוחם התקבל ומוצג"
+              }
+            }
+          ]
+        },
+        {
+          "id": "NEW_CAMERA",
+          "name": "מצלמה חדשה",
+          "description": "ממתין לחיבור מצלמה חדשה או סיום",
+          "transitions": [
+            {
+              "to": "SITUATION_END",
+              "trigger": {
+                "type": "transcription",
+                "keywords": ["חדל חדל חדל", "חדל", "סוף אירוע"]
+              }
+            },
+            {
+              "to": "SITUATION_END",
+              "trigger": {
+                "type": "manual",
+                "action": "end_scenario"
+              }
+            }
+          ],
+          "onEnter": [
+            {
+              "type": "new_camera_dialog",
+              "params": {
+                "open": true
+              }
+            }
+          ]
+        },
+        {
+          "id": "SITUATION_END",
+          "name": "סיום אירוע",
+          "description": "האירוע הסתיים",
+          "isFinal": true,
+          "transitions": [],
+          "onEnter": [
+            {
+              "type": "danger_mode",
+              "params": {
+                "active": false
+              }
+            },
+            {
+              "type": "stop_all_sounds",
+              "params": {}
+            },
+            {
+              "type": "stop_recording",
+              "params": {}
+            },
+            {
+              "type": "summary_popup",
+              "params": {
+                "title": "אירוע הסתיים"
+              }
+            },
+            {
+              "type": "journal",
+              "params": {
+                "severity": "info",
+                "title": "אירוע הסתיים",
+                "description": "אירוע הסתיים - סיבה: {end_reason}\nמשך: {duration}"
+              }
+            },
+            {
+              "type": "cleanup",
+              "params": {
+                "delay": 5000
+              }
+            }
+          ]
+        }
+      ],
+      "context": {
+        "vehicle": null,
+        "persons": [],
+        "armedCount": 0,
+        "startedAt": null,
+        "acknowledged": false,
+        "endReason": null
+      },
+      "config": {
+        "stolenVehicles": [
+          { "plate": "DEMO-123", "color": "שחור", "make": "טויוטה", "model": "קורולה" },
+          { "plate": "123-45-678", "color": "לבן", "make": "יונדאי", "model": "i20" },
+          { "plate": "TEST-001", "color": "אדום", "make": "מזדה", "model": "3" }
+        ],
+        "armedThreshold": 3,
+        "keywords": {
+          "drone": ["רחפן"],
+          "code": ["צפרדע"],
+          "end": ["חדל חדל חדל", "חדל", "סוף אירוע"]
+        }
+      }
+    }
+  ],
+  "version": "1.0.0",
+  "lastUpdated": null
+}

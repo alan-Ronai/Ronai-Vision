@@ -1,14 +1,16 @@
 """
 Text-to-Speech Service for Hebrew Announcements
 
-Uses Gemini TTS with Sulafat voice (Hebrew female voice) for high-quality Hebrew speech.
-Feature 3: Replace TTS with Gemini TTS (Sulafat Voice)
+Uses Gemini 2.5 Pro TTS with Sulafat voice for high-quality Hebrew speech.
+Configured for urgent emergency announcements בלשון זכר.
 """
 
 import os
 import asyncio
 import logging
 import uuid
+import wave
+import struct
 import base64
 from pathlib import Path
 from datetime import datetime
@@ -17,24 +19,28 @@ from typing import Optional, Dict, Any
 logger = logging.getLogger(__name__)
 
 # Gemini TTS Configuration
+# Sulafat - Hebrew female voice with clear pronunciation
 GEMINI_TTS_VOICE = os.environ.get("GEMINI_TTS_VOICE", "Sulafat")
 GEMINI_TTS_SAMPLE_RATE = int(os.environ.get("GEMINI_TTS_SAMPLE_RATE", "24000"))
-GEMINI_TTS_FORMAT = os.environ.get("GEMINI_TTS_FORMAT", "wav")  # WAV for RTP compatibility
 
-# Try to import Google Generative AI
-GEMINI_AVAILABLE = False
+# Try to import Google GenAI SDK
+GENAI_AVAILABLE = False
+genai_client = None
+
 try:
-    import google.generativeai as genai
-    GEMINI_AVAILABLE = True
+    from google import genai
+    from google.genai import types
+    GENAI_AVAILABLE = True
 except ImportError:
-    pass
+    logger.warning("google-genai package not installed. Install with: pip install google-genai")
 
 
 class TTSService:
     """
     Text-to-Speech service for Hebrew emergency announcements.
 
-    Uses Gemini TTS with Sulafat voice for high-quality Hebrew speech synthesis.
+    Uses Gemini 2.5 Pro TTS with Sulafat voice for high-quality Hebrew speech.
+    Configured for urgent announcements בלשון זכר (male grammar).
     """
 
     def __init__(self):
@@ -43,38 +49,39 @@ class TTSService:
 
         self.voice = GEMINI_TTS_VOICE
         self.sample_rate = GEMINI_TTS_SAMPLE_RATE
-        self.output_format = GEMINI_TTS_FORMAT
-        self.model = None
+        self.api_key = os.environ.get("GEMINI_API_KEY")
+        # Use Gemini 2.5 Pro TTS model
+        self.model_id = "gemini-2.5-pro-preview-tts"
 
-        self._init_engine()
+        self.client = None
+        self._init_client()
 
-    def _init_engine(self):
-        """Initialize Gemini TTS engine"""
-        if not GEMINI_AVAILABLE:
-            logger.error("❌ TTS: google-generativeai package not installed")
+    def _init_client(self):
+        """Initialize the Gemini client"""
+        if not GENAI_AVAILABLE:
+            logger.error("❌ TTS: google-genai package not installed")
             return
 
-        api_key = os.environ.get("GEMINI_API_KEY")
-        if not api_key:
-            logger.error("❌ TTS: GEMINI_API_KEY not set")
+        if not self.api_key:
+            logger.warning("⚠️ TTS: GEMINI_API_KEY not set, TTS will be disabled")
             return
 
         try:
-            genai.configure(api_key=api_key)
-            # Use gemini-2.0-flash-exp for TTS generation
-            self.model = genai.GenerativeModel("gemini-2.0-flash-exp")
-            logger.info(f"✅ TTS: Using Gemini TTS with {self.voice} voice")
+            from google import genai
+            self.client = genai.Client(api_key=self.api_key)
+            logger.info(f"✅ TTS: Initialized with Gemini 2.5 Pro TTS, voice: {self.voice}")
         except Exception as e:
-            logger.error(f"❌ TTS: Failed to initialize Gemini: {e}")
+            logger.error(f"❌ TTS: Failed to initialize client: {e}")
 
     def is_configured(self) -> bool:
         """Check if TTS is properly configured"""
-        return self.model is not None
+        return self.client is not None
 
     async def generate(
         self,
         text: str,
-        filename: Optional[str] = None
+        filename: Optional[str] = None,
+        urgent: bool = True
     ) -> str:
         """
         Generate speech from Hebrew text using Gemini TTS.
@@ -82,113 +89,135 @@ class TTSService:
         Args:
             text: Hebrew text to convert to speech
             filename: Optional output filename
+            urgent: Whether to use urgent tone (default True for emergency)
 
         Returns:
             Path to generated audio file
-
-        Raises:
-            RuntimeError: If Gemini is not available
         """
-        if not self.model:
-            raise RuntimeError("Gemini TTS not initialized")
-
         if not filename:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             uid = uuid.uuid4().hex[:8]
-            filename = f"tts_{timestamp}_{uid}.{self.output_format}"
+            filename = f"tts_{timestamp}_{uid}.wav"
 
         output_path = self.output_dir / filename
 
         try:
-            # Generate speech using Gemini
-            await self._generate_gemini_tts(text, output_path)
+            if self.client:
+                await self._generate_gemini_tts(text, output_path, urgent)
+            else:
+                # Generate silent placeholder if TTS not configured
+                self._generate_silent_placeholder(text, output_path)
+
             logger.info(f"TTS generated: {output_path}")
             return str(output_path)
         except Exception as e:
             logger.error(f"TTS generation error: {e}")
-            raise
+            import traceback
+            traceback.print_exc()
+            # Generate silent placeholder on error
+            self._generate_silent_placeholder(text, output_path)
+            return str(output_path)
 
-    async def _generate_gemini_tts(self, text: str, output_path: Path):
-        """Generate speech using Gemini's TTS capabilities"""
-        loop = asyncio.get_event_loop()
+    async def _generate_gemini_tts(self, text: str, output_path: Path, urgent: bool = True):
+        """Generate speech using Gemini 2.5 Pro TTS"""
+        from google.genai import types
 
-        def _generate():
+        # Build the prompt with urgency and male grammar instructions
+        if urgent:
+            # For urgent announcements - speak with urgency and slight panic
+            prompt = f"""זוהי הודעת חירום דחופה! דבר בלשון זכר, בטון דחוף ומבוהל מעט, כאילו מדובר באירוע ביטחוני אמיתי.
+הקרא את ההודעה הבאה בדחיפות:
+
+{text}"""
+        else:
+            prompt = f"""דבר בלשון זכר, בבהירות ובנחישות.
+הקרא את ההודעה הבאה:
+
+{text}"""
+
+        def _generate_sync():
             try:
-                # Use Gemini's multimodal capabilities to generate speech
-                # The model can generate audio from text instructions
-                prompt = f"""
-Generate natural Hebrew speech audio for the following text.
-Use a clear, professional female voice suitable for emergency announcements.
-Voice: {self.voice}
-Language: Hebrew (he-IL)
-
-Text to speak:
-{text}
-
-Generate the audio in {self.output_format} format at {self.sample_rate}Hz sample rate.
-"""
-                response = self.model.generate_content(
-                    prompt,
-                    generation_config={
-                        "response_mime_type": f"audio/{self.output_format}"
-                    }
+                response = self.client.models.generate_content(
+                    model=self.model_id,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_modalities=["AUDIO"],
+                        speech_config=types.SpeechConfig(
+                            voice_config=types.VoiceConfig(
+                                prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                    voice_name=self.voice
+                                )
+                            )
+                        )
+                    )
                 )
 
-                # Check if response contains audio
-                if hasattr(response, 'candidates') and response.candidates:
-                    for candidate in response.candidates:
-                        if hasattr(candidate, 'content') and candidate.content:
-                            for part in candidate.content.parts:
-                                if hasattr(part, 'inline_data') and part.inline_data:
-                                    # Decode and save audio
-                                    audio_data = base64.b64decode(part.inline_data.data)
-                                    with open(output_path, 'wb') as f:
-                                        f.write(audio_data)
-                                    return
+                # Extract audio data from response
+                if response.candidates and len(response.candidates) > 0:
+                    candidate = response.candidates[0]
+                    if candidate.content and candidate.content.parts:
+                        for part in candidate.content.parts:
+                            if hasattr(part, 'inline_data') and part.inline_data:
+                                audio_data = part.inline_data.data
+                                mime_type = part.inline_data.mime_type or ""
 
-                # Fallback: If direct TTS not available, use synthesis approach
-                # This creates a TTS request through Gemini's audio synthesis
-                self._fallback_tts(text, output_path)
+                                logger.info(f"TTS response mime_type: {mime_type}, data length: {len(audio_data)}")
+
+                                # The audio is typically raw PCM L16 at 24kHz
+                                # Save as WAV with proper header
+                                self._save_pcm_as_wav(audio_data, output_path, mime_type)
+                                return True
+
+                logger.error("No audio data in Gemini TTS response")
+                logger.error(f"Response: {response}")
+                return False
 
             except Exception as e:
-                logger.error(f"Gemini TTS error: {e}")
-                self._fallback_tts(text, output_path)
+                logger.error(f"Gemini TTS generation error: {e}")
+                raise
 
-        await loop.run_in_executor(None, _generate)
+        # Run in executor to avoid blocking
+        loop = asyncio.get_event_loop()
+        success = await loop.run_in_executor(None, _generate_sync)
 
-    def _fallback_tts(self, text: str, output_path: Path):
-        """Fallback TTS using gTTS if Gemini audio generation fails"""
-        try:
-            from gtts import gTTS
-            from pydub import AudioSegment
+        if not success:
+            raise RuntimeError("Failed to generate TTS audio")
 
-            # gTTS only outputs MP3, so save to temp then convert if needed
-            mp3_path = str(output_path).replace('.wav', '.mp3')
-            tts = gTTS(text=text, lang='iw')  # 'iw' is Hebrew
-            tts.save(mp3_path)
+    def _save_pcm_as_wav(self, audio_data: bytes, output_path: Path, mime_type: str = ""):
+        """Save PCM audio data as WAV file with proper header"""
+        # Parse sample rate from mime type if available
+        # Format: audio/L16;rate=24000 or audio/pcm;rate=24000
+        sample_rate = self.sample_rate
+        if "rate=" in mime_type:
+            try:
+                rate_str = mime_type.split("rate=")[1].split(";")[0].split(",")[0]
+                sample_rate = int(rate_str)
+            except:
+                pass
 
-            # Convert to WAV if output format is wav
-            if self.output_format == 'wav':
-                try:
-                    audio = AudioSegment.from_mp3(mp3_path)
-                    audio = audio.set_frame_rate(self.sample_rate)
-                    audio.export(str(output_path), format='wav')
-                    # Remove temp mp3
-                    import os as os_module
-                    os_module.remove(mp3_path)
-                except Exception as conv_err:
-                    logger.warning(f"WAV conversion failed, keeping MP3: {conv_err}")
-                    # If conversion fails, just rename
-                    import shutil
-                    shutil.move(mp3_path, str(output_path))
+        logger.info(f"Saving WAV: {len(audio_data)} bytes, sample_rate={sample_rate}")
 
-            logger.info("Using gTTS fallback for TTS generation")
-        except ImportError:
-            logger.error("gTTS not installed, cannot use fallback TTS")
-            raise RuntimeError("gTTS not available for fallback")
-        except Exception as e:
-            logger.error(f"Fallback TTS also failed: {e}")
-            raise RuntimeError(f"All TTS methods failed: {e}")
+        with wave.open(str(output_path), 'wb') as wav_file:
+            wav_file.setnchannels(1)  # Mono
+            wav_file.setsampwidth(2)  # 16-bit (2 bytes per sample)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(audio_data)
+
+    def _generate_silent_placeholder(self, text: str, output_path: Path):
+        """Generate a short silent WAV file as placeholder when TTS is not available"""
+        logger.warning(f"TTS not available, generating silent placeholder for: {text[:50]}...")
+
+        # Generate 0.5 seconds of silence
+        duration_seconds = 0.5
+        num_samples = int(self.sample_rate * duration_seconds)
+
+        with wave.open(str(output_path), 'wb') as wav_file:
+            wav_file.setnchannels(1)  # Mono
+            wav_file.setsampwidth(2)  # 16-bit
+            wav_file.setframerate(self.sample_rate)
+            # Write silence (zeros)
+            silent_data = struct.pack('<' + 'h' * num_samples, *([0] * num_samples))
+            wav_file.writeframes(silent_data)
 
     async def generate_emergency_announcement(
         self,
@@ -196,21 +225,16 @@ Generate the audio in {self.output_format} format at {self.sample_rate}Hz sample
     ) -> str:
         """
         Generate full emergency announcement with all incident details.
+        Uses בלשון זכר (male grammar) and urgent tone.
 
         Args:
-            details: Dict containing:
-                - location: Camera/location description
-                - person_count: Number of intruders
-                - armed: Whether intruders are armed
-                - weapon_type: Type of weapon if armed
-                - vehicle: Vehicle analysis dict (color, manufacturer, model, licensePlate)
-                - persons: List of person analyses (clothing descriptions)
+            details: Dict containing incident information
 
         Returns:
             Path to generated audio file
         """
-        # Build announcement text
-        parts = ["חדירה ודאית. אירוע אמת."]
+        # Build announcement text (male grammar - בלשון זכר)
+        parts = ["חדירה ודאית! אירוע אמת!"]
 
         location = details.get("location")
         if location:
@@ -218,15 +242,15 @@ Generate the audio in {self.output_format} format at {self.sample_rate}Hz sample
 
         person_count = details.get("person_count", 0)
         if person_count:
-            parts.append(f"מספר מחבלים: {person_count}.")
+            parts.append(f"זוהו {person_count} מחבלים.")
 
         if details.get("armed"):
             weapon_type = details.get("weapon_type", "לא ידוע")
-            parts.append(f"המחבלים חמושים. סוג נשק: {weapon_type}.")
+            parts.append(f"המחבלים חמושים! סוג נשק: {weapon_type}.")
 
-        # Person descriptions (clothing for identification)
+        # Person descriptions
         persons = details.get("persons", [])
-        for i, person in enumerate(persons[:3], 1):  # Max 3 descriptions
+        for i, person in enumerate(persons[:3], 1):
             if isinstance(person, dict):
                 shirt = person.get("shirtColor", "")
                 pants = person.get("pantsColor", "")
@@ -257,70 +281,46 @@ Generate the audio in {self.output_format} format at {self.sample_rate}Hz sample
             if plate:
                 parts.append(f"מספר רכב: {plate}.")
 
-        parts.append("קו דיווח 13.")
+        parts.append("קו דיווח 13!")
 
         full_text = " ".join(parts)
         logger.info(f"Emergency announcement text: {full_text}")
 
-        return await self.generate(full_text)
+        return await self.generate(full_text, urgent=True)
 
     async def generate_event_end_announcement(
         self,
         additional_info: Optional[str] = None
     ) -> str:
-        """
-        Generate end-of-event announcement.
-
-        Args:
-            additional_info: Optional additional details
-
-        Returns:
-            Path to generated audio file
-        """
-        text = "חדל. האיום נוטרל. סוף אירוע."
+        """Generate end-of-event announcement."""
+        text = "חדל! האיום נוטרל! סוף אירוע!"
 
         if additional_info:
             text += f" {additional_info}"
 
-        return await self.generate(text)
+        return await self.generate(text, urgent=True)
 
     async def generate_simulation_announcement(
         self,
         simulation_type: str
     ) -> str:
-        """
-        Generate announcement for simulation events.
-
-        Args:
-            simulation_type: Type of simulation (drone_dispatch, phone_call, etc.)
-
-        Returns:
-            Path to generated audio file
-        """
+        """Generate announcement for simulation events."""
         announcements = {
-            "drone_dispatch": "רחפן הוקפץ לנקודת האירוע.",
+            "drone_dispatch": "רחפן הוקפץ לנקודת האירוע!",
             "phone_call": "מבצע חיוג למפקד התורן.",
-            "pa_announcement": "מתבצעת כריזה למגורים.",
-            "code_broadcast": "קוד צפרדע שודר שלוש פעמים ברשת הקשר.",
-            "threat_neutralized": "חדל. האיום נוטרל. סוף אירוע."
+            "pa_announcement": "מתבצעת כריזה למגורים!",
+            "code_broadcast": "קוד צפרדע שודר שלוש פעמים ברשת הקשר!",
+            "threat_neutralized": "חדל! האיום נוטרל! סוף אירוע!"
         }
 
         text = announcements.get(simulation_type, f"סימולציה: {simulation_type}")
-        return await self.generate(text)
+        return await self.generate(text, urgent=True)
 
     async def generate_stolen_vehicle_announcement(
         self,
         vehicle_info: Dict[str, Any]
     ) -> str:
-        """
-        Generate announcement for stolen vehicle detection.
-
-        Args:
-            vehicle_info: Vehicle analysis dict with color, model, licensePlate
-
-        Returns:
-            Path to generated audio file
-        """
+        """Generate announcement for stolen vehicle detection."""
         parts = ["רכב גנוב זוהה!"]
 
         color = vehicle_info.get("color", "")
@@ -335,18 +335,18 @@ Generate the audio in {self.output_format} format at {self.sample_rate}Hz sample
         if plate:
             parts.append(f"מספר רכב: {plate}.")
 
-        parts.append("יש לפעול בהתאם לנהלים.")
+        parts.append("יש לפעול בהתאם לנהלים!")
 
         full_text = " ".join(parts)
-        return await self.generate(full_text)
+        return await self.generate(full_text, urgent=True)
 
     def get_engine_info(self) -> Dict[str, Any]:
         """Get information about the current TTS engine"""
         return {
             "engine": "gemini_tts",
+            "model": self.model_id,
             "voice": self.voice,
             "sample_rate": self.sample_rate,
-            "output_format": self.output_format,
             "output_dir": str(self.output_dir),
             "configured": self.is_configured()
         }

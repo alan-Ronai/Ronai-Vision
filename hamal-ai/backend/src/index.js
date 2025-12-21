@@ -16,7 +16,9 @@ import trackedRoutes from './routes/tracked.js';
 import alertRoutes from './routes/alerts.js';
 import eventRulesRoutes from './routes/eventRules.js';
 import stolenPlatesRoutes from './routes/stolenPlates.js';
+import scenarioRoutes from './routes/scenario.js';
 import { setupSocket } from './socket/handlers.js';
+import { initScenarioManager } from './services/scenarioManager.js';
 
 // Load environment variables
 dotenv.config();
@@ -68,6 +70,10 @@ app.use('/api/tracked', trackedRoutes);
 app.use('/api/alerts', alertRoutes);
 app.use('/api/event-rules', eventRulesRoutes);
 app.use('/api/stolen-plates', stolenPlatesRoutes);
+app.use('/api/scenario', scenarioRoutes);
+
+// Serve scenario uploads
+app.use('/uploads/scenario', express.static(path.join(__dirname, '../uploads/scenario')));
 
 // Health check
 app.get('/api/health', (req, res) => {
@@ -93,6 +99,10 @@ app.use((err, req, res, next) => {
 
 // Socket.IO setup
 setupSocket(io);
+
+// Initialize Scenario Manager
+initScenarioManager(io);
+console.log('✅ Scenario Manager initialized');
 
 // Export io for use in other modules
 export { io };

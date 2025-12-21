@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { AppProvider, useApp } from './context/AppContext';
+import { ScenarioProvider, useScenario } from './context/ScenarioContext';
 import CameraGrid from './components/CameraGrid';
 import MainCamera from './components/MainCamera';
 import EventLog from './components/EventLog';
@@ -15,8 +16,21 @@ import AudioTransmitter from './components/AudioTransmitter';
 import EventRuleManager from './components/EventRuleManager';
 import AIStatsPanel from './components/AIStatsPanel';
 
+// Scenario components
+import {
+  DangerModeOverlay,
+  EmergencyModal,
+  VehicleAlertModal,
+  ScenarioAlertPopup,
+  SimulationIndicator,
+  SoldierVideoPanel,
+  NewCameraDialog,
+  SummaryPopup,
+} from './components/scenario';
+
 function Dashboard() {
   const { isEmergency, simulationPopup, loading } = useApp();
+  const { dangerMode } = useScenario();
   const [showCameraManager, setShowCameraManager] = useState(false);
   const [showDetectionSettings, setShowDetectionSettings] = useState(false);
   const [showGlobalIDStore, setShowGlobalIDStore] = useState(false);
@@ -152,11 +166,119 @@ function Dashboard() {
         onClose={() => setShowAIStats(false)}
       />
 
-      {/* Emergency popup */}
-      {isEmergency && <AlertPopup />}
+      {/* Legacy emergency popup (for non-scenario emergencies) */}
+      {isEmergency && !dangerMode && <AlertPopup />}
 
       {/* Simulation popup (drone dispatch, phone call, etc.) */}
       {simulationPopup && <SimulationPopup />}
+
+      {/* Scenario components */}
+      <EmergencyModal />
+      <VehicleAlertModal />
+      <ScenarioAlertPopup />
+      <SimulationIndicator />
+      <SoldierVideoPanel />
+      <NewCameraDialog />
+      <SummaryPopup />
+    </div>
+  );
+}
+
+// Scenario Test Controls - Demo buttons for testing the scenario
+function ScenarioTestControls() {
+  const {
+    scenario,
+    testStartScenario,
+    testAddArmedPerson,
+    testAdvanceStage,
+    testTranscription,
+    resetScenario,
+    STAGES,
+  } = useScenario();
+
+  const [showControls, setShowControls] = useState(false);
+
+  return (
+    <div className="fixed bottom-4 right-4 z-50">
+      <button
+        onClick={() => setShowControls(!showControls)}
+        className="bg-red-700 hover:bg-red-600 px-4 py-2 rounded-lg shadow-lg mb-2"
+      >
+        {showControls ? 'סגור' : 'תרחיש הדגמה'}
+      </button>
+
+      {showControls && (
+        <div className="bg-gray-800 rounded-lg shadow-xl p-4 w-80 space-y-2">
+          <h3 className="text-lg font-bold text-white mb-3">בקרת תרחיש</h3>
+
+          {/* Current stage */}
+          <div className="bg-gray-900 rounded p-2 text-sm">
+            <span className="text-gray-400">שלב נוכחי: </span>
+            <span className="text-blue-400">{scenario.stage}</span>
+            {scenario.armedCount > 0 && (
+              <span className="text-red-400 mr-2">| חמושים: {scenario.armedCount}</span>
+            )}
+          </div>
+
+          {/* Test buttons */}
+          <div className="space-y-2">
+            <button
+              onClick={() => testStartScenario('cam-1')}
+              disabled={scenario.active}
+              className="w-full bg-yellow-600 hover:bg-yellow-500 disabled:bg-gray-600 disabled:cursor-not-allowed px-3 py-2 rounded text-sm"
+            >
+              התחל תרחיש (רכב גנוב)
+            </button>
+
+            <button
+              onClick={testAddArmedPerson}
+              disabled={scenario.stage !== STAGES.VEHICLE_ALERT}
+              className="w-full bg-red-600 hover:bg-red-500 disabled:bg-gray-600 disabled:cursor-not-allowed px-3 py-2 rounded text-sm"
+            >
+              הוסף חמוש ({scenario.armedCount}/3)
+            </button>
+
+            <button
+              onClick={() => testTranscription('רחפן')}
+              disabled={scenario.stage !== STAGES.RESPONSE_INITIATED}
+              className="w-full bg-purple-600 hover:bg-purple-500 disabled:bg-gray-600 disabled:cursor-not-allowed px-3 py-2 rounded text-sm"
+            >
+              שלח "רחפן"
+            </button>
+
+            <button
+              onClick={() => testTranscription('צפרדע')}
+              disabled={scenario.stage !== STAGES.CIVILIAN_ALERT}
+              className="w-full bg-orange-600 hover:bg-orange-500 disabled:bg-gray-600 disabled:cursor-not-allowed px-3 py-2 rounded text-sm"
+            >
+              שלח "צפרדע"
+            </button>
+
+            <button
+              onClick={() => testTranscription('חדל חדל חדל')}
+              disabled={scenario.stage !== STAGES.NEW_CAMERA}
+              className="w-full bg-green-600 hover:bg-green-500 disabled:bg-gray-600 disabled:cursor-not-allowed px-3 py-2 rounded text-sm"
+            >
+              שלח "חדל" (סיום)
+            </button>
+
+            <button
+              onClick={testAdvanceStage}
+              disabled={!scenario.active}
+              className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-gray-600 disabled:cursor-not-allowed px-3 py-2 rounded text-sm"
+            >
+              קדם שלב (דלג)
+            </button>
+
+            <button
+              onClick={resetScenario}
+              className="w-full bg-gray-600 hover:bg-gray-500 px-3 py-2 rounded text-sm"
+            >
+              איפוס תרחיש
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -164,7 +286,12 @@ function Dashboard() {
 export default function App() {
   return (
     <AppProvider>
-      <Dashboard />
+      <ScenarioProvider>
+        <DangerModeOverlay>
+          <Dashboard />
+        </DangerModeOverlay>
+        <ScenarioTestControls />
+      </ScenarioProvider>
     </AppProvider>
   );
 }

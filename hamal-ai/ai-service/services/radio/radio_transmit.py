@@ -327,3 +327,82 @@ def _stereo_to_mono(data: bytes, bits_per_sample: int = 16) -> bytes:
     mono = samples.mean(axis=1).astype(dtype)
 
     return mono.tobytes()
+
+
+async def transmit_audio_internal(
+    audio_data: bytes,
+    format: str = "wav",
+    priority: str = "normal",
+    sample_rate: int = 24000,
+    auto_ptt: bool = True
+) -> dict:
+    """
+    Internal function to transmit audio to radio without HTTP.
+
+    Called by TTS service and scenario rule engine to transmit
+    generated audio directly.
+
+    Args:
+        audio_data: Raw audio bytes (WAV or PCM format)
+        format: Audio format - "wav" or "pcm"
+        priority: Priority level - "high", "normal", "low"
+        sample_rate: Sample rate for PCM data (ignored for WAV)
+        auto_ptt: Whether to auto-trigger PTT
+
+    Returns:
+        Dict with success status and transmission info
+    """
+    try:
+        if len(audio_data) == 0:
+            logger.warning("📻 transmit_audio_internal: Empty audio data")
+            return {"success": False, "error": "Empty audio data"}
+
+        pcm_data = audio_data
+        actual_sample_rate = sample_rate
+
+        # Parse WAV if needed
+        if format == "wav" or (len(audio_data) > 12 and audio_data[:4] == b'RIFF' and audio_data[8:12] == b'WAVE'):
+            try:
+                pcm_data, actual_sample_rate = _parse_wav(audio_data)
+                logger.info(f"📻 Parsed WAV: {len(pcm_data)} bytes PCM @ {actual_sample_rate}Hz")
+            except Exception as e:
+                logger.error(f"📻 WAV parse error, using raw data: {e}")
+                # Skip WAV header if parse failed (assume 44-byte header)
+                if len(audio_data) > 44:
+                    pcm_data = audio_data[44:]
+
+        logger.info(
+            f"📻 transmit_audio_internal: {len(pcm_data)} bytes PCM "
+            f"@ {actual_sample_rate}Hz, priority={priority}, PTT={auto_ptt}"
+        )
+
+        # Send to radio
+        success = send_audio_to_radio(
+            audio_data=pcm_data,
+            sample_rate=actual_sample_rate,
+            auto_ptt=auto_ptt
+        )
+
+        if success:
+            sender = get_sender()
+            stats = sender.get_stats()
+            logger.info(f"📻 Audio transmitted successfully: {stats.get('packets_sent')} packets")
+            return {
+                "success": True,
+                "message": "Audio transmitted to radio",
+                "packets_sent": stats.get("packets_sent"),
+                "bytes_sent": stats.get("bytes_sent")
+            }
+        else:
+            logger.warning("📻 Radio transmission failed")
+            return {
+                "success": False,
+                "error": "Failed to transmit audio to radio"
+            }
+
+    except Exception as e:
+        logger.error(f"📻 transmit_audio_internal error: {e}", exc_info=True)
+        return {
+            "success": False,
+            "error": str(e)
+        }
