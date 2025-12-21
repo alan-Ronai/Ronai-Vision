@@ -24,8 +24,10 @@ logger = logging.getLogger(__name__)
 # Configuration Constants
 MIN_HITS = 2  # Detections needed to confirm track (lowered from 3 for faster confirmation)
 MAX_LOST = 15  # Frames before deletion (reduced from 30 for faster ghost cleanup = 1 second at 15fps)
-LAMBDA_APP = 0.7  # Appearance weight in cost matrix (only used when features exist)
+MAX_LOST_WITH_REID = 90  # Frames before deletion for tracks WITH ReID features (6 seconds at 15fps)
+LAMBDA_APP = 0.8  # Appearance weight in cost matrix (increased from 0.7 for better ReID matching)
 MAX_COST = 0.85  # Maximum cost for assignment (increased for moving object tolerance)
+MAX_COST_REID_ONLY = 0.5  # Maximum cost when using ReID-only matching (no IoU overlap)
 MIN_IOU_THRESHOLD = 0.2  # Minimum IoU for matching (lowered from 0.3 for walking persons)
 
 # Low confidence deletion (more tolerant to prevent premature ID switching)
@@ -268,12 +270,16 @@ class Track:
     def should_delete(self) -> bool:
         """Check if track should be deleted.
 
-        Simple logic:
-        - Delete if not matched for MAX_LOST frames
+        Logic:
+        - Tracks WITH ReID features are kept longer (for re-identification after video loop)
+        - Tracks WITHOUT ReID features use shorter timeout
         - Delete if low confidence AND not being matched
         """
-        # Delete if lost for too long (not matched for MAX_LOST frames)
-        if self.time_since_update > MAX_LOST:
+        # Use longer timeout for tracks with ReID features (allows re-identification after video loops)
+        max_lost = MAX_LOST_WITH_REID if self.feature is not None else MAX_LOST
+
+        # Delete if lost for too long (not matched for max_lost frames)
+        if self.time_since_update > max_lost:
             return True
 
         # Delete if consistently low confidence AND not being matched recently
@@ -453,14 +459,26 @@ class BoTSORTTracker:
                         # Both have features with matching dimensions - use combined cost
                         similarity = self._cosine_similarity(track.feature, det.feature)
                         app_cost = 1.0 - similarity
-                        cost_matrix[i, j] = (1 - LAMBDA_APP) * motion_cost + LAMBDA_APP * app_cost
 
-                        # Log ReID usage
-                        logger.debug(
-                            f"ReID matching ({object_type}): track {track.track_id} "
-                            f"similarity={similarity:.3f}, motion_cost={motion_cost:.3f}, "
-                            f"combined_cost={cost_matrix[i, j]:.3f}, feat_dim={track.feature.shape[0]}"
-                        )
+                        # CRITICAL: When IoU is very low (e.g., video loop, object reappears elsewhere),
+                        # rely more heavily on ReID similarity for matching
+                        if iou < 0.1 and similarity > 0.7:
+                            # ReID-only matching: object likely reappeared at different position
+                            # Use only appearance cost when ReID similarity is high
+                            cost_matrix[i, j] = app_cost * 0.6  # Scale down to favor good ReID matches
+                            logger.debug(
+                                f"ReID-only matching ({object_type}): track {track.track_id} "
+                                f"similarity={similarity:.3f}, cost={cost_matrix[i, j]:.3f} "
+                                f"(IoU too low: {iou:.3f})"
+                            )
+                        else:
+                            # Normal combined cost
+                            cost_matrix[i, j] = (1 - LAMBDA_APP) * motion_cost + LAMBDA_APP * app_cost
+                            logger.debug(
+                                f"ReID matching ({object_type}): track {track.track_id} "
+                                f"similarity={similarity:.3f}, motion_cost={motion_cost:.3f}, "
+                                f"combined_cost={cost_matrix[i, j]:.3f}"
+                            )
                     else:
                         # Feature dimension mismatch - use only motion cost
                         logger.warning(
@@ -471,21 +489,6 @@ class BoTSORTTracker:
                 else:
                     # NO features - use ONLY motion cost
                     cost_matrix[i, j] = motion_cost
-
-                    # Log when features are missing (debug level)
-                    if track.feature is None and det.feature is None:
-                        logger.debug(
-                            f"No ReID features for {object_type} track {track.track_id} "
-                            f"(both track and detection missing features)"
-                        )
-                    elif track.feature is None:
-                        logger.debug(
-                            f"No track feature for {object_type} track {track.track_id}"
-                        )
-                    elif det.feature is None:
-                        logger.debug(
-                            f"No detection feature for {object_type} detection"
-                        )
 
         return cost_matrix
 
@@ -589,6 +592,52 @@ class BoTSORTTracker:
             "deleted_tracks": 0
         }
         logger.info("BoT-SORT tracker reset")
+
+    def clear_camera_tracks(self, camera_id: str):
+        """Clear all tracks for a specific camera.
+
+        Called when a camera is removed/disconnected to prevent stale tracks
+        from triggering events.
+
+        Args:
+            camera_id: Camera ID whose tracks should be cleared
+        """
+        cleared_persons = 0
+        cleared_vehicles = 0
+
+        # Clear persons for this camera
+        to_delete = [tid for tid, track in self._persons.items()
+                     if track.last_seen_camera == camera_id]
+        for tid in to_delete:
+            del self._persons[tid]
+            cleared_persons += 1
+
+        # Clear vehicles for this camera
+        to_delete = [tid for tid, track in self._vehicles.items()
+                     if track.last_seen_camera == camera_id]
+        for tid in to_delete:
+            del self._vehicles[tid]
+            cleared_vehicles += 1
+
+        if cleared_persons > 0 or cleared_vehicles > 0:
+            logger.info(f"Cleared tracks for camera {camera_id}: {cleared_persons} persons, {cleared_vehicles} vehicles")
+            self._stats["deleted_tracks"] += cleared_persons + cleared_vehicles
+
+    def get_active_tracks_visible(self, object_type: str, camera_id: Optional[str] = None,
+                                   max_frames_since_update: int = 5) -> List[Track]:
+        """Get only tracks that are currently visible (recently updated).
+
+        Args:
+            object_type: 'person' or 'vehicle'
+            camera_id: Optional camera ID to filter tracks
+            max_frames_since_update: Maximum frames since last update (default 5 = ~330ms at 15fps)
+
+        Returns:
+            List of recently updated tracks (likely still visible)
+        """
+        tracks = self.get_active_tracks(object_type, camera_id)
+        # Filter to only tracks that have been updated recently
+        return [t for t in tracks if t.time_since_update <= max_frames_since_update]
 
 
 # Global singleton

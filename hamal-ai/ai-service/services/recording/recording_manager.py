@@ -226,10 +226,34 @@ class RecordingManager:
 
         logger.info(f"Recording thread started for {recording.recording_id}, duration={recording.duration}s")
 
+        # Track frame count to detect stalled streams
+        last_frame_count = len(recording.frames)
+        last_frame_check = time.time()
+        STALL_CHECK_INTERVAL = 2.0  # Check every 2 seconds
+        STALL_TIMEOUT = 5.0  # If no new frames for 5 seconds, stop recording
+
         try:
             # Wait for recording duration to complete
             while time.time() < end_time and not recording._stop_event.is_set():
                 time.sleep(0.1)
+
+                # Check for stalled stream (no new frames)
+                now = time.time()
+                if now - last_frame_check >= STALL_CHECK_INTERVAL:
+                    current_frame_count = len(recording.frames)
+                    if current_frame_count == last_frame_count:
+                        # No new frames - check if stalled too long
+                        stall_time = now - last_frame_check
+                        if stall_time >= STALL_TIMEOUT:
+                            logger.warning(
+                                f"Recording {recording.recording_id} stalled - no new frames for {stall_time:.1f}s, "
+                                f"stopping early with {current_frame_count} frames"
+                            )
+                            break
+                    else:
+                        # Got new frames, reset stall tracking
+                        last_frame_count = current_frame_count
+                        last_frame_check = now
 
             # Recording complete - queue for encoding
             logger.info(

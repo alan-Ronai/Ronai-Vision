@@ -15,6 +15,7 @@ import streamRoutes from './routes/stream.js';
 import trackedRoutes from './routes/tracked.js';
 import alertRoutes from './routes/alerts.js';
 import eventRulesRoutes from './routes/eventRules.js';
+import stolenPlatesRoutes from './routes/stolenPlates.js';
 import { setupSocket } from './socket/handlers.js';
 
 // Load environment variables
@@ -66,6 +67,7 @@ app.use('/api/stream', streamRoutes);
 app.use('/api/tracked', trackedRoutes);
 app.use('/api/alerts', alertRoutes);
 app.use('/api/event-rules', eventRulesRoutes);
+app.use('/api/stolen-plates', stolenPlatesRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {

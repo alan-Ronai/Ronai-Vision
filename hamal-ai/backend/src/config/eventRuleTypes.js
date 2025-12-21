@@ -81,6 +81,7 @@ export const CONDITION_TYPES = {
         required: true,
         options: [
           { value: 'armed', label: 'חמוש' },
+          { value: 'stolen', label: 'רכב גנוב' },
           { value: 'threatLevel', label: 'רמת איום' },
           { value: 'clothingColor', label: 'צבע לבוש' },
           { value: 'vehicleColor', label: 'צבע רכב' },
@@ -232,6 +233,92 @@ export const CONDITION_TYPES = {
     }
   },
 
+  metadata_object_count: {
+    label: 'ספירת אובייקטים לפי מאפיין',
+    labelEn: 'Metadata Object Count',
+    description: 'מופעל כאשר מספר האובייקטים עם מאפיין ספציפי עומד בתנאי (לדוגמה: 3 אנשים חמושים)',
+    category: 'detection',
+    params: {
+      objectType: {
+        type: 'select',
+        label: 'סוג אובייקט',
+        required: false,
+        options: [
+          { value: '', label: 'כל סוג' },
+          { value: 'person', label: 'אנשים' },
+          { value: 'car', label: 'מכוניות' },
+          { value: 'truck', label: 'משאיות' },
+          { value: 'vehicle', label: 'רכבים (כל סוג)' }
+        ]
+      },
+      attribute: {
+        type: 'select',
+        label: 'מאפיין',
+        required: true,
+        options: [
+          { value: 'armed', label: 'חמוש' },
+          { value: 'stolen', label: 'רכב גנוב' },
+          { value: 'threatLevel', label: 'רמת איום' },
+          { value: 'faceCovered', label: 'פנים מכוסות' },
+          { value: 'vehicleColor', label: 'צבע רכב' },
+          { value: 'shirtColor', label: 'צבע חולצה' }
+        ]
+      },
+      attributeValue: {
+        type: 'dynamic',
+        label: 'ערך מאפיין',
+        required: true,
+        dependsOn: 'attribute',
+        typeMap: {
+          armed: 'boolean',
+          stolen: 'boolean',
+          threatLevel: 'select',
+          faceCovered: 'boolean',
+          vehicleColor: 'string',
+          shirtColor: 'string'
+        },
+        optionsMap: {
+          threatLevel: [
+            { value: 'low', label: 'נמוך' },
+            { value: 'medium', label: 'בינוני' },
+            { value: 'high', label: 'גבוה' },
+            { value: 'critical', label: 'קריטי' }
+          ]
+        }
+      },
+      countOperator: {
+        type: 'select',
+        label: 'תנאי כמות',
+        required: true,
+        default: 'greaterOrEqual',
+        options: [
+          { value: 'greaterThan', label: 'יותר מ' },
+          { value: 'lessThan', label: 'פחות מ' },
+          { value: 'equals', label: 'בדיוק' },
+          { value: 'greaterOrEqual', label: 'לפחות' },
+          { value: 'lessOrEqual', label: 'לכל היותר' }
+        ]
+      },
+      countThreshold: {
+        type: 'number',
+        label: 'כמות',
+        min: 1,
+        max: 100,
+        default: 1,
+        required: true
+      },
+      scope: {
+        type: 'select',
+        label: 'טווח',
+        default: 'current_camera',
+        options: [
+          { value: 'current_camera', label: 'מצלמה נוכחית' },
+          { value: 'all_cameras', label: 'כל המצלמות' }
+        ]
+      }
+    }
+  },
+
   new_track: {
     label: 'אובייקט חדש',
     labelEn: 'New Track',
@@ -295,15 +382,15 @@ export const CONDITION_TYPES = {
   transcription_keyword: {
     label: 'מילת מפתח בקשר',
     labelEn: 'Transcription Keyword',
-    description: 'מופעל כאשר נאמרת מילה ספציפית בקשר',
+    description: 'מופעל כאשר נאמרת מילה ספציפית בקשר או לפי מספר מילים',
     category: 'radio',
     params: {
       keywords: {
         type: 'array',
         itemType: 'string',
         label: 'מילות מפתח',
-        required: true,
-        placeholder: 'הזן מילה ולחץ Enter'
+        required: false,
+        placeholder: 'הזן מילה ולחץ Enter (אופציונלי אם משתמשים בספירת מילים)'
       },
       matchType: {
         type: 'select',
@@ -320,6 +407,37 @@ export const CONDITION_TYPES = {
         type: 'boolean',
         label: 'תלוי רישיות',
         default: false
+      },
+      countMode: {
+        type: 'select',
+        label: 'מצב ספירת מילים',
+        default: 'disabled',
+        options: [
+          { value: 'disabled', label: 'כבוי' },
+          { value: 'total_words', label: 'סה״כ מילים בתמלול' },
+          { value: 'keyword_occurrences', label: 'כמות הופעות מילת מפתח' }
+        ]
+      },
+      countOperator: {
+        type: 'select',
+        label: 'תנאי ספירה',
+        default: 'greaterOrEqual',
+        options: [
+          { value: 'greaterThan', label: 'יותר מ' },
+          { value: 'lessThan', label: 'פחות מ' },
+          { value: 'equals', label: 'בדיוק' },
+          { value: 'greaterOrEqual', label: 'לפחות' },
+          { value: 'lessOrEqual', label: 'לכל היותר' }
+        ],
+        showIf: { countMode: ['total_words', 'keyword_occurrences'] }
+      },
+      countThreshold: {
+        type: 'number',
+        label: 'סף מילים',
+        min: 1,
+        max: 1000,
+        default: 5,
+        showIf: { countMode: ['total_words', 'keyword_occurrences'] }
       }
     }
   },
@@ -526,6 +644,29 @@ export const PIPELINE_TYPES = {
         default: 'ruleId',
         required: true,
         help: 'מפתח לזיהוי אירועים דומים. השתמש ב-{cameraId} או {trackId} לייחודיות'
+      }
+    }
+  },
+
+  set_placeholder: {
+    label: 'הגדרת משתנה מותאם',
+    labelEn: 'Set Placeholder',
+    description: 'יצירת משתנה מותאם אישית שניתן להשתמש בו בפעולות',
+    category: 'flow',
+    params: {
+      name: {
+        type: 'string',
+        label: 'שם המשתנה',
+        required: true,
+        placeholder: 'vehicleInfo',
+        help: 'שם המשתנה (אותיות, מספרים וקו תחתון בלבד)'
+      },
+      expression: {
+        type: 'template',
+        label: 'ערך / ביטוי',
+        required: true,
+        placeholder: '{object.color} {object.manufacturer}',
+        help: 'ניתן להשתמש במשתנים קיימים כמו {object.armed}, {camera.name}, {timestamp}'
       }
     }
   },
@@ -934,6 +1075,41 @@ export const ACTION_TYPES = {
         options: 'cameras',
         required: false,
         placeholder: 'מצלמת האירוע (ברירת מחדל)'
+      }
+    }
+  },
+
+  auto_focus_camera: {
+    label: 'מיקוד אוטומטי למצלמה',
+    labelEn: 'Auto Focus Camera',
+    description: 'העברת התצוגה למצלמה של האירוע באופן אוטומטי עם חזרה למצלמה המקורית',
+    category: 'ui',
+    params: {
+      priority: {
+        type: 'select',
+        label: 'עדיפות',
+        default: 'high',
+        options: [
+          { value: 'low', label: 'נמוכה' },
+          { value: 'medium', label: 'בינונית' },
+          { value: 'high', label: 'גבוהה' },
+          { value: 'critical', label: 'קריטית' }
+        ],
+        help: 'עדיפות גבוהה תדרוס עדיפות נמוכה'
+      },
+      returnTimeout: {
+        type: 'number',
+        label: 'זמן חזרה (שניות)',
+        min: 0,
+        max: 300,
+        default: 30,
+        help: '0 = לא לחזור אוטומטית'
+      },
+      showIndicator: {
+        type: 'boolean',
+        label: 'הצג אינדיקטור',
+        default: true,
+        help: 'הצג סימון שהמצלמה הועברה אוטומטית'
       }
     }
   },

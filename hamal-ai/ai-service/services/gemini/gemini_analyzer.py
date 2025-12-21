@@ -47,6 +47,7 @@ class GeminiAnalyzer:
     def __init__(self):
         self.model = None
         self.vision_model = None
+        self._call_count = 0  # Centralized API call counter
 
         if not GEMINI_AVAILABLE:
             logger.warning("⚠️ Gemini not available - install google-generativeai")
@@ -73,52 +74,99 @@ class GeminiAnalyzer:
         """Check if Gemini is properly configured"""
         return self.model is not None
 
-    def _frame_to_pil(self, frame, bbox: Optional[List[float]] = None) -> Image.Image:
+    def get_call_count(self) -> int:
+        """Get the total number of Gemini API calls made"""
+        return self._call_count
+
+    def reset_call_count(self) -> None:
+        """Reset the API call counter"""
+        self._call_count = 0
+
+    async def _generate_content(self, content_parts: list):
         """
-        Convert OpenCV frame to PIL Image, optionally cropping to bbox.
+        Wrapper for model.generate_content_async that increments the call counter.
+        Use this instead of calling generate_content_async directly.
+        """
+        self._call_count += 1
+        return await self.model.generate_content_async(content_parts)
+
+    def _frame_to_pil(self, frame, bbox: Optional[List[float]] = None, margin_percent: float = 0.25) -> Image.Image:
+        """
+        Convert OpenCV frame to PIL Image, optionally cropping to bbox WITH MARGIN.
 
         Args:
             frame: OpenCV BGR numpy array
             bbox: Optional [x1, y1, x2, y2] to crop
+            margin_percent: Percentage of bbox size to add as margin (default 25%)
 
         Returns:
-            PIL Image in RGB format
+            PIL Image in RGB format with the subject fully visible in the center
         """
         if bbox is not None:
             x1, y1, x2, y2 = map(int, bbox)
-            # Clamp to frame bounds
             h, w = frame.shape[:2]
-            x1, y1 = max(0, x1), max(0, y1)
-            x2, y2 = min(w, x2), min(h, y2)
+
+            # Calculate bbox dimensions
+            bbox_w = x2 - x1
+            bbox_h = y2 - y1
+
+            # Add margin around the bbox (25% of bbox size on each side)
+            margin_x = int(bbox_w * margin_percent)
+            margin_y = int(bbox_h * margin_percent)
+
+            # Expand bbox with margin
+            x1 = max(0, x1 - margin_x)
+            y1 = max(0, y1 - margin_y)
+            x2 = min(w, x2 + margin_x)
+            y2 = min(h, y2 + margin_y)
+
             frame = frame[y1:y2, x1:x2]
 
         # Convert BGR to RGB
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         return Image.fromarray(rgb)
 
-    def _get_cutout_base64(self, frame, bbox: List[float], max_size: int = 200) -> Optional[str]:
+    def _get_cutout_base64(self, frame, bbox: List[float], max_size: int = 300, margin_percent: float = 0.25) -> Optional[str]:
         """
-        Get a base64 encoded JPEG of the cropped bbox area.
+        Get a base64 encoded JPEG of the cropped bbox area WITH MARGIN.
+
+        The subject will be fully visible in the center of the image with
+        additional context around it.
 
         Args:
             frame: OpenCV BGR numpy array
             bbox: Bounding box [x1, y1, x2, y2]
-            max_size: Maximum dimension for the thumbnail
+            max_size: Maximum dimension for the thumbnail (increased to 300 for better quality)
+            margin_percent: Percentage of bbox size to add as margin (default 25%)
 
         Returns:
             Base64 encoded JPEG string or None on error
         """
         try:
             x1, y1, x2, y2 = map(int, bbox)
-            # Clamp to frame bounds
             h, w = frame.shape[:2]
-            x1, y1 = max(0, x1), max(0, y1)
-            x2, y2 = min(w, x2), min(h, y2)
+
+            # Calculate bbox dimensions
+            bbox_w = x2 - x1
+            bbox_h = y2 - y1
+
+            if bbox_w <= 0 or bbox_h <= 0:
+                return None
+
+            # Add margin around the bbox (25% of bbox size on each side)
+            margin_x = int(bbox_w * margin_percent)
+            margin_y = int(bbox_h * margin_percent)
+
+            # Expand bbox with margin, clamped to frame bounds
+            x1 = max(0, x1 - margin_x)
+            y1 = max(0, y1 - margin_y)
+            x2 = min(w, x2 + margin_x)
+            y2 = min(h, y2 + margin_y)
 
             if x2 <= x1 or y2 <= y1:
                 return None
 
-            # Crop the region
+            # Crop the region with margin
             crop = frame[y1:y2, x1:x2]
 
             # Resize if too large (keep aspect ratio)
@@ -128,8 +176,8 @@ class GeminiAnalyzer:
                 new_w, new_h = int(crop_w * scale), int(crop_h * scale)
                 crop = cv2.resize(crop, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
-            # Encode to JPEG
-            _, buffer = cv2.imencode('.jpg', crop, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            # Encode to JPEG with good quality
+            _, buffer = cv2.imencode('.jpg', crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
             return base64.b64encode(buffer).decode('utf-8')
 
         except Exception as e:
@@ -153,6 +201,63 @@ class GeminiAnalyzer:
         except json.JSONDecodeError as e:
             logger.warning(f"Failed to parse JSON: {e}")
             return {"raw_response": text, "parse_error": str(e)}
+
+    def _is_valid_plate(self, plate: Optional[str]) -> bool:
+        """
+        Check if a license plate value is valid (not a placeholder).
+
+        Invalid values include:
+        - None, empty string
+        - "null" (string)
+        - "לא זוהה", "לא נראה בבירור", "לא נראה", etc.
+        - Plates that are too short (less than 5 characters)
+
+        Args:
+            plate: License plate string to validate
+
+        Returns:
+            True if the plate appears to be a valid plate number
+        """
+        if not plate:
+            return False
+
+        # Convert to string and strip whitespace
+        plate_str = str(plate).strip()
+
+        # Check for empty or null-like values
+        if not plate_str or plate_str.lower() == "null":
+            return False
+
+        # List of invalid placeholder values (Hebrew)
+        invalid_values = [
+            "לא זוהה",
+            "לא נראה",
+            "לא נראה בבירור",
+            "לא ידוע",
+            "לא מזוהה",
+            "אין",
+            "ללא",
+            "חסר",
+            "לא קריא",
+            "לא ניתן לזהות",
+        ]
+
+        # Check against invalid values (case-insensitive for Hebrew)
+        plate_lower = plate_str.lower()
+        for invalid in invalid_values:
+            if invalid in plate_lower:
+                return False
+
+        # Valid Israeli plates are typically 7-8 characters
+        # But allow 5+ to catch partial plates that might still be valid
+        if len(plate_str) < 5:
+            return False
+
+        # Check that it contains at least some digits (plates have numbers)
+        if not any(c.isdigit() for c in plate_str):
+            return False
+
+        return True
 
     async def analyze_vehicle(
         self,
@@ -178,20 +283,24 @@ class GeminiAnalyzer:
             img = self._frame_to_pil(frame, bbox)
 
             prompt = """
-            נתח את הרכב בתמונה בקפידה. החזר JSON בלבד (ללא markdown):
+            נתח את הרכב במרכז התמונה בקפידה. הרכב הרלוונטי נמצא במרכז התמונה.
+            החזר JSON בלבד (ללא markdown):
             {
                 "color": "צבע הרכב בעברית (אדום/כחול/לבן/שחור/כסוף/אפור וכו')",
-                "model": "דגם הרכב אם ניתן לזהות, אחרת null",
-                "manufacturer": "יצרן הרכב (טויוטה/יונדאי/מזדה וכו'), אחרת null",
-                "licensePlate": "מספר הרכב אם נראה בבירור, אחרת null",
+                "model": "דגם הרכב אם ניתן לזהות, אחרת הערך המדויק: לא זוהה",
+                "manufacturer": "יצרן הרכב (טויוטה/יונדאי/מזדה וכו'), אחרת הערך המדויק: לא זוהה",
+                "licensePlate": "מספר הרכב אם נראה בבירור ומלא (7-8 ספרות), אחרת הערך המדויק: לא זוהה",
                 "vehicleType": "סוג: רכב פרטי/משאית/טנדר/אוטובוס/אופנוע/רכב צבאי/טרקטורון",
                 "condition": "תקין/פגום/מוסווה/חשוד",
                 "confidence": 0.0-1.0
             }
-            חשוב: החזר רק JSON תקין, בלי טקסט נוסף לפני או אחרי.
+            חשוב מאוד:
+            1. החזר רק JSON תקין, בלי טקסט נוסף לפני או אחרי.
+            2. לכל ערך לא ידוע/לא נראה השתמש בערך המדויק "לא זוהה" (לא null, לא "לא נראה בבירור", לא ערך אחר).
+            3. התמקד ברכב שבמרכז התמונה, התעלם מרכבים אחרים שעשויים להיות בקצוות.
             """
 
-            response = await self.model.generate_content_async([prompt, img])
+            response = await self._generate_content([prompt, img])
             result = self._parse_json(response.text)
 
             # Add cutout image if requested
@@ -203,12 +312,52 @@ class GeminiAnalyzer:
                 else:
                     logger.warning("Failed to generate cutout image for vehicle")
 
-            logger.info(f"Vehicle analyzed: {result.get('color', '?')} {result.get('manufacturer', '?')}")
+            # Check if license plate is stolen (Feature 1)
+            # Only check if we have a valid plate (not placeholder values)
+            license_plate = result.get("licensePlate")
+            if self._is_valid_plate(license_plate):
+                stolen_info = await self._check_stolen_plate(license_plate)
+                result["stolen"] = stolen_info.get("stolen", False)
+                if result["stolen"]:
+                    logger.warning(f"STOLEN VEHICLE DETECTED: {license_plate}")
+            else:
+                result["stolen"] = False
+
+            logger.info(f"Vehicle analyzed: {result.get('color', '?')} {result.get('manufacturer', '?')} (stolen: {result.get('stolen', False)})")
             return result
 
         except Exception as e:
             logger.error(f"Vehicle analysis error: {e}")
             return {"error": str(e)}
+
+    async def _check_stolen_plate(self, plate: str) -> Dict[str, Any]:
+        """
+        Check if a license plate is in the stolen plates database.
+        Feature 1: Stolen Vehicle Detection.
+
+        Args:
+            plate: License plate number to check
+
+        Returns:
+            Dict with: stolen (bool), plate (str), record (optional)
+        """
+        import httpx
+        backend_url = os.environ.get("BACKEND_URL", "http://localhost:3000")
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{backend_url}/api/stolen-plates/check/{plate}",
+                    timeout=5.0
+                )
+                if response.status_code == 200:
+                    return response.json()
+                else:
+                    logger.debug(f"Stolen plate check failed: HTTP {response.status_code}")
+                    return {"stolen": False, "plate": plate}
+        except Exception as e:
+            logger.debug(f"Stolen plate check error: {e}")
+            return {"stolen": False, "plate": plate}
 
     async def analyze_person(
         self,
@@ -234,25 +383,29 @@ class GeminiAnalyzer:
             img = self._frame_to_pil(frame, bbox)
 
             prompt = """
-            נתח את האדם בתמונה בזהירות מנקודת מבט ביטחונית.
+            נתח את האדם במרכז התמונה בזהירות מנקודת מבט ביטחונית.
+            האדם הרלוונטי נמצא במרכז התמונה.
             החזר JSON בלבד (ללא markdown):
             {
-                "shirtColor": "צבע החולצה/הגופייה בעברית",
-                "pantsColor": "צבע המכנסיים בעברית",
+                "shirtColor": "צבע החולצה/הגופייה בעברית, או הערך המדויק: לא זוהה",
+                "pantsColor": "צבע המכנסיים בעברית, או הערך המדויק: לא זוהה",
                 "headwear": "כובע/קסדה/כיפה/כאפייה/מסכה/ללא",
                 "additionalClothing": ["אפוד", "מעיל", "תיק גב"],
                 "faceCovered": true/false,
                 "armed": true/false,
-                "weaponType": "סוג הנשק אם חמוש: רובה/אקדח/סכין/מטען חבלה, אחרת null",
+                "weaponType": "סוג הנשק אם חמוש: רובה/אקדח/סכין/מטען חבלה, או הערך המדויק: לא זוהה",
                 "weaponVisible": true/false,
                 "posture": "עומד/יושב/רוכן/רץ/שוכב",
                 "suspiciousLevel": 1-5,
                 "description": "תיאור קצר של המראה"
             }
-            חשוב: החזר רק JSON תקין, בלי טקסט נוסף.
+            חשוב מאוד:
+            1. החזר רק JSON תקין, בלי טקסט נוסף לפני או אחרי.
+            2. לכל ערך לא ידוע/לא נראה השתמש בערך המדויק "לא זוהה" (לא null, לא "לא נראה בבירור", לא ערך אחר).
+            3. התמקד באדם שבמרכז התמונה, התעלם מאנשים אחרים שעשויים להיות בקצוות.
             """
 
-            response = await self.model.generate_content_async([prompt, img])
+            response = await self._generate_content([prompt, img])
             result = self._parse_json(response.text)
 
             # Add cutout image if requested
@@ -309,7 +462,7 @@ class GeminiAnalyzer:
             }
             """
 
-            response = await self.model.generate_content_async([prompt, img])
+            response = await self._generate_content([prompt, img])
             result = self._parse_json(response.text)
 
             if result.get("threatNeutralized"):
@@ -362,7 +515,7 @@ class GeminiAnalyzer:
                 }
                 """
 
-            response = await self.model.generate_content_async([prompt, img])
+            response = await self._generate_content([prompt, img])
             return self._parse_json(response.text)
 
         except Exception as e:
@@ -395,7 +548,7 @@ class GeminiAnalyzer:
             אם יש מילים לא ברורות, נסה לנחש לפי הקונטקסט הצבאי/ביטחוני.
             """
 
-            response = await self.model.generate_content_async([prompt, audio_file])
+            response = await self._generate_content([prompt, audio_file])
             transcript = response.text.strip()
 
             logger.info(f"Audio transcribed: {transcript[:50]}...")
@@ -426,7 +579,7 @@ class GeminiAnalyzer:
         try:
             images = [self._frame_to_pil(f) for f in frames]
 
-            response = await self.model.generate_content_async([prompt, *images])
+            response = await self._generate_content([prompt, *images])
             return self._parse_json(response.text)
 
         except Exception as e:
@@ -466,7 +619,7 @@ class GeminiAnalyzer:
             }
             """
 
-            response = await self.model.generate_content_async([prompt, img1, img2])
+            response = await self._generate_content([prompt, img1, img2])
             return self._parse_json(response.text)
 
         except Exception as e:
@@ -506,7 +659,7 @@ class GeminiAnalyzer:
             }
             """
 
-            response = await self.model.generate_content_async([prompt, img1, img2])
+            response = await self._generate_content([prompt, img1, img2])
             return self._parse_json(response.text)
 
         except Exception as e:

@@ -747,6 +747,71 @@ function getDefaultRules() {
         }
       ],
       tags: ['info', 'tracking']
+    },
+
+    // Rule 6: Stolen vehicle detection (Feature 1)
+    {
+      name: 'התראת רכב גנוב',
+      description: 'הפעלת מצב חירום כאשר מזוהה רכב גנוב',
+      enabled: true,
+      priority: 100,
+      conditions: {
+        operator: 'AND',
+        items: [
+          {
+            type: 'object_detected',
+            params: { objectType: 'car', minConfidence: 0.5 }
+          },
+          {
+            type: 'attribute_match',
+            params: { attribute: 'stolen', operator: 'equals', value: true }
+          }
+        ]
+      },
+      pipeline: [
+        {
+          type: 'debounce',
+          params: { cooldownMs: 60000, key: 'stolen_vehicle_{cameraId}' }
+        },
+        {
+          type: 'set_placeholder',
+          params: {
+            name: 'vehicleInfo',
+            expression: '{object.color} {object.manufacturer} - לוחית: {object.licensePlate}'
+          }
+        }
+      ],
+      actions: [
+        {
+          type: 'system_alert',
+          params: {
+            severity: 'critical',
+            title: 'רכב גנוב זוהה!',
+            message: 'רכב גנוב זוהה במצלמה {cameraId}: {vehicleInfo}'
+          }
+        },
+        {
+          type: 'emergency_mode',
+          params: { action: 'start' }
+        },
+        {
+          type: 'auto_focus_camera',
+          params: {
+            priority: 'critical',
+            returnTimeout: 60,
+            showIndicator: true
+          }
+        },
+        {
+          type: 'start_recording',
+          params: { duration: 120, preBuffer: 30 }
+        },
+        {
+          type: 'tts_radio',
+          params: { message: 'רכב גנוב זוהה במצלמה {cameraName}. לוחית רישוי: {object.licensePlate}. יש לפעול לפי נהלים.' }
+        }
+      ],
+      tags: ['critical', 'stolen', 'vehicle', 'emergency']
     }
   ];
 }

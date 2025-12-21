@@ -74,6 +74,12 @@ class RuleContext:
     # Track duration (for track_lost events)
     track_duration: float = 0.0
 
+    # Custom placeholders (for set_placeholder pipeline processor)
+    placeholders: Dict[str, str] = field(default_factory=dict)
+
+    # All tracked objects (for metadata_object_count condition)
+    all_tracked_objects: List[Dict] = field(default_factory=list)
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert context to dictionary for template interpolation."""
         return {
@@ -99,11 +105,16 @@ class RuleContext:
             "pipeline_results": self.pipeline_results,
             "detections": self.detections,
             "track_duration": self.track_duration,
+            "placeholders": self.placeholders,
             # Flatten common attributes
             "armed": self.attributes.get("armed", False),
+            "stolen": self.attributes.get("stolen", False),
             "threatLevel": self.attributes.get("threatLevel"),
             "weaponType": self.attributes.get("weaponType"),
             "count": self.person_count + self.vehicle_count,  # Total count
+            # Object attributes for placeholders
+            "object": self.attributes,
+            "camera": {"id": self.camera_id, "name": self.camera_name},
         }
 
 
@@ -142,6 +153,7 @@ class RuleEngine:
             "object_interaction": self._eval_object_interaction,
             "transcription_keyword": self._eval_transcription_keyword,
             "object_count": self._eval_object_count,
+            "metadata_object_count": self._eval_metadata_object_count,
             "new_track": self._eval_new_track,
             "track_lost": self._eval_track_lost,
             "time_based": self._eval_time_based,
@@ -156,6 +168,7 @@ class RuleEngine:
             "filter": self._pipe_filter,
             "delay": self._pipe_delay,
             "debounce": self._pipe_debounce,
+            "set_placeholder": self._pipe_set_placeholder,
             "transform": self._pipe_transform,
             "enrich": self._pipe_enrich,
             "aggregate": self._pipe_aggregate,
@@ -176,6 +189,7 @@ class RuleEngine:
             "play_sound": self._action_play_sound,
             "send_notification": self._action_send_notification,
             "select_camera": self._action_select_camera,
+            "auto_focus_camera": self._action_auto_focus_camera,
             "create_event": self._action_create_event,
         }
 
@@ -681,7 +695,7 @@ class RuleEngine:
         return False
 
     def _eval_transcription_keyword(self, params: Dict, ctx: RuleContext) -> bool:
-        """Check if transcription contains keywords."""
+        """Check if transcription contains keywords and/or word count threshold."""
         if not ctx.transcription:
             return False
 
@@ -689,21 +703,127 @@ class RuleEngine:
         match_type = params.get("matchType", "any")
         case_sensitive = params.get("caseSensitive", False)
 
+        # Word count parameters (Feature 5)
+        count_mode = params.get("countMode", "disabled")
+        count_operator = params.get("countOperator", "greaterOrEqual")
+        count_threshold = params.get("countThreshold", 5)
+
         text = ctx.transcription if case_sensitive else ctx.transcription.lower()
         keywords_to_check = keywords if case_sensitive else [k.lower() for k in keywords]
 
-        matches = [kw in text for kw in keywords_to_check]
+        # Keyword matching result
+        keyword_match = True  # Default to True if no keywords specified
+        if keywords_to_check:
+            matches = [kw in text for kw in keywords_to_check]
+            if match_type == "any":
+                keyword_match = any(matches)
+            elif match_type == "all":
+                keyword_match = all(matches)
+            elif match_type == "exact":
+                keyword_match = text in keywords_to_check
+            elif match_type == "phrase":
+                keyword_match = any(kw in text for kw in keywords_to_check)
+            else:
+                keyword_match = any(matches)
 
-        if match_type == "any":
-            return any(matches)
-        elif match_type == "all":
-            return all(matches)
-        elif match_type == "exact":
-            return text in keywords_to_check
-        elif match_type == "phrase":
-            return any(kw in text for kw in keywords_to_check)
+        # Word count matching result (Feature 5)
+        count_match = True  # Default to True if count mode is disabled
+        if count_mode != "disabled":
+            words = text.split()
 
+            if count_mode == "total_words":
+                actual_count = len(words)
+            elif count_mode == "keyword_occurrences":
+                # Count occurrences of all keywords
+                actual_count = sum(
+                    words.count(kw) for kw in keywords_to_check
+                ) if keywords_to_check else 0
+            else:
+                actual_count = 0
+
+            # Compare against threshold
+            count_match = self._compare_count(actual_count, count_operator, count_threshold)
+
+        # Both conditions must pass (AND logic)
+        # If no keywords, only count matters
+        # If count mode disabled, only keywords matter
+        if not keywords_to_check and count_mode == "disabled":
+            return False  # At least one must be specified
+
+        return keyword_match and count_match
+
+    def _compare_count(self, actual: int, operator: str, threshold: int) -> bool:
+        """Compare count against threshold using specified operator."""
+        if operator == "greaterThan":
+            return actual > threshold
+        elif operator == "lessThan":
+            return actual < threshold
+        elif operator == "equals":
+            return actual == threshold
+        elif operator == "greaterOrEqual":
+            return actual >= threshold
+        elif operator == "lessOrEqual":
+            return actual <= threshold
         return False
+
+    def _eval_metadata_object_count(self, params: Dict, ctx: RuleContext) -> bool:
+        """
+        Check count of objects matching specific metadata criteria.
+        Feature 2: Enables rules like "trigger when 3+ armed people detected".
+        """
+        obj_type = params.get("objectType", "")  # Empty = any type
+        attribute = params.get("attribute")
+        attribute_value = params.get("attributeValue")
+        count_operator = params.get("countOperator", "greaterOrEqual")
+        count_threshold = params.get("countThreshold", 1)
+        scope = params.get("scope", "current_camera")
+
+        if not attribute:
+            return False
+
+        # Determine which objects to check
+        if scope == "all_cameras":
+            objects_to_check = ctx.all_tracked_objects
+        else:
+            objects_to_check = ctx.detections
+
+        # Filter and count matching objects
+        matching_count = 0
+        for obj in objects_to_check:
+            # Check object type if specified
+            if obj_type:
+                detected_type = obj.get("class") or obj.get("type") or obj.get("objectType")
+                if not self._match_object_type(detected_type or "", obj_type):
+                    continue
+
+            # Check attribute match
+            # Try to get metadata from different possible locations
+            metadata = obj.get("metadata", {})
+            if not metadata:
+                metadata = obj.get("attributes", {})
+            if not metadata:
+                # Attribute might be at the object level directly
+                metadata = obj
+
+            actual_value = metadata.get(attribute)
+
+            # Handle different value types
+            if isinstance(attribute_value, bool):
+                if actual_value == attribute_value:
+                    matching_count += 1
+            elif isinstance(attribute_value, (int, float)):
+                try:
+                    if float(actual_value or 0) == float(attribute_value):
+                        matching_count += 1
+                except (ValueError, TypeError):
+                    pass
+            else:
+                # String comparison
+                if str(actual_value).lower() == str(attribute_value).lower():
+                    matching_count += 1
+
+        # Compare count against threshold
+        return self._compare_count(matching_count, count_operator, count_threshold)
 
     def _eval_object_count(self, params: Dict, ctx: RuleContext) -> bool:
         """Check object count threshold."""
@@ -991,6 +1111,80 @@ class RuleEngine:
             }
 
         return True
+
+    async def _pipe_set_placeholder(
+        self, params: Dict, ctx: RuleContext, rule_id: str
+    ) -> bool:
+        """
+        Set a custom placeholder that can be used in subsequent pipeline steps and actions.
+        Feature 4: Custom Placeholders in Event Pipeline.
+        """
+        name = params.get("name", "").strip()
+        expression = params.get("expression", "")
+
+        if not name:
+            logger.warning("set_placeholder: No name provided")
+            return True
+
+        # Validate placeholder name (alphanumeric and underscore only)
+        if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', name):
+            logger.warning(f"set_placeholder: Invalid name '{name}' (must be alphanumeric)")
+            return True
+
+        # Interpolate the expression with current context and existing placeholders
+        value = self._interpolate_with_placeholders(expression, ctx)
+
+        # Store the placeholder
+        ctx.placeholders[name] = value
+        logger.debug(f"set_placeholder: {name} = {value}")
+
+        return True
+
+    def _interpolate_with_placeholders(self, template: str, ctx: RuleContext) -> str:
+        """
+        Enhanced interpolation that includes custom placeholders and nested object access.
+        Supports: {placeholder}, {object.field}, {camera.name}, {pipeline.result.field}
+        """
+        if not template:
+            return ""
+
+        try:
+            data = ctx.to_dict()
+            data.update(ctx.pipeline_results)
+            data.update(ctx.placeholders)  # Custom placeholders take precedence
+
+            result = template
+
+            # Handle nested access patterns like {object.color} or {pipeline.result.field}
+            nested_pattern = r'\{(\w+)\.(\w+)(?:\.(\w+))?\}'
+            for match in re.finditer(nested_pattern, template):
+                full_match = match.group(0)
+                obj_name = match.group(1)
+                field1 = match.group(2)
+                field2 = match.group(3)
+
+                # Get the object
+                obj = data.get(obj_name)
+                if isinstance(obj, dict):
+                    value = obj.get(field1)
+                    if field2 and isinstance(value, dict):
+                        value = value.get(field2)
+                    if value is not None:
+                        result = result.replace(full_match, str(value))
+
+            # Handle simple patterns like {placeholder}
+            simple_pattern = r'\{(\w+)\}'
+            for match in re.finditer(simple_pattern, result):
+                key = match.group(1)
+                if key in data:
+                    value = data[key]
+                    if value is not None:
+                        result = result.replace(f"{{{key}}}", str(value))
+
+            return result
+        except Exception as e:
+            logger.error(f"Error interpolating template: {e}")
+            return template
 
     async def _pipe_transform(
         self, params: Dict, ctx: RuleContext, rule_id: str
@@ -1406,9 +1600,69 @@ class RuleEngine:
         """Select camera in UI."""
         camera_id = params.get("cameraId") or ctx.camera_id
 
-        # This would need socket.io to work properly
-        # For now, just log
+        # Emit socket event via backend
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.post(
+                    f"{BACKEND_URL}/api/cameras/{camera_id}/select",
+                    timeout=5.0
+                )
+        except Exception as e:
+            logger.debug(f"Failed to select camera: {e}")
+
         logger.info(f"Select camera: {camera_id}")
+
+    async def _action_auto_focus_camera(self, params: Dict, ctx: RuleContext):
+        """
+        Auto-focus camera with priority and optional return timeout.
+        Feature 6: Automatic Camera Focus on Events.
+        """
+        camera_id = ctx.camera_id
+        if not camera_id:
+            logger.debug("auto_focus_camera: No camera_id in context")
+            return
+
+        priority = params.get("priority", "high")
+        return_timeout = params.get("returnTimeout", 30)
+        show_indicator = params.get("showIndicator", True)
+
+        # Build reason from context
+        reason = f"אירוע: {ctx.event_type}"
+        if ctx.object_type:
+            reason = f"זיהוי {ctx.object_type}"
+        if ctx.attributes.get("armed"):
+            reason = "זיהוי אדם חמוש"
+        if ctx.attributes.get("stolen"):
+            reason = "זיהוי רכב גנוב"
+
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.post(
+                    f"{BACKEND_URL}/api/cameras/auto-focus",
+                    json={
+                        "cameraId": camera_id,
+                        "priority": priority,
+                        "returnTimeout": return_timeout,
+                        "showIndicator": show_indicator,
+                        "reason": reason,
+                        "eventType": ctx.event_type,
+                        "severity": self._priority_to_severity(priority)
+                    },
+                    timeout=5.0
+                )
+                logger.info(f"Auto-focus camera: {camera_id} (priority={priority}, reason={reason})")
+        except Exception as e:
+            logger.debug(f"Failed to auto-focus camera: {e}")
+
+    def _priority_to_severity(self, priority: str) -> str:
+        """Convert priority to severity level."""
+        mapping = {
+            "critical": "critical",
+            "high": "warning",
+            "medium": "info",
+            "low": "info"
+        }
+        return mapping.get(priority, "info")
 
     async def _action_create_event(self, params: Dict, ctx: RuleContext):
         """Create event in system."""
@@ -1436,27 +1690,9 @@ class RuleEngine:
     # =========================================================================
 
     def _interpolate(self, template: str, ctx: RuleContext) -> str:
-        """Interpolate template string with context values."""
-        if not template:
-            return ""
-
-        try:
-            data = ctx.to_dict()
-            data.update(ctx.pipeline_results)
-
-            result = template
-            # Find all {key} patterns and replace
-            pattern = r'\{(\w+)\}'
-            for match in re.finditer(pattern, template):
-                key = match.group(1)
-                if key in data:
-                    value = data[key]
-                    if value is not None:
-                        result = result.replace(f"{{{key}}}", str(value))
-
-            return result
-        except Exception:
-            return template
+        """Interpolate template string with context values and placeholders."""
+        # Use the enhanced interpolation that supports placeholders
+        return self._interpolate_with_placeholders(template, ctx)
 
     async def _record_trigger(self, rule_id: str):
         """Record rule trigger in backend using the /trigger endpoint."""

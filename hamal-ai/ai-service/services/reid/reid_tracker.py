@@ -1,9 +1,9 @@
 """
-ReID (Re-Identification) Tracker Service
+ReID (Re-Identification) Metadata Storage
 
-Uses DeepSort for persistent object tracking across frames.
-Each detected object gets a unique ID that persists even if it
-temporarily leaves and re-enters the frame.
+Stores metadata (Gemini analysis results) for tracked objects.
+Note: Actual tracking is handled by BoT-SORT (see services/detection/bot_sort_tracker.py).
+This class only provides metadata storage and retrieval for tracked objects.
 """
 
 import logging
@@ -13,63 +13,28 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Try to import deep_sort_realtime
-try:
-    from deep_sort_realtime.deepsort_tracker import DeepSort
-    DEEPSORT_AVAILABLE = True
-except ImportError:
-    DEEPSORT_AVAILABLE = False
-    logger.info(
-        "deep-sort-realtime not installed. "
-        "Using OSNet/TransReID/CLIP for ReID instead (recommended)."
-    )
-
 
 class ReIDTracker:
     """
-    Manages persistent tracking of vehicles and persons across video frames.
+    Metadata storage for tracked objects.
 
-    Uses separate DeepSort trackers for:
-    - Vehicles (cars, trucks, buses, motorcycles)
-    - Persons
-
-    Stores metadata (Gemini analysis results) per track ID.
+    Note: Despite the name, this class no longer handles tracking.
+    Tracking is done by BoT-SORT. This class stores:
+    - Gemini analysis results (color, model, armed, etc.)
+    - Appearance history for each track
+    - First/last seen timestamps
     """
 
     def __init__(self, max_age: int = 30, n_init: int = 3):
         """
-        Initialize ReID trackers.
+        Initialize ReID metadata storage.
 
         Args:
-            max_age: Maximum frames to keep a track alive without detections
-            n_init: Number of frames before a track is confirmed
+            max_age: (Legacy, unused) Maximum frames to keep a track alive
+            n_init: (Legacy, unused) Number of frames before a track is confirmed
         """
         self.max_age = max_age
         self.n_init = n_init
-
-        if DEEPSORT_AVAILABLE:
-            # Separate trackers for vehicles and persons
-            self.vehicle_tracker = DeepSort(
-                max_age=max_age,
-                n_init=n_init,
-                max_iou_distance=0.7,
-                max_cosine_distance=0.3,
-                nn_budget=100
-            )
-            self.person_tracker = DeepSort(
-                max_age=max_age,
-                n_init=n_init,
-                max_iou_distance=0.7,
-                max_cosine_distance=0.2,
-                nn_budget=100
-            )
-            logger.info("✅ ReID trackers initialized (DeepSort - legacy mode)")
-        else:
-            self.vehicle_tracker = None
-            self.person_tracker = None
-            logger.info(
-                "DeepSort not available - using OSNet/TransReID/CLIP instead (recommended)"
-            )
 
         # Metadata storage: {track_id: {type, analysis, first_seen, last_seen, ...}}
         self.tracked_objects: Dict[str, Dict[str, Any]] = {}
@@ -77,9 +42,11 @@ class ReIDTracker:
         # Track appearance history for cross-camera matching
         self.appearance_history: Dict[str, List[Dict]] = {}
 
-        # Counter for fallback IDs when DeepSort unavailable
+        # Counter for fallback IDs
         self._fallback_vehicle_id = 0
         self._fallback_person_id = 0
+
+        logger.info("ReID metadata storage initialized (tracking by BoT-SORT)")
 
     def update_vehicles(
         self,
@@ -87,55 +54,12 @@ class ReIDTracker:
         frame: np.ndarray
     ) -> List[Dict[str, Any]]:
         """
-        Update vehicle tracker with new detections.
-
-        Args:
-            detections: List of (bbox, confidence, class_name) tuples
-                        bbox format: [x1, y1, x2, y2]
-            frame: Current frame (numpy array, BGR format)
-
-        Returns:
-            List of tracked objects with persistent IDs:
-            [{"track_id": str, "bbox": [x1,y1,x2,y2], "class": str, "confirmed": bool}]
+        Legacy method - assigns sequential IDs for backward compatibility.
+        Note: Actual tracking is done by BoT-SORT.
         """
         if not detections:
             return []
-
-        if self.vehicle_tracker is None:
-            # Fallback: assign sequential IDs (no persistence)
-            return self._fallback_track(detections, "vehicle")
-
-        # Format detections for DeepSort: [[x1, y1, x2, y2, conf, class], ...]
-        formatted_dets = []
-        for bbox, conf, class_name in detections:
-            x1, y1, x2, y2 = bbox
-            # DeepSort expects [left, top, width, height]
-            formatted_dets.append(([x1, y1, x2-x1, y2-y1], conf, class_name))
-
-        # Update tracker
-        tracks = self.vehicle_tracker.update_tracks(formatted_dets, frame=frame)
-
-        # Convert to output format
-        results = []
-        for track in tracks:
-            if not track.is_confirmed():
-                continue
-
-            track_id = f"v_{track.track_id}"
-            ltrb = track.to_ltrb()  # [left, top, right, bottom]
-
-            results.append({
-                "track_id": track_id,
-                "bbox": [float(x) for x in ltrb],
-                "class": track.det_class if hasattr(track, 'det_class') else "vehicle",
-                "confirmed": True
-            })
-
-            # Update last seen
-            if track_id in self.tracked_objects:
-                self.tracked_objects[track_id]["last_seen"] = datetime.now().isoformat()
-
-        return results
+        return self._fallback_track(detections, "vehicle")
 
     def update_persons(
         self,
@@ -143,58 +67,19 @@ class ReIDTracker:
         frame: np.ndarray
     ) -> List[Dict[str, Any]]:
         """
-        Update person tracker with new detections.
-
-        Args:
-            detections: List of (bbox, confidence, class_name) tuples
-            frame: Current frame (numpy array, BGR format)
-
-        Returns:
-            List of tracked persons with persistent IDs
+        Legacy method - assigns sequential IDs for backward compatibility.
+        Note: Actual tracking is done by BoT-SORT.
         """
         if not detections:
             return []
-
-        if self.person_tracker is None:
-            return self._fallback_track(detections, "person")
-
-        # Format detections for DeepSort
-        formatted_dets = []
-        for bbox, conf, class_name in detections:
-            x1, y1, x2, y2 = bbox
-            formatted_dets.append(([x1, y1, x2-x1, y2-y1], conf, class_name))
-
-        # Update tracker
-        tracks = self.person_tracker.update_tracks(formatted_dets, frame=frame)
-
-        # Convert to output format
-        results = []
-        for track in tracks:
-            if not track.is_confirmed():
-                continue
-
-            track_id = f"p_{track.track_id}"
-            ltrb = track.to_ltrb()
-
-            results.append({
-                "track_id": track_id,
-                "bbox": [float(x) for x in ltrb],
-                "class": "person",
-                "confirmed": True
-            })
-
-            # Update last seen
-            if track_id in self.tracked_objects:
-                self.tracked_objects[track_id]["last_seen"] = datetime.now().isoformat()
-
-        return results
+        return self._fallback_track(detections, "person")
 
     def _fallback_track(
         self,
         detections: List[Tuple],
         obj_type: str
     ) -> List[Dict[str, Any]]:
-        """Fallback tracking when DeepSort unavailable - just assign sequential IDs"""
+        """Assign sequential IDs for legacy compatibility"""
         results = []
         for bbox, conf, class_name in detections:
             if obj_type == "vehicle":
@@ -331,32 +216,18 @@ class ReIDTracker:
                 del self.appearance_history[track_id]
 
         if to_remove:
-            logger.info(f"Cleaned up {len(to_remove)} old tracks")
+            logger.debug(f"Cleaned up {len(to_remove)} old tracks")
 
         return len(to_remove)
 
     def reset(self) -> None:
-        """Reset all trackers and clear stored data"""
-        if DEEPSORT_AVAILABLE:
-            self.vehicle_tracker = DeepSort(
-                max_age=self.max_age,
-                n_init=self.n_init,
-                max_iou_distance=0.7,
-                max_cosine_distance=0.3
-            )
-            self.person_tracker = DeepSort(
-                max_age=self.max_age,
-                n_init=self.n_init,
-                max_iou_distance=0.7,
-                max_cosine_distance=0.2
-            )
-
+        """Reset and clear all stored metadata"""
         self.tracked_objects.clear()
         self.appearance_history.clear()
         self._fallback_vehicle_id = 0
         self._fallback_person_id = 0
 
-        logger.info("ReID trackers reset")
+        logger.debug("ReID metadata storage reset")
 
     def get_stats(self) -> Dict[str, Any]:
         """Get tracker statistics"""
@@ -368,6 +239,5 @@ class ReIDTracker:
             "total_tracked": len(self.tracked_objects),
             "vehicles": vehicles,
             "persons": persons,
-            "armed_persons": armed,
-            "deepsort_available": DEEPSORT_AVAILABLE
+            "armed_persons": armed
         }

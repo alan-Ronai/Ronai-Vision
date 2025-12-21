@@ -483,10 +483,10 @@ class DetectionLoop:
             "alerts_sent": 0,
             "events_sent": 0,
             "events_rate_limited": 0,
-            "gemini_calls": 0,
             "frames_dropped_stale": 0,  # Count of stale frames dropped
             "reid_extractions": 0,  # ReID feature extractions
             "reid_recoveries": 0,  # Successful ReID recoveries
+            # Note: gemini_calls is tracked in GeminiAnalyzer.get_call_count()
         }
 
         # Timing stats (rolling averages in milliseconds)
@@ -734,23 +734,14 @@ class DetectionLoop:
                 if box_area < MIN_BOX_AREA:
                     continue
 
-                # CRITICAL: Extract ReID features for ALL classes (person, vehicle, other)
-                # - Persons: OSNet (512-dim)
-                # - Vehicles: TransReID (768-dim)
-                # - Others: CLIP Universal (768-dim)
-                # NOTE: ReID extraction is SLOW on CPU (~100ms per detection)
-                # ALWAYS extract ReID for accuracy - prevents ghost tracks
-                feature = None
-                if self.use_reid_features:
-                    # Check max_reid_per_frame limit
-                    current_reid_count = len(vehicle_detections) + len(person_detections)
-                    if self.max_reid_per_frame == 0 or current_reid_count < self.max_reid_per_frame:
-                        try:
-                            # Extract ReID embedding using appropriate encoder
-                            feature = self._extract_reid_feature(frame, xyxy, label)
-                            self._stats["reid_extractions"] += 1
-                        except Exception as e:
-                            logger.debug(f"ReID extraction failed for {label}: {e}")
+                # ReID Feature Extraction Strategy:
+                # - ReID extraction is SLOW on CPU (~100ms per detection)
+                # - Instead of extracting for ALL detections, we defer to post-tracking
+                # - BoT-SORT will assign track IDs first, then we extract ReID only for:
+                #   1. NEW tracks that need appearance features
+                #   2. Tracks that haven't had ReID extracted yet
+                # - This reduces extractions from ~2 per detection to ~1 per new track
+                feature = None  # Will be filled in post-tracking step if needed
 
                 # Create Detection object
                 det = Detection(
@@ -772,6 +763,55 @@ class DetectionLoop:
             # Note: reid_extractions is now counted inside the loop only when extraction actually happens
             reid_elapsed = (time.time() - reid_start) * 1000
             self._update_timing("reid_ms", reid_elapsed)
+
+            # STEP 1.5: Pre-tracking ReID for matching lost tracks (video loop scenario)
+            # When there are "lost" tracks with ReID features (time_since_update > 5),
+            # we need to extract ReID for detections so they can be matched via appearance.
+            # This is critical for video simulators where objects reappear at different positions.
+            if self.use_reid_features and self.bot_sort:
+                # Check if there are lost tracks with ReID features
+                lost_persons = [t for t in self.bot_sort.get_active_tracks("person", camera_id)
+                               if t.feature is not None and t.time_since_update > 5]
+                lost_vehicles = [t for t in self.bot_sort.get_active_tracks("vehicle", camera_id)
+                                if t.feature is not None and t.time_since_update > 5]
+
+                # If there are lost tracks, extract ReID for detections to enable matching
+                if lost_persons or lost_vehicles:
+                    reid_pre_count = 0
+                    max_pre_reid = 5  # Limit pre-tracking ReID to avoid performance hit
+
+                    # Extract ReID for person detections
+                    if lost_persons and person_detections:
+                        for det in person_detections[:max_pre_reid]:
+                            if det.feature is None and reid_pre_count < max_pre_reid:
+                                try:
+                                    x, y, w, h = det.bbox
+                                    xyxy = [x, y, x + w, y + h]
+                                    feature = self._extract_reid_feature(frame, xyxy, "person")
+                                    if feature is not None:
+                                        det.feature = feature
+                                        reid_pre_count += 1
+                                        self._stats["reid_extractions"] += 1
+                                except Exception as e:
+                                    logger.debug(f"Pre-tracking ReID failed for person: {e}")
+
+                    # Extract ReID for vehicle detections
+                    if lost_vehicles and vehicle_detections:
+                        for det in vehicle_detections[:max_pre_reid]:
+                            if det.feature is None and reid_pre_count < max_pre_reid:
+                                try:
+                                    x, y, w, h = det.bbox
+                                    xyxy = [x, y, x + w, y + h]
+                                    feature = self._extract_reid_feature(frame, xyxy, det.class_name)
+                                    if feature is not None:
+                                        det.feature = feature
+                                        reid_pre_count += 1
+                                        self._stats["reid_extractions"] += 1
+                                except Exception as e:
+                                    logger.debug(f"Pre-tracking ReID failed for vehicle: {e}")
+
+                    if reid_pre_count > 0:
+                        logger.debug(f"Pre-tracking ReID: extracted {reid_pre_count} features for lost track matching")
 
             # STEP 2: Run detection recovery BEFORE tracker update (if enabled)
             # This avoids double Kalman prediction
@@ -838,11 +878,16 @@ class DetectionLoop:
 
                 # CRITICAL: Filter tracks by camera to prevent cross-contamination
                 # Only show tracks that were last seen on THIS camera
+                # Also filter out stale tracks (not updated in last 5 frames = ~330ms at 15fps)
+                # This prevents events from firing for objects that are no longer visible
+                MAX_STALE_FRAMES = 5  # Tracks not updated in 5 frames are considered gone
                 all_vehicles = [
-                    t for t in all_vehicles if t.last_seen_camera == camera_id
+                    t for t in all_vehicles
+                    if t.last_seen_camera == camera_id and t.time_since_update <= MAX_STALE_FRAMES
                 ]
                 all_persons = [
-                    t for t in all_persons if t.last_seen_camera == camera_id
+                    t for t in all_persons
+                    if t.last_seen_camera == camera_id and t.time_since_update <= MAX_STALE_FRAMES
                 ]
                 new_vehicle_tracks = [
                     t for t in new_vehicle_tracks if t.last_seen_camera == camera_id
@@ -873,6 +918,37 @@ class DetectionLoop:
 
             tracker_elapsed = (time.time() - tracker_start) * 1000
             self._update_timing("tracker_ms", tracker_elapsed)
+
+            # STEP 3.5: Post-tracking ReID extraction (only for NEW tracks)
+            # This is much more efficient than extracting for ALL detections
+            reid_post_start = time.time()
+            if self.use_reid_features and self.bot_sort:
+                reid_count = 0
+                max_reid = self.max_reid_per_frame if self.max_reid_per_frame > 0 else 10  # Default limit
+
+                # Extract ReID for new tracks that don't have features yet
+                for track in new_vehicle_tracks + new_person_tracks:
+                    if reid_count >= max_reid:
+                        break
+                    if track.feature is None:
+                        try:
+                            # Convert bbox from (x, y, w, h) to [x1, y1, x2, y2]
+                            x, y, w, h = track.bbox
+                            xyxy = [x, y, x + w, y + h]
+                            feature = self._extract_reid_feature(frame, xyxy, track.class_name)
+                            if feature is not None:
+                                track.feature = feature
+                                self._stats["reid_extractions"] += 1
+                                reid_count += 1
+                        except Exception as e:
+                            logger.debug(f"Post-tracking ReID failed for {track.track_id}: {e}")
+
+                if reid_count > 0:
+                    logger.debug(f"Post-tracking ReID: extracted {reid_count} features for new tracks")
+
+            reid_post_elapsed = (time.time() - reid_post_start) * 1000
+            # Add to ReID timing (this is more accurate as it's the actual ReID work)
+            self._update_timing("reid_ms", reid_post_elapsed)
 
             # STEP 4: Weapon Detection - detect firearms and mark nearby persons as armed
             detected_weapons = []
@@ -1257,6 +1333,10 @@ class DetectionLoop:
                 else ["car", "truck", "bus", "motorcycle", "bicycle"]
             )
 
+            # Limit ReID extractions in recovery to avoid performance impact
+            MAX_RECOVERY_REID = 3  # Maximum ReID extractions per recovery pass
+            reid_extracted = 0
+
             for box in low_conf_results.boxes:
                 cls = int(box.cls[0])
                 label = low_conf_results.names[cls]
@@ -1271,12 +1351,15 @@ class DetectionLoop:
                 x1, y1, x2, y2 = xyxy
                 bbox = (x1, y1, x2 - x1, y2 - y1)
 
-                # Extract ReID feature - OPTIMIZATION 4: Use cache when possible
+                # Extract ReID feature only for first few candidates (expensive operation)
                 feature = None
-                try:
-                    feature = self._extract_reid_feature_cached(frame, xyxy, label)
-                except Exception as e:
-                    logger.debug(f"Recovery ReID extraction failed for {label}: {e}")
+                if reid_extracted < MAX_RECOVERY_REID:
+                    try:
+                        feature = self._extract_reid_feature_cached(frame, xyxy, label)
+                        if feature is not None:
+                            reid_extracted += 1
+                    except Exception as e:
+                        logger.debug(f"Recovery ReID extraction failed for {label}: {e}")
 
                 recovery_candidates.append(
                     {
@@ -1557,7 +1640,7 @@ class DetectionLoop:
                             break
 
                 self._last_gemini[track_id] = time.time()
-                self._stats["gemini_calls"] += 1
+                # Note: gemini_calls now tracked in GeminiAnalyzer.get_call_count()
                 logger.debug(
                     f"Analyzed vehicle {track_id}: {analysis.get('manufacturer', '?')} {analysis.get('color', '?')}"
                 )
@@ -1616,7 +1699,7 @@ class DetectionLoop:
                             break
 
                 self._last_gemini[track_id] = time.time()
-                self._stats["gemini_calls"] += 1
+                # Note: gemini_calls now tracked in GeminiAnalyzer.get_call_count()
 
                 # Sync analysis to backend
                 try:

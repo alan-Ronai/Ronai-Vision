@@ -1,5 +1,6 @@
 import express from "express";
 import cameraStorage from "../services/cameraStorage.js";
+import autoFocusService from "../services/autoFocusService.js";
 
 const router = express.Router();
 
@@ -285,6 +286,110 @@ router.post("/:id/snapshot", async (req, res) => {
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
+});
+
+/**
+ * POST /api/cameras/:id/select
+ * Select camera in UI (emits socket event)
+ */
+router.post("/:id/select", async (req, res) => {
+    try {
+        const cameraId = req.params.id;
+        const camera = await cameraStorage.findOne({ cameraId });
+
+        if (!camera) {
+            return res.status(404).json({ error: "Camera not found" });
+        }
+
+        // Update auto focus service with current camera
+        autoFocusService.setCurrentCamera(cameraId);
+
+        // Notify clients
+        const io = req.app.get("io");
+        io.emit("camera:selected", cameraId);
+
+        res.json({ message: "Camera selected", cameraId });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+/**
+ * POST /api/cameras/auto-focus
+ * Auto-focus camera with priority and return timeout (Feature 6)
+ */
+router.post("/auto-focus", async (req, res) => {
+    try {
+        const {
+            cameraId,
+            priority = "high",
+            returnTimeout = 30,
+            showIndicator = true,
+            reason = "Event triggered",
+            eventType = "detection",
+            severity = "warning"
+        } = req.body;
+
+        if (!cameraId) {
+            return res.status(400).json({ error: "cameraId is required" });
+        }
+
+        const camera = await cameraStorage.findOne({ cameraId });
+        if (!camera) {
+            return res.status(404).json({ error: "Camera not found" });
+        }
+
+        // Set IO on auto focus service
+        const io = req.app.get("io");
+        autoFocusService.setIO(io);
+
+        // Evaluate and potentially switch camera
+        const switched = autoFocusService.evaluateEvent(
+            { title: reason },
+            cameraId,
+            severity,
+            {
+                priority,
+                returnTimeout,
+                showIndicator,
+                reason,
+                eventId: Date.now().toString()
+            }
+        );
+
+        res.json({
+            success: true,
+            switched,
+            state: autoFocusService.getState()
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+/**
+ * GET /api/cameras/auto-focus/state
+ * Get current auto-focus state
+ */
+router.get("/auto-focus/state", (req, res) => {
+    res.json(autoFocusService.getState());
+});
+
+/**
+ * POST /api/cameras/auto-focus/cancel
+ * Cancel auto-focus and return to original camera
+ */
+router.post("/auto-focus/cancel", (req, res) => {
+    const { reason = "manual_override" } = req.body;
+
+    const io = req.app.get("io");
+    autoFocusService.setIO(io);
+    autoFocusService.cancel(reason);
+
+    res.json({
+        success: true,
+        message: "Auto-focus cancelled"
+    });
 });
 
 /**

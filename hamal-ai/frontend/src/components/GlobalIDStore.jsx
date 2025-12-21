@@ -3,6 +3,13 @@ import { useApp } from '../context/AppContext';
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3000';
 
+// Helper to check if a value is a valid analysis result (not a placeholder)
+const isValidValue = (value) => {
+  if (!value) return false;
+  const placeholders = ['לא זוהה', 'לא נראה', 'לא נראה בבירור', 'לא ידוע', 'null', 'undefined'];
+  return !placeholders.includes(String(value).toLowerCase().trim());
+};
+
 export default function GlobalIDStore({ isOpen, onClose }) {
   const { socket } = useApp();
   const [objects, setObjects] = useState([]);
@@ -546,31 +553,31 @@ function ObjectDetail({ object, onRefreshAnalysis }) {
             <>
               <div>
                 <span className="text-gray-400">צבע:</span>{' '}
-                <span className={!object.analysis?.color ? 'text-gray-500 italic' : ''}>
-                  {object.analysis?.color || 'לא זוהה'}
+                <span className={!isValidValue(object.analysis?.color) ? 'text-gray-500 italic' : ''}>
+                  {isValidValue(object.analysis?.color) ? object.analysis.color : 'לא זוהה'}
                 </span>
               </div>
               <div>
                 <span className="text-gray-400">יצרן:</span>{' '}
-                <span className={!object.analysis?.make ? 'text-gray-500 italic' : ''}>
-                  {object.analysis?.make || 'לא זוהה'}
+                <span className={!isValidValue(object.analysis?.manufacturer) ? 'text-gray-500 italic' : ''}>
+                  {isValidValue(object.analysis?.manufacturer) ? object.analysis.manufacturer : 'לא זוהה'}
                 </span>
               </div>
               <div>
                 <span className="text-gray-400">דגם:</span>{' '}
-                <span className={!object.analysis?.model ? 'text-gray-500 italic' : ''}>
-                  {object.analysis?.model || 'לא זוהה'}
+                <span className={!isValidValue(object.analysis?.model) ? 'text-gray-500 italic' : ''}>
+                  {isValidValue(object.analysis?.model) ? object.analysis.model : 'לא זוהה'}
                 </span>
               </div>
               <div>
                 <span className="text-gray-400">סוג רכב:</span>{' '}
-                <span className={!object.analysis?.vehicleType ? 'text-gray-500 italic' : ''}>
-                  {object.analysis?.vehicleType || 'לא זוהה'}
+                <span className={!isValidValue(object.analysis?.vehicleType) ? 'text-gray-500 italic' : ''}>
+                  {isValidValue(object.analysis?.vehicleType) ? object.analysis.vehicleType : 'לא זוהה'}
                 </span>
               </div>
               <div className="col-span-2">
                 <span className="text-gray-400">לוחית רישוי:</span>{' '}
-                {object.analysis?.licensePlate ? (
+                {isValidValue(object.analysis?.licensePlate) ? (
                   <span className="text-lg font-mono bg-yellow-100 text-black px-2 py-1 rounded mr-2">
                     {object.analysis.licensePlate}
                   </span>

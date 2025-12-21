@@ -42,9 +42,42 @@ class GStreamerRTSPReader:
         on_frame: Optional[Callable[[np.ndarray], None]] = None
     ):
         self.camera_id = camera_id
-        self.rtsp_url = rtsp_url
         self.config = config or GStreamerConfig()
         self.on_frame = on_frame
+
+        # Resolve local file paths relative to Ronai-Vision root
+        self.is_local_file = False
+        if not rtsp_url.startswith(('rtsp://', 'http://', 'https://', 'rtmp://', 'udp://')):
+            # Local file path - resolve relative to Ronai-Vision root
+            # Path: .../Ronai-Vision/hamal-ai/ai-service/services/streaming/gstreamer_rtsp.py
+            # We need to go up 5 levels to reach Ronai-Vision
+            from pathlib import Path
+            script_dir = Path(__file__).parent  # .../services/streaming
+            project_root = script_dir.parent.parent.parent.parent  # Ronai-Vision root
+
+            # Clean up the path (remove leading slash if present for relative paths)
+            clean_path = rtsp_url.lstrip('/')
+
+            # Try as relative path first (from project root)
+            video_path = project_root / clean_path
+
+            # If doesn't exist as relative, try as absolute
+            if not video_path.exists() and Path(rtsp_url).is_absolute():
+                video_path = Path(rtsp_url)
+
+            # Convert to absolute path
+            resolved_path = str(video_path.absolute())
+
+            # Check if file exists
+            if video_path.exists():
+                logger.info(f"Camera {camera_id}: ✓ Resolved local video: {resolved_path}")
+                rtsp_url = resolved_path
+                self.is_local_file = True
+            else:
+                logger.error(f"Camera {camera_id}: ✗ Video file not found: {resolved_path}")
+                logger.error(f"Camera {camera_id}: Looked in project root: {project_root}")
+
+        self.rtsp_url = rtsp_url
 
         self._process: Optional[subprocess.Popen] = None
         self._thread: Optional[threading.Thread] = None
@@ -106,49 +139,74 @@ class GStreamerRTSPReader:
     def _build_gstreamer_pipeline(self) -> str:
         """Build GStreamer pipeline string.
 
-        Pipeline stages:
+        For RTSP streams:
         1. rtspsrc: RTSP source with TCP transport and jitter buffer
         2. rtph264depay: Extract H.264 from RTP
         3. h264parse: Parse H.264 stream with error recovery
-        4. avdec_h264/vtdec_hw: Decode H.264 (VideoToolbox on Mac, software fallback)
+        4. avdec_h264: Decode H.264
         5. videoconvert: Convert to BGR for OpenCV
         6. videoscale: Scale to target resolution
         7. videorate: Control frame rate
         8. fdsink: Output to stdout for reading
+
+        For local video files:
+        1. filesrc: Read from local file
+        2. decodebin: Auto-detect and decode any video format
+        3. videoconvert: Convert to BGR for OpenCV
+        4. videoscale: Scale to target resolution
+        5. videorate: Control frame rate
+        6. fdsink: Output to stdout for reading
         """
-        # Use TCP for reliability
-        protocols = "tcp" if self.config.tcp else "udp"
+        if self.is_local_file:
+            # Local video file pipeline
+            # Using filesrc + decodebin for robust format detection
+            # The reconnect logic in _stream_loop will restart the video when it ends (loop)
+            pipeline = (
+                f'filesrc location="{self.rtsp_url}" '
+                f'! decodebin '
+                f'! videoconvert '
+                f'! video/x-raw,format=BGR '
+                f'! videoscale '
+                f'! video/x-raw,width={self.config.width},height={self.config.height} '
+                f'! videorate '
+                f'! video/x-raw,framerate={self.config.fps}/1 '
+                f'! fdsink fd=1'
+            )
+            logger.info(f"Camera {self.camera_id}: Using local file pipeline (auto-loops on EOF)")
+        else:
+            # RTSP stream pipeline
+            protocols = "tcp" if self.config.tcp else "udp"
 
-        # Base pipeline with robust RTSP source
-        pipeline = (
-            f'rtspsrc location="{self.rtsp_url}" '
-            f'protocols={protocols} '
-            f'latency={self.config.latency} '
-            f'buffer-mode=auto '
-            f'drop-on-latency=true '
-            f'ntp-sync=false '
-            f'retry=5 '
-            f'timeout=5000000 '
-            f'! rtph264depay '
-            f'! h264parse config-interval=-1 '  # Send SPS/PPS with every IDR
-        )
+            # Base pipeline with robust RTSP source
+            pipeline = (
+                f'rtspsrc location="{self.rtsp_url}" '
+                f'protocols={protocols} '
+                f'latency={self.config.latency} '
+                f'buffer-mode=auto '
+                f'drop-on-latency=true '
+                f'ntp-sync=false '
+                f'retry=5 '
+                f'timeout=5000000 '
+                f'! rtph264depay '
+                f'! h264parse config-interval=-1 '  # Send SPS/PPS with every IDR
+            )
 
-        # Try hardware decoding first (VideoToolbox on Mac), fallback to software
-        # Note: vtdec_hw may not be available on all systems
-        pipeline += (
-            '! avdec_h264 skip-frame=default max-threads=2 direct-rendering=true '
-        )
+            # Try hardware decoding first (VideoToolbox on Mac), fallback to software
+            # Note: vtdec_hw may not be available on all systems
+            pipeline += (
+                '! avdec_h264 skip-frame=default max-threads=2 direct-rendering=true '
+            )
 
-        # Video processing
-        pipeline += (
-            f'! videoconvert '
-            f'! video/x-raw,format=BGR '
-            f'! videoscale '
-            f'! video/x-raw,width={self.config.width},height={self.config.height} '
-            f'! videorate '
-            f'! video/x-raw,framerate={self.config.fps}/1 '
-            f'! fdsink fd=1'  # Output to stdout
-        )
+            # Video processing
+            pipeline += (
+                f'! videoconvert '
+                f'! video/x-raw,format=BGR '
+                f'! videoscale '
+                f'! video/x-raw,width={self.config.width},height={self.config.height} '
+                f'! videorate '
+                f'! video/x-raw,framerate={self.config.fps}/1 '
+                f'! fdsink fd=1'  # Output to stdout
+            )
 
         return pipeline
 
@@ -164,11 +222,15 @@ class GStreamerRTSPReader:
                 self._process = None
 
             pipeline = self._build_gstreamer_pipeline()
-            logger.info(f"Starting GStreamer for {self.camera_id}...")
+            logger.info(f"Starting GStreamer for {self.camera_id} (local_file={self.is_local_file})...")
             logger.debug(f"Pipeline: {pipeline}")
 
+            # Use shell=True to properly handle the pipeline string with quotes
+            # This ensures file paths and URLs with special characters work correctly
+            full_cmd = f'gst-launch-1.0 -q -e {pipeline}'
             self._process = subprocess.Popen(
-                ['gst-launch-1.0', '-q', '-e'] + pipeline.split(),
+                full_cmd,
+                shell=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 bufsize=10**7
@@ -263,6 +325,7 @@ class GStreamerRTSPReader:
         return {
             "camera_id": self.camera_id,
             "backend": "gstreamer",
+            "source_type": "local_file" if self.is_local_file else "rtsp",
             "connected": self._connected,
             "frames_read": self._frames_read,
             "reconnects": self._reconnects,

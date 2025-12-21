@@ -223,10 +223,13 @@ class RTSPStreamManager:
                 return True  # Already running
 
         # Check if this is a local file path (not a network URL)
-        if not rtsp_url.startswith(('rtsp://', 'http://', 'https://', 'rtmp://', 'udp://')):
+        is_local_file = not rtsp_url.startswith(('rtsp://', 'http://', 'https://', 'rtmp://', 'udp://'))
+        if is_local_file:
             # Local file path - resolve relative to Ronai-Vision root
-            script_dir = Path(__file__).parent
-            project_root = script_dir.parent.parent  # Ronai-Vision root
+            # Path: .../Ronai-Vision/hamal-ai/ai-service/main.py
+            # We need to go up 3 levels to reach Ronai-Vision
+            script_dir = Path(__file__).parent  # .../hamal-ai/ai-service
+            project_root = script_dir.parent.parent.parent  # Ronai-Vision root
             clean_path = rtsp_url.lstrip('/')
             video_path = project_root / clean_path
 
@@ -292,7 +295,8 @@ class RTSPStreamManager:
                 "running": True,
                 "last_update": time.time(),
                 "error": None,
-                "reconnect_count": 0
+                "reconnect_count": 0,
+                "is_local_file": is_local_file  # Track if this is a local video file
             }
             self.streams[camera_id] = stream_data
 
@@ -311,6 +315,7 @@ class RTSPStreamManager:
         - Tolerates occasional frame drops (common with H.264 streams)
         - Only reconnects after sustained failures
         - Uses exponential backoff for reconnects
+        - For local video files: loops back to start on EOF instead of reconnecting
         """
         consecutive_errors = 0
         max_consecutive_errors = 50  # Increased tolerance (~5 seconds at 10fps)
@@ -328,6 +333,7 @@ class RTSPStreamManager:
                     break
                 cap = stream["cap"]
                 stream_url = stream.get("url", "")
+                is_local_file = stream.get("is_local_file", False)
 
             # Read frame
             ret, frame = cap.read()
@@ -341,6 +347,19 @@ class RTSPStreamManager:
                         self.streams[camera_id]["last_update"] = time.time()
                         self.streams[camera_id]["error"] = None
             else:
+                # For local video files, loop back to start on EOF
+                if is_local_file:
+                    # Check if this is EOF (video ended)
+                    current_pos = cap.get(cv2.CAP_PROP_POS_FRAMES)
+                    total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+
+                    if total_frames > 0 and current_pos >= total_frames - 1:
+                        # Video ended - loop back to start
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        logger.debug(f"Camera {camera_id}: Video looped back to start")
+                        consecutive_errors = 0
+                        continue
+
                 consecutive_errors += 1
 
                 # Only log periodically to avoid spam
@@ -454,7 +473,7 @@ async def health():
         "device": DEVICE,
         "model": MODEL_PATH,
         "gemini_configured": gemini.is_configured(),
-        "tts_engine": tts.engine_type if tts.is_configured() else None,
+        "tts_engine": tts.get_engine_info() if tts.is_configured() else None,
         "weapon_detector": weapon_detector is not None,
         "tracker_stats": tracker.get_stats(),
         "active_streams": stream_manager.get_active_streams()
@@ -1281,13 +1300,21 @@ async def refresh_analysis(
     obj_type = None
     bbox = None
 
+    # Normalize track_id to ensure consistent format
+    # BoT-SORT uses "t_X" format for persons, but input might be "t_5", "p_5", or just "5"
+    normalized_track_id = track_id
+    if not any(track_id.startswith(p) for p in ['t_', 'v_', 'p_']):
+        # No prefix - assume it's a number, try to find it in any tracker
+        pass  # Will search all types below
+
     # Check if it's a person (track IDs starting with 't_' or 'p_')
     if track_id.startswith('t_') or track_id.startswith('p_'):
         obj_type = 'person'
-        # First check BoT-SORT (main tracker)
+        # First check BoT-SORT (main tracker) - compare string track_id
         if bot_sort:
             for track in bot_sort.get_active_tracks('person'):
-                if track.track_id == gid:
+                # BoT-SORT uses "t_X" format, compare with input track_id
+                if track.track_id == track_id or track.track_id == f"t_{gid}":
                     obj = track
                     bbox = track.bbox  # (x, y, w, h) format
                     if not camera_id:
@@ -1296,7 +1323,7 @@ async def refresh_analysis(
         # Fallback to stable tracker
         if not obj:
             for person in stable_tracker.get_all_persons():
-                if person.track_id == gid:
+                if person.track_id == gid or str(person.track_id) == str(gid):
                     obj = person
                     bbox = person.bbox
                     if not camera_id:
@@ -1306,10 +1333,10 @@ async def refresh_analysis(
     # Check if it's a vehicle
     elif track_id.startswith('v_'):
         obj_type = 'vehicle'
-        # First check BoT-SORT (main tracker)
+        # First check BoT-SORT (main tracker) - compare string track_id
         if bot_sort:
             for track in bot_sort.get_active_tracks('vehicle'):
-                if track.track_id == gid:
+                if track.track_id == track_id or track.track_id == f"v_{gid}":
                     obj = track
                     bbox = track.bbox  # (x, y, w, h) format
                     if not camera_id:
@@ -1318,17 +1345,19 @@ async def refresh_analysis(
         # Fallback to stable tracker
         if not obj:
             for vehicle in stable_tracker.get_all_vehicles():
-                if vehicle.track_id == gid:
+                if vehicle.track_id == gid or str(vehicle.track_id) == str(gid):
                     obj = vehicle
                     bbox = vehicle.bbox
                     if not camera_id:
                         camera_id = vehicle.camera_id
                     break
     else:
-        # Try both types in BoT-SORT first
+        # No prefix or unknown prefix - try both types in BoT-SORT first
+        # Try to match by numeric ID (gid) with any prefix
         if bot_sort:
             for track in bot_sort.get_active_tracks('person'):
-                if track.track_id == gid:
+                # Match by numeric part or exact string
+                if track.track_id == track_id or track.track_id == f"t_{gid}" or track.track_id == f"p_{gid}":
                     obj = track
                     obj_type = 'person'
                     bbox = track.bbox
@@ -1337,7 +1366,7 @@ async def refresh_analysis(
                     break
             if not obj:
                 for track in bot_sort.get_active_tracks('vehicle'):
-                    if track.track_id == gid:
+                    if track.track_id == track_id or track.track_id == f"v_{gid}":
                         obj = track
                         obj_type = 'vehicle'
                         bbox = track.bbox
@@ -1347,7 +1376,7 @@ async def refresh_analysis(
         # Fallback to stable tracker
         if not obj:
             for person in stable_tracker.get_all_persons():
-                if person.track_id == gid:
+                if person.track_id == gid or str(person.track_id) == str(gid):
                     obj = person
                     obj_type = 'person'
                     bbox = person.bbox
@@ -1356,7 +1385,7 @@ async def refresh_analysis(
                     break
         if not obj:
             for vehicle in stable_tracker.get_all_vehicles():
-                if vehicle.track_id == gid:
+                if vehicle.track_id == gid or str(vehicle.track_id) == str(gid):
                     obj = vehicle
                     obj_type = 'vehicle'
                     bbox = vehicle.bbox
@@ -1540,7 +1569,7 @@ async def startup_event():
 ║   Device: {DEVICE.ljust(10)}                                ║
 ║   Model: {MODEL_PATH.ljust(12)}                            ║
 ║   Gemini: {'✅' if gemini.is_configured() else '❌'}                                        ║
-║   TTS: {tts.engine_type or '❌'}                                     ║
+║   TTS: {'✅ Gemini (' + tts.voice + ')' if tts.is_configured() else '❌'}                    ║
 ║   Weapon Det: {'✅' if weapon_detector else '❌'}                                   ║
 ║   Backend: {BACKEND_URL}                 ║
 ║                                                        ║
@@ -1820,7 +1849,7 @@ async def realtime_stats():
             "reid_extractions": detection_stats.get("reid_extractions", 0),
             "reid_recoveries": detection_stats.get("reid_recoveries", 0),
             "events_sent": detection_stats.get("events_sent", 0),
-            "gemini_calls": detection_stats.get("gemini_calls", 0),
+            "gemini_calls": gemini.get_call_count() if gemini else 0,
             "frames_dropped": detection_stats.get("frames_dropped_stale", 0),
         },
 
@@ -2051,6 +2080,18 @@ async def start_camera_detection(camera_id: str):
 async def stop_camera_detection(camera_id: str):
     """Stop detection for a specific camera."""
     get_rtsp_manager().remove_camera(camera_id)
+
+    # Clear tracks for this camera to prevent stale events
+    if bot_sort:
+        bot_sort.clear_camera_tracks(camera_id)
+
+    # Stop any active recordings for this camera
+    from services.recording import get_recording_manager
+    recording_manager = get_recording_manager()
+    if recording_manager and recording_manager.is_recording(camera_id):
+        recording_manager.stop_recording(camera_id)
+        logger.info(f"Stopped recording for disconnected camera {camera_id}")
+
     return {"status": "stopped", "camera_id": camera_id}
 
 

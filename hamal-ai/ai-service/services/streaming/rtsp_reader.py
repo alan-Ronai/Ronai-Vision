@@ -46,10 +46,10 @@ class FFmpegRTSPReader:
         # Resolve local file paths relative to Ronai-Vision root
         if not rtsp_url.startswith(('rtsp://', 'http://', 'https://', 'rtmp://', 'udp://')):
             # Local file path - resolve relative to Ronai-Vision root
-            # Current file is at: Ronai-Vision/hamal-ai/ai-service/services/rtsp_reader.py
-            # Root is three levels up: ../../../
-            script_dir = Path(__file__).parent
-            project_root = script_dir.parent.parent.parent  # Ronai-Vision root
+            # Path: .../Ronai-Vision/hamal-ai/ai-service/services/streaming/rtsp_reader.py
+            # We need to go up 5 levels to reach Ronai-Vision
+            script_dir = Path(__file__).parent  # .../services/streaming
+            project_root = script_dir.parent.parent.parent.parent  # Ronai-Vision root
 
             # Clean up the path (remove leading slash if present for relative paths)
             clean_path = rtsp_url.lstrip('/')

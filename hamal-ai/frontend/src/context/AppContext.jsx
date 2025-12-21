@@ -21,6 +21,18 @@ export function AppProvider({ children }) {
   // Simulation popup
   const [simulationPopup, setSimulationPopup] = useState(null);
 
+  // Auto-focus state (Feature 6)
+  const [autoFocusState, setAutoFocusState] = useState({
+    active: false,
+    cameraId: null,
+    previousCameraId: null,
+    reason: null,
+    priority: null,
+    autoReturn: false,
+    returnTimeout: 0,
+    showIndicator: true
+  });
+
   // Loading states
   const [loading, setLoading] = useState(true);
 
@@ -143,6 +155,60 @@ export function AppProvider({ children }) {
       );
     });
 
+    // Auto-focus events (Feature 6)
+    newSocket.on('camera:auto-focus', (data) => {
+      console.log('Auto-focus triggered:', data);
+      setSelectedCamera(data.newCameraId);
+      setAutoFocusState({
+        active: true,
+        cameraId: data.newCameraId,
+        previousCameraId: data.previousCameraId,
+        reason: data.reason,
+        priority: data.priority,
+        autoReturn: data.autoReturn,
+        returnTimeout: data.returnTimeout,
+        showIndicator: data.showIndicator
+      });
+    });
+
+    newSocket.on('camera:auto-focus-return', (data) => {
+      console.log('Auto-focus returning to original camera:', data);
+      setSelectedCamera(data.returnToCameraId);
+      setAutoFocusState({
+        active: false,
+        cameraId: null,
+        previousCameraId: null,
+        reason: null,
+        priority: null,
+        autoReturn: false,
+        returnTimeout: 0,
+        showIndicator: true
+      });
+    });
+
+    newSocket.on('camera:auto-focus-cancelled', (data) => {
+      console.log('Auto-focus cancelled:', data);
+      if (data.returnToCameraId) {
+        setSelectedCamera(data.returnToCameraId);
+      }
+      setAutoFocusState({
+        active: false,
+        cameraId: null,
+        previousCameraId: null,
+        reason: null,
+        priority: null,
+        autoReturn: false,
+        returnTimeout: 0,
+        showIndicator: true
+      });
+    });
+
+    // Stolen vehicle events (Feature 1)
+    newSocket.on('stolen-vehicle:detected', (data) => {
+      console.log('Stolen vehicle detected:', data);
+      // The event system will handle alerts
+    });
+
     // Listen for play sound events from rule engine
     newSocket.on('system:play-sound', (data) => {
       console.log('Play sound event:', data);
@@ -260,6 +326,29 @@ export function AppProvider({ children }) {
     setSimulationPopup(null);
   }, []);
 
+  // Cancel auto-focus (Feature 6)
+  const cancelAutoFocus = useCallback(async () => {
+    try {
+      await fetch(`${API_URL}/api/cameras/auto-focus/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: 'user_cancelled' })
+      });
+    } catch (error) {
+      console.error('Error cancelling auto-focus:', error);
+    }
+    setAutoFocusState({
+      active: false,
+      cameraId: null,
+      previousCameraId: null,
+      reason: null,
+      priority: null,
+      autoReturn: false,
+      returnTimeout: 0,
+      showIndicator: true
+    });
+  }, []);
+
   // Select camera
   const selectCamera = useCallback((cameraId) => {
     setSelectedCamera(cameraId);
@@ -332,7 +421,10 @@ export function AppProvider({ children }) {
     loading,
     triggerSimulation,
     createDemoEvent,
-    API_URL
+    API_URL,
+    // Feature 6: Auto-focus
+    autoFocusState,
+    cancelAutoFocus
   };
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
