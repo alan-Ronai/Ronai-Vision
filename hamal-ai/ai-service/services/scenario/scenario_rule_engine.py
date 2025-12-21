@@ -159,8 +159,24 @@ class ScenarioRuleEngine:
         if not self.active_scenario:
             return False
 
-        # Add person to context
-        self.active_scenario.persons.append(person_data)
+        # Deduplicate: Check if this person (by track_id) is already in the list
+        track_id = person_data.get('trackId') or person_data.get('track_id')
+        existing_idx = None
+        for i, p in enumerate(self.active_scenario.persons):
+            p_track_id = p.get('trackId') or p.get('track_id')
+            if p_track_id == track_id:
+                existing_idx = i
+                break
+
+        if existing_idx is not None:
+            # Update existing person data instead of adding duplicate
+            self.active_scenario.persons[existing_idx] = person_data
+            logger.debug(f"Updated existing armed person track {track_id}")
+        else:
+            # New person - add to context
+            self.active_scenario.persons.append(person_data)
+            logger.debug(f"Added new armed person track {track_id}")
+
         self.active_scenario.armed_count = len([p for p in self.active_scenario.persons if p.get('armed')])
 
         logger.info(f"Armed person detected. Total: {self.active_scenario.armed_count}")

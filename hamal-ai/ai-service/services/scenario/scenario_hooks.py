@@ -393,6 +393,45 @@ class ScenarioHooks:
         self._reported_persons.clear()
         logger.info("[ScenarioHooks] Reported tracks cache cleared")
 
+    def clear_camera_state(self, camera_id: str):
+        """Clear all state related to a specific camera.
+
+        Called when a camera is deleted/stopped to prevent:
+        - Ghost tracks
+        - Stale armed person counts
+        - Events continuing after camera removal
+        """
+        # Clear reported persons/vehicles for this camera
+        # Since we track by track_id (integer), we also need to clear the rule engine state
+
+        # Reset all reported tracks (can't filter by camera since we only store track_id)
+        # This is conservative but ensures clean state
+        self._reported_vehicles.clear()
+        self._reported_persons.clear()
+
+        # Clear the rule engine scenario context for this camera
+        try:
+            rule_engine = _get_rule_engine()
+            if rule_engine.active_scenario:
+                # Filter out persons from this camera
+                original_count = len(rule_engine.active_scenario.persons)
+                rule_engine.active_scenario.persons = [
+                    p for p in rule_engine.active_scenario.persons
+                    if p.get('cameraId') != camera_id
+                ]
+                # Recalculate armed count
+                rule_engine.active_scenario.armed_count = len([
+                    p for p in rule_engine.active_scenario.persons
+                    if p.get('armed')
+                ])
+                removed = original_count - len(rule_engine.active_scenario.persons)
+                if removed > 0:
+                    logger.info(f"[ScenarioHooks] Cleared {removed} persons from scenario for camera {camera_id}")
+        except Exception as e:
+            logger.debug(f"[ScenarioHooks] Rule engine clear error: {e}")
+
+        logger.info(f"[ScenarioHooks] Cleared state for camera {camera_id}")
+
     def set_enabled(self, enabled: bool):
         """Enable or disable hooks."""
         self.enabled = enabled

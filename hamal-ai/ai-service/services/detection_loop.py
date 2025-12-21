@@ -33,6 +33,7 @@ from .rules import RuleEngine, RuleContext, get_rule_engine
 from .recording import get_frame_buffer, get_recording_manager
 from .frame_selection import get_analysis_buffer, AnalysisBuffer, get_image_enhancer, ImageEnhancer
 from .scenario import get_scenario_hooks, VehicleData, PersonData
+from .parallel_detection import ParallelDetectionIntegration
 
 logger = logging.getLogger(__name__)
 
@@ -537,6 +538,31 @@ class DetectionLoop:
         self.scenario_hooks = get_scenario_hooks()
         logger.info("✅ Scenario hooks initialized for Armed Attack demo")
 
+        # Parallel Detection Pipeline (optional, enabled via env var)
+        # When enabled, uses multiple YOLO workers with dynamic scaling
+        self._use_parallel_detection = os.environ.get("USE_PARALLEL_DETECTION", "false").lower() == "true"
+        self.parallel_integration: Optional[ParallelDetectionIntegration] = None
+
+        if self._use_parallel_detection:
+            max_workers = int(os.environ.get("PARALLEL_NUM_WORKERS", "3"))
+            bootstrap_frames = int(os.environ.get("PARALLEL_BOOTSTRAP_FRAMES", "30"))
+            scale_up_after = int(os.environ.get("PARALLEL_SCALE_UP_FRAMES", "50"))
+            scale_interval = int(os.environ.get("PARALLEL_SCALE_INTERVAL", "30"))
+
+            self.parallel_integration = ParallelDetectionIntegration(
+                detection_loop=self,
+                max_workers=max_workers,
+                bootstrap_frames=bootstrap_frames,
+                scale_up_after=scale_up_after,
+                scale_interval=scale_interval,
+            )
+            logger.info(
+                f"✅ Parallel detection ENABLED: max_workers={max_workers}, "
+                f"bootstrap={bootstrap_frames}, scale_up_after={scale_up_after}"
+            )
+        else:
+            logger.info("⚠️ Parallel detection DISABLED (set USE_PARALLEL_DETECTION=true to enable)")
+
     def on_frame(self, camera_id: str, frame: np.ndarray):
         """Callback when frame received from RTSP reader.
 
@@ -582,6 +608,11 @@ class DetectionLoop:
         self._start_time = time.time()
         self._http_client = httpx.AsyncClient(timeout=30.0)
 
+        # Initialize parallel detection if enabled
+        if self._use_parallel_detection and self.parallel_integration:
+            self.parallel_integration.initialize()
+            logger.info("✅ Parallel detection pipeline initialized")
+
         # Start processing thread
         self._process_thread = threading.Thread(target=self._process_loop, daemon=True)
         self._process_thread.start()
@@ -597,6 +628,11 @@ class DetectionLoop:
     async def stop(self):
         """Stop the detection loop."""
         self._running = False
+
+        # Stop parallel detection if enabled
+        if self._use_parallel_detection and self.parallel_integration:
+            self.parallel_integration.shutdown()
+            logger.info("Parallel detection pipeline shutdown")
 
         # Stop the rule engine periodic timer
         await self.rule_engine.stop_periodic_timer()
@@ -614,6 +650,9 @@ class DetectionLoop:
 
         CRITICAL: Uses latest-frame-only approach to minimize latency.
         Always processes the most recent frame available, skipping stale frames.
+
+        When parallel detection is enabled, frames are submitted to the parallel
+        pipeline instead of being processed synchronously.
         """
         logger.info("Detection processing thread started")
 
@@ -665,27 +704,36 @@ class DetectionLoop:
 
                     last_process_time[camera_id] = time.time()
 
-                    # Run detection on LATEST frame
+                    # Use parallel detection if enabled, otherwise standard detection
+                    if self._use_parallel_detection and self.parallel_integration:
+                        # Submit to parallel pipeline (async processing)
+                        # Results are handled by ParallelDetectionIntegration._emit_result()
+                        self.parallel_integration.submit_frame(camera_id, frame, timestamp)
+                        self._stats["frames_processed"] += 1
+                        # Don't process result here - parallel integration handles it
+                        continue
+
+                    # Standard sequential detection
                     result = self._detect_frame(camera_id, frame)
 
-                if result:
-                    self._stats["frames_processed"] += 1
+                    if result:
+                        self._stats["frames_processed"] += 1
 
-                    # Store annotated frame
-                    if result.annotated_frame is not None:
-                        with self._frame_lock:
-                            self._annotated_frames[camera_id] = result.annotated_frame
+                        # Store annotated frame
+                        if result.annotated_frame is not None:
+                            with self._frame_lock:
+                                self._annotated_frames[camera_id] = result.annotated_frame
 
-                    # Queue result for async processing
-                    if (
-                        result.new_vehicles
-                        or result.new_persons
-                        or result.armed_persons
-                    ):
-                        try:
-                            self._result_queue.put_nowait(result)
-                        except:
-                            pass
+                        # Queue result for async processing
+                        if (
+                            result.new_vehicles
+                            or result.new_persons
+                            or result.armed_persons
+                        ):
+                            try:
+                                self._result_queue.put_nowait(result)
+                            except Exception:
+                                pass
 
             except Exception as e:
                 logger.error(f"Detection loop error: {e}")
@@ -1290,9 +1338,13 @@ class DetectionLoop:
         This creates the image that appears in GlobalIDStore UI.
         It's the ENHANCED optimal frame, not the first detection frame.
 
+        IMPORTANT: The frame may already be a crop from AnalysisBuffer.
+        We detect this by comparing frame dimensions to bbox dimensions.
+        If frame is already a crop, use the entire frame as cutout.
+
         Args:
-            frame: Enhanced frame (BGR numpy array)
-            bbox: Bounding box (x1, y1, x2, y2)
+            frame: Enhanced frame (BGR numpy array) - may be full frame or crop
+            bbox: Bounding box (x1, y1, x2, y2) - always in original frame coordinates
             class_name: Object class for logging
             max_size: Maximum dimension for output
             jpeg_quality: JPEG quality (1-100)
@@ -1305,31 +1357,50 @@ class DetectionLoop:
             if frame is None or frame.size == 0:
                 return None
 
-            x1, y1, x2, y2 = [int(v) for v in bbox]
             h, w = frame.shape[:2]
+            x1, y1, x2, y2 = [int(v) for v in bbox]
 
-            # Calculate bbox dimensions
+            # Calculate expected bbox dimensions
             bbox_w = x2 - x1
             bbox_h = y2 - y1
 
             if bbox_w <= 0 or bbox_h <= 0:
                 return None
 
-            # Add margin around the bbox
-            margin_x = int(bbox_w * margin_percent)
-            margin_y = int(bbox_h * margin_percent)
+            # CRITICAL FIX: Detect if frame is already a crop from AnalysisBuffer
+            # If frame dimensions are close to bbox dimensions (with margin), it's already cropped
+            # AnalysisBuffer uses 25% margin, so expected crop size is ~1.5x bbox
+            expected_crop_w = int(bbox_w * 1.5)
+            expected_crop_h = int(bbox_h * 1.5)
 
-            # Expand bbox with margin, clamped to frame bounds
-            x1 = max(0, x1 - margin_x)
-            y1 = max(0, y1 - margin_y)
-            x2 = min(w, x2 + margin_x)
-            y2 = min(h, y2 + margin_y)
+            # If frame is small and close to expected crop size, it's already cropped
+            is_already_cropped = (
+                w <= expected_crop_w * 1.3 and  # Allow some tolerance
+                h <= expected_crop_h * 1.3 and
+                w < 800 and h < 800  # Full frames are typically larger
+            )
 
-            if x2 <= x1 or y2 <= y1:
-                return None
+            if is_already_cropped:
+                # Frame is already a crop - use entire frame as cutout
+                logger.debug(f"Frame already cropped for {class_name} ({w}x{h}), using entire frame")
+                crop = frame.copy()
+            else:
+                # Frame is full-size - need to crop
+                # Add margin around the bbox
+                margin_x = int(bbox_w * margin_percent)
+                margin_y = int(bbox_h * margin_percent)
 
-            # Crop the region with margin
-            crop = frame[y1:y2, x1:x2]
+                # Expand bbox with margin, clamped to frame bounds
+                x1 = max(0, x1 - margin_x)
+                y1 = max(0, y1 - margin_y)
+                x2 = min(w, x2 + margin_x)
+                y2 = min(h, y2 + margin_y)
+
+                if x2 <= x1 or y2 <= y1:
+                    return None
+
+                # Crop the region with margin
+                crop = frame[y1:y2, x1:x2]
 
             # Resize if too large (keep aspect ratio)
             crop_h, crop_w = crop.shape[:2]
@@ -1342,7 +1413,7 @@ class DetectionLoop:
             _, buffer = cv2.imencode('.jpg', crop, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
             base64_str = base64.b64encode(buffer).decode('utf-8')
 
-            logger.debug(f"Generated enhanced cutout for {class_name}: {len(base64_str)} bytes")
+            logger.debug(f"Generated enhanced cutout for {class_name}: {len(base64_str)} bytes (from {'crop' if is_already_cropped else 'full'})")
             return base64_str
 
         except Exception as e:
@@ -2210,12 +2281,17 @@ class DetectionLoop:
             await self.rule_engine.load_rules()
 
             # If no rules loaded, fall back to legacy behavior
+            # But ONLY if legacy behavior is explicitly enabled via environment variable
             if not self.rule_engine.rules:
-                logger.debug("No rules loaded, using legacy event handling")
-                if self.config.send_events:
-                    await self._send_events(result)
-                if result.armed_persons:
-                    await self._send_alert(result)
+                legacy_enabled = os.environ.get("LEGACY_ALERTS_ENABLED", "false").lower() == "true"
+                if legacy_enabled:
+                    logger.debug("No rules loaded, using legacy event handling (LEGACY_ALERTS_ENABLED=true)")
+                    if self.config.send_events:
+                        await self._send_events(result)
+                    if result.armed_persons:
+                        await self._send_alert(result)
+                else:
+                    logger.debug("No rules loaded and LEGACY_ALERTS_ENABLED=false, skipping legacy alerts")
                 return
 
             # Build list of detections for rule context
@@ -2312,11 +2388,13 @@ class DetectionLoop:
 
         except Exception as e:
             logger.error(f"Rule engine processing error: {e}", exc_info=True)
-            # Fall back to legacy behavior on error
-            if self.config.send_events:
-                await self._send_events(result)
-            if result.armed_persons:
-                await self._send_alert(result)
+            # Fall back to legacy behavior on error - but only if explicitly enabled
+            legacy_enabled = os.environ.get("LEGACY_ALERTS_ENABLED", "false").lower() == "true"
+            if legacy_enabled:
+                if self.config.send_events:
+                    await self._send_events(result)
+                if result.armed_persons:
+                    await self._send_alert(result)
 
     def _make_title(self, result: DetectionResult) -> str:
         """Generate Hebrew title."""
@@ -2396,6 +2474,13 @@ class DetectionLoop:
         # Include image enhancement stats
         if self._use_image_enhancement and self.image_enhancer:
             stats["image_enhancement"] = self.image_enhancer.get_stats()
+
+        # Include parallel detection stats
+        if self._use_parallel_detection and self.parallel_integration:
+            stats["parallel_detection"] = self.parallel_integration.get_stats()
+            stats["parallel_detection_enabled"] = True
+        else:
+            stats["parallel_detection_enabled"] = False
 
         return stats
 

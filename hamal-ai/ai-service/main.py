@@ -227,9 +227,9 @@ class RTSPStreamManager:
         if is_local_file:
             # Local file path - resolve relative to Ronai-Vision root
             # Path: .../Ronai-Vision/hamal-ai/ai-service/main.py
-            # We need to go up 3 levels to reach Ronai-Vision
+            # We need to go up 2 levels to reach Ronai-Vision
             script_dir = Path(__file__).parent  # .../hamal-ai/ai-service
-            project_root = script_dir.parent.parent.parent  # Ronai-Vision root
+            project_root = script_dir.parent.parent  # Ronai-Vision root
             clean_path = rtsp_url.lstrip('/')
             video_path = project_root / clean_path
 
@@ -1012,8 +1012,9 @@ async def detect_frame(
                     "analysis": analysis
                 })
 
-                # Check if armed - trigger emergency
-                if analysis.get("armed"):
+                # Check if armed - trigger emergency (only if legacy mode enabled)
+                # NOTE: Modern detection uses rule engine which controls when/if to trigger
+                if analysis.get("armed") and os.environ.get("LEGACY_ALERTS_ENABLED", "false").lower() == "true":
                     await trigger_emergency(
                         camera_id,
                         analysis,
@@ -1032,12 +1033,14 @@ async def detect_frame(
                     analysis = await gemini.analyze_person(frame, person["bbox"])
                     if analysis.get("armed"):
                         tracker.save_metadata(person["track_id"], {"analysis": analysis})
-                        await trigger_emergency(
-                            camera_id,
-                            analysis,
-                            tracked_persons,
-                            tracked_vehicles
-                        )
+                        # Only trigger if legacy mode enabled
+                        if os.environ.get("LEGACY_ALERTS_ENABLED", "false").lower() == "true":
+                            await trigger_emergency(
+                                camera_id,
+                                analysis,
+                                tracked_persons,
+                                tracked_vehicles
+                            )
 
     return {
         "camera_id": camera_id,
@@ -2046,6 +2049,30 @@ async def stop_camera(camera_id: str):
     except Exception as e:
         logger.warning(f"FFmpeg stream not found for {camera_id}: {e}")
 
+    # CRITICAL: Clear tracks for this camera to prevent ghost tracks and stale events
+    if bot_sort:
+        bot_sort.clear_camera_tracks(camera_id)
+        logger.info(f"Cleared tracks for {camera_id}")
+
+    # Stop any active recordings for this camera
+    try:
+        from services.recording import get_recording_manager
+        recording_manager = get_recording_manager()
+        if recording_manager and recording_manager.is_recording(camera_id):
+            recording_manager.stop_recording(camera_id)
+            logger.info(f"Stopped recording for {camera_id}")
+    except Exception as e:
+        logger.warning(f"Recording stop error for {camera_id}: {e}")
+
+    # Clear scenario hooks state for this camera (prevents armed count carryover)
+    try:
+        from services.scenario.scenario_hooks import get_scenario_hooks
+        hooks = get_scenario_hooks()
+        hooks.clear_camera_state(camera_id)
+        logger.info(f"Cleared scenario state for {camera_id}")
+    except Exception as e:
+        logger.debug(f"Scenario hooks clear error for {camera_id}: {e}")
+
     return {
         "status": "stopped",
         "camera_id": camera_id,
@@ -2419,6 +2446,34 @@ async def reset_stable_tracker():
     return {"message": "Tracker reset", "stats": tracker.get_stats()}
 
 
+@app.get("/api/stream/debug/{camera_id}")
+async def stream_debug(camera_id: str):
+    """Debug endpoint to check stream state."""
+    detection_loop = get_detection_loop()
+    rtsp_manager = get_rtsp_manager()
+
+    state = {
+        "detection_loop_running": detection_loop._running if detection_loop else False,
+        "active_cameras": rtsp_manager.get_active_cameras(),
+        "pending_frames": list(detection_loop._latest_frames.keys()) if detection_loop else [],
+        "annotated_frames": list(detection_loop._annotated_frames.keys()) if detection_loop else [],
+        "camera_requested": camera_id,
+        "camera_in_active": camera_id in rtsp_manager.get_active_cameras(),
+        "has_annotated_frame": camera_id in detection_loop._annotated_frames if detection_loop else False,
+    }
+
+    # Get RTSP reader stats if available
+    reader = rtsp_manager.get_reader(camera_id) if hasattr(rtsp_manager, 'get_reader') else None
+    if reader:
+        state["reader_stats"] = reader.get_stats()
+
+    # Get detection loop stats
+    if detection_loop:
+        state["detection_stats"] = detection_loop.get_stats()
+
+    return state
+
+
 @app.get("/api/stream/annotated/{camera_id}")
 async def stream_annotated(camera_id: str, fps: Optional[int] = None):
     """
@@ -2435,6 +2490,13 @@ async def stream_annotated(camera_id: str, fps: Optional[int] = None):
     detection_loop = get_detection_loop()
     if not detection_loop:
         raise HTTPException(503, "Detection loop not running")
+
+    # Debug: Check current state
+    rtsp_manager = get_rtsp_manager()
+    active_cameras = rtsp_manager.get_active_cameras()
+    logger.info(f"[Stream] Request for {camera_id}, active cameras: {active_cameras}")
+    logger.info(f"[Stream] Detection loop running: {detection_loop._running}")
+    logger.info(f"[Stream] Annotated frames available: {list(detection_loop._annotated_frames.keys())}")
 
     # Use configured stream_fps if not explicitly provided
     if fps is None:

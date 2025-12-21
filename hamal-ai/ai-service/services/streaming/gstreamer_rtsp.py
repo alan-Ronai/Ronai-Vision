@@ -50,7 +50,7 @@ class GStreamerRTSPReader:
         if not rtsp_url.startswith(('rtsp://', 'http://', 'https://', 'rtmp://', 'udp://')):
             # Local file path - resolve relative to Ronai-Vision root
             # Path: .../Ronai-Vision/hamal-ai/ai-service/services/streaming/gstreamer_rtsp.py
-            # We need to go up 5 levels to reach Ronai-Vision
+            # script_dir = streaming, need 4 more parents to reach Ronai-Vision
             from pathlib import Path
             script_dir = Path(__file__).parent  # .../services/streaming
             project_root = script_dir.parent.parent.parent.parent  # Ronai-Vision root
