@@ -1493,10 +1493,52 @@ async def refresh_analysis(
 
     # Run Gemini analysis
     try:
+        # Get existing analysis to compare cutout quality
+        existing_cutout = None
+        existing_cutout_quality = 0
+        if hasattr(obj, 'metadata') and obj.metadata:
+            existing_analysis = obj.metadata.get('analysis', {})
+            existing_cutout = existing_analysis.get('cutout_image')
+            if existing_cutout:
+                # Calculate quality score for existing cutout (sharpness via Laplacian variance)
+                try:
+                    import base64
+                    existing_bytes = base64.b64decode(existing_cutout)
+                    existing_arr = np.frombuffer(existing_bytes, dtype=np.uint8)
+                    existing_img = cv2.imdecode(existing_arr, cv2.IMREAD_COLOR)
+                    if existing_img is not None:
+                        gray = cv2.cvtColor(existing_img, cv2.COLOR_BGR2GRAY)
+                        existing_cutout_quality = cv2.Laplacian(gray, cv2.CV_64F).var()
+                        logger.debug(f"Existing cutout quality: {existing_cutout_quality:.2f}")
+                except Exception as e:
+                    logger.debug(f"Could not calculate existing cutout quality: {e}")
+
         if obj_type == 'vehicle':
             analysis = await gemini.analyze_vehicle(frame, bbox)
         else:
             analysis = await gemini.analyze_person(frame, bbox)
+
+        # Compare cutout quality - keep the better one
+        new_cutout = analysis.get('cutout_image')
+        if new_cutout and existing_cutout:
+            try:
+                import base64
+                new_bytes = base64.b64decode(new_cutout)
+                new_arr = np.frombuffer(new_bytes, dtype=np.uint8)
+                new_img = cv2.imdecode(new_arr, cv2.IMREAD_COLOR)
+                if new_img is not None:
+                    gray = cv2.cvtColor(new_img, cv2.COLOR_BGR2GRAY)
+                    new_cutout_quality = cv2.Laplacian(gray, cv2.CV_64F).var()
+                    logger.info(f"Cutout quality comparison - Old: {existing_cutout_quality:.2f}, New: {new_cutout_quality:.2f}")
+
+                    # Keep old cutout if it's sharper (higher Laplacian variance = sharper)
+                    if existing_cutout_quality > new_cutout_quality:
+                        logger.info(f"Keeping original cutout (better quality: {existing_cutout_quality:.2f} > {new_cutout_quality:.2f})")
+                        analysis['cutout_image'] = existing_cutout
+                    else:
+                        logger.info(f"Using new cutout (better quality: {new_cutout_quality:.2f} > {existing_cutout_quality:.2f})")
+            except Exception as e:
+                logger.debug(f"Could not compare cutout quality: {e}")
 
         # Update tracker metadata
         if hasattr(obj, 'metadata'):
