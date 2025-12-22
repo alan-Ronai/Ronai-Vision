@@ -144,22 +144,100 @@ MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 os.makedirs(MODELS_DIR, exist_ok=True)
 logger.info(f"Models directory: {MODELS_DIR}")
 
-# Try to find model in various locations (prioritize ai-service/models)
-model_locations = [
-    os.path.join(MODELS_DIR, MODEL_PATH),  # Primary: ai-service/models/
-    MODEL_PATH,                             # Direct path if absolute
-    f"models/{MODEL_PATH}",                 # Relative
-]
 
-# Load main YOLO model
-yolo = None
-for model_path in model_locations:
-    if os.path.exists(model_path):
-        logger.info(f"Loading YOLO model from: {model_path}")
-        yolo = YOLO(model_path)
-        yolo.to(DEVICE)
-        logger.info(f"✅ YOLO {MODEL_PATH} loaded successfully on {DEVICE}")
-        break
+def load_yolo_model_optimized(model_name: str, device: str = "cpu") -> Optional[YOLO]:
+    """Load a YOLO model, preferring optimized formats when available.
+
+    Priority order:
+    - CUDA: TensorRT (.engine) > ONNX (.onnx) > PyTorch (.pt)
+    - CPU/MPS: ONNX (.onnx) > PyTorch (.pt)
+
+    TensorRT provides 2-5x faster inference on NVIDIA GPUs.
+    ONNX provides 20-40% faster inference on CPU.
+
+    To create optimized models:
+        yolo export model=yolov8m.pt format=engine device=0  # TensorRT (CUDA only)
+        yolo export model=yolov8m.pt format=onnx             # ONNX (works everywhere)
+
+    Args:
+        model_name: Model filename (e.g., "yolov8m.pt")
+        device: Target device ("cpu", "cuda", "mps")
+
+    Returns:
+        Loaded YOLO model or None if not found
+    """
+    # Strip "models/" prefix if present
+    if model_name.startswith("models/"):
+        model_name = model_name[7:]
+
+    # Get base name without extension
+    base_name = model_name.rsplit('.', 1)[0] if '.' in model_name else model_name
+
+    # Build search paths based on device - prioritize optimized formats
+    search_paths = []
+
+    if device == "cuda":
+        # CUDA: TensorRT > ONNX > PyTorch
+        search_paths.extend([
+            os.path.join(MODELS_DIR, f"{base_name}.engine"),
+            f"{base_name}.engine",
+            os.path.join(MODELS_DIR, f"{base_name}.onnx"),
+            f"{base_name}.onnx",
+        ])
+    else:
+        # CPU/MPS: ONNX > PyTorch (TensorRT doesn't work on CPU)
+        search_paths.extend([
+            os.path.join(MODELS_DIR, f"{base_name}.onnx"),
+            f"{base_name}.onnx",
+        ])
+
+    # Always add PyTorch paths as fallback
+    search_paths.extend([
+        os.path.join(MODELS_DIR, model_name),
+        model_name,
+        f"models/{model_name}",
+    ])
+
+    # Try each path
+    for model_path in search_paths:
+        if os.path.exists(model_path):
+            try:
+                is_tensorrt = model_path.endswith('.engine')
+                is_onnx = model_path.endswith('.onnx')
+
+                format_name = "TensorRT" if is_tensorrt else ("ONNX" if is_onnx else "PyTorch")
+                logger.info(f"Loading YOLO model from: {model_path} ({format_name})")
+
+                model = YOLO(model_path)
+
+                # Move to device (TensorRT/ONNX models handle device internally)
+                if not is_tensorrt and not is_onnx:
+                    model.to(device)
+
+                if is_tensorrt:
+                    logger.info(f"✅ YOLO {model_name} loaded with TensorRT (2-5x faster on GPU)")
+                elif is_onnx:
+                    logger.info(f"✅ YOLO {model_name} loaded with ONNX Runtime (20-40% faster on CPU)")
+                else:
+                    logger.info(f"✅ YOLO {model_name} loaded on {device}")
+                    # Suggest optimization based on device
+                    if device == "cuda":
+                        logger.info(f"💡 TIP: Export to TensorRT for 2-5x speedup: "
+                                  f"yolo export model={model_path} format=engine device=0")
+                    else:
+                        logger.info(f"💡 TIP: Export to ONNX for 20-40% speedup on CPU: "
+                                  f"yolo export model={model_path} format=onnx")
+
+                return model
+            except Exception as e:
+                logger.warning(f"Could not load model from {model_path}: {e}")
+                continue
+
+    return None
+
+
+# Load main YOLO model (prefers ONNX on CPU, TensorRT on CUDA)
+yolo = load_yolo_model_optimized(MODEL_PATH, DEVICE)
 
 if yolo is None:
     logger.info("⚠️ YOLO model not found, downloading default")
@@ -167,26 +245,9 @@ if yolo is None:
     yolo.to(DEVICE)
     logger.info(f"✅ YOLO loaded on {DEVICE}")
 
-# Optional: Load weapon detection model
-weapon_detector = None
+# Optional: Load weapon detection model with TensorRT preference
 weapon_model_name = os.getenv("WEAPON_MODEL", "firearm-yolov8n.pt")
-# Strip "models/" prefix if present
-if weapon_model_name.startswith("models/"):
-    weapon_model_name = weapon_model_name[7:]
-weapon_model_locations = [
-    os.path.join(MODELS_DIR, weapon_model_name),  # Primary: ai-service/models/
-    weapon_model_name,                             # Direct path if absolute
-]
-
-for wm_path in weapon_model_locations:
-    if os.path.exists(wm_path):
-        try:
-            weapon_detector = YOLO(wm_path)
-            weapon_detector.to(DEVICE)
-            logger.info(f"✅ Weapon detector loaded from: {wm_path}")
-            break
-        except Exception as e:
-            logger.warning(f"Could not load weapon detector from {wm_path}: {e}")
+weapon_detector = load_yolo_model_optimized(weapon_model_name, DEVICE)
 
 # Initialize services
 tracker = ReIDTracker(max_age=30, n_init=3)
