@@ -212,8 +212,20 @@ class BBoxDrawer:
             if is_armed:
                 weapon_type = analysis.get("weaponType", analysis.get("סוג_נשק", ""))
                 label_parts.append(f"ARMED")
+                # Map Hebrew weapon types to English for cv2 rendering (cv2 can't render Hebrew)
                 if weapon_type and weapon_type != "לא רלוונטי":
-                    label_parts.append(weapon_type)
+                    weapon_type_en = {
+                        "רובה": "Rifle",
+                        "אקדח": "Handgun",
+                        "רובה קצר": "SMG",
+                        "רובה צלפים": "Sniper",
+                        "סכין": "Knife",
+                        "נשק קר": "Cold Weapon",
+                        "לא ידוע": "Unknown",
+                    }.get(weapon_type, weapon_type)
+                    # Only add if it's ASCII (to avoid ?????? on screen)
+                    if weapon_type_en.isascii():
+                        label_parts.append(weapon_type_en)
 
             label_text = " | ".join(label_parts)
 
@@ -332,16 +344,18 @@ class LoopConfig:
 
     backend_url: str = "http://localhost:3000"
 
-    # FPS Settings
-    detection_fps: int = 20  # How often to run YOLO detection (affects CPU/GPU usage)
-    stream_fps: int = 20  # FPS for streaming annotated video to frontend
-    reader_fps: int = 25  # FPS for reading from RTSP camera (affects network/decoding)
+    # FPS Settings - Lower values = slower processing = longer video duration
+    # For demos, use lower FPS to extend video playback time
+    detection_fps: int = 10  # How often to run YOLO detection (affects CPU/GPU usage) - lower = longer video
+    stream_fps: int = 15  # FPS for streaming annotated video to frontend
+    reader_fps: int = 15  # FPS for reading from RTSP camera (affects network/decoding) - lower = slower video consumption
     recording_fps: int = 15  # FPS for saved recordings
 
     alert_cooldown: float = 30.0
     gemini_cooldown: float = 5.0  # Don't analyze same track more than once per 5 sec
     event_cooldown: float = 5.0  # Minimum seconds between events per camera
     draw_bboxes: bool = True
+    draw_weapon_bboxes: bool = False  # Disable weapon bbox visualization by default
     send_events: bool = True
     use_bot_sort: bool = True  # Use BoT-SORT tracker with full Kalman filter
     use_reid_recovery: bool = (
@@ -840,25 +854,34 @@ class DetectionLoop:
             reid_elapsed = (time.time() - reid_start) * 1000
             self._update_timing("reid_ms", reid_elapsed)
 
-            # STEP 1.5: Pre-tracking ReID for matching lost tracks (video loop scenario)
-            # When there are "lost" tracks with ReID features (time_since_update > 5),
-            # we need to extract ReID for detections so they can be matched via appearance.
-            # This is critical for video simulators where objects reappear at different positions.
+            # STEP 1.5: Pre-tracking ReID extraction for appearance-based matching
+            # CRITICAL FIX FOR TRACK FRAGMENTATION:
+            # When objects move quickly, IoU can be low, causing tracks to fragment.
+            # By extracting ReID features BEFORE tracking, we enable appearance-based
+            # matching as a fallback when motion-based matching (IoU) fails.
+            #
+            # Strategy:
+            # 1. If there are existing tracks with ReID features, extract ReID for
+            #    ALL detections to enable proper matching (prevents fragmentation)
+            # 2. Prioritize tracks that are "at risk" (lower IoU expected)
             if self.use_reid_features and self.bot_sort:
-                # Check if there are lost tracks with ReID features
-                lost_persons = [t for t in self.bot_sort.get_active_tracks("person", camera_id)
-                               if t.feature is not None and t.time_since_update > 5]
-                lost_vehicles = [t for t in self.bot_sort.get_active_tracks("vehicle", camera_id)
-                                if t.feature is not None and t.time_since_update > 5]
+                # Get all active tracks with ReID features (not just lost ones)
+                active_persons = [t for t in self.bot_sort.get_active_tracks("person", camera_id)
+                                 if t.feature is not None]
+                active_vehicles = [t for t in self.bot_sort.get_active_tracks("vehicle", camera_id)
+                                  if t.feature is not None]
 
-                # If there are lost tracks, extract ReID for detections to enable matching
-                if lost_persons or lost_vehicles:
+                # If there are tracked objects with ReID, extract features for ALL detections
+                # This is the key fix for track fragmentation - we need features to match against
+                if active_persons or active_vehicles:
                     reid_pre_count = 0
-                    max_pre_reid = 5  # Limit pre-tracking ReID to avoid performance hit
+                    # Increase limit when we have active tracks to prevent fragmentation
+                    # More extractions = better matching = fewer ID switches
+                    max_pre_reid = 10  # Increased from 5 for better continuity
 
-                    # Extract ReID for person detections
-                    if lost_persons and person_detections:
-                        for det in person_detections[:max_pre_reid]:
+                    # Extract ReID for ALL person detections (not just when lost)
+                    if active_persons and person_detections:
+                        for det in person_detections:
                             if det.feature is None and reid_pre_count < max_pre_reid:
                                 try:
                                     x, y, w, h = det.bbox
@@ -871,9 +894,9 @@ class DetectionLoop:
                                 except Exception as e:
                                     logger.debug(f"Pre-tracking ReID failed for person: {e}")
 
-                    # Extract ReID for vehicle detections
-                    if lost_vehicles and vehicle_detections:
-                        for det in vehicle_detections[:max_pre_reid]:
+                    # Extract ReID for ALL vehicle detections
+                    if active_vehicles and vehicle_detections:
+                        for det in vehicle_detections:
                             if det.feature is None and reid_pre_count < max_pre_reid:
                                 try:
                                     x, y, w, h = det.bbox
@@ -887,7 +910,7 @@ class DetectionLoop:
                                     logger.debug(f"Pre-tracking ReID failed for vehicle: {e}")
 
                     if reid_pre_count > 0:
-                        logger.debug(f"Pre-tracking ReID: extracted {reid_pre_count} features for lost track matching")
+                        logger.debug(f"Pre-tracking ReID: extracted {reid_pre_count} features for appearance matching")
 
             # STEP 2: Run detection recovery BEFORE tracker update (if enabled)
             # This avoids double Kalman prediction
@@ -1116,8 +1139,8 @@ class DetectionLoop:
             if self.config.draw_bboxes:
                 annotated_frame = frame.copy()
 
-                # Draw weapons (highlight in red)
-                if detected_weapons:
+                # Draw weapons (highlight in red) - configurable, disabled by default
+                if detected_weapons and self.config.draw_weapon_bboxes:
                     for weapon in detected_weapons:
                         w_bbox = weapon["bbox"]
                         x1, y1, x2, y2 = [int(v) for v in w_bbox]
@@ -1126,7 +1149,7 @@ class DetectionLoop:
                             annotated_frame, (x1, y1), (x2, y2), (0, 0, 255), 3
                         )
                         # Label
-                        label = f"⚠️ {weapon['class']} {weapon['confidence']:.0%}"
+                        label = f"WEAPON {weapon['class']} {weapon['confidence']:.0%}"
                         cv2.putText(
                             annotated_frame,
                             label,
@@ -1422,6 +1445,20 @@ class DetectionLoop:
                 # Crop the region with margin
                 crop = frame[y1:y2, x1:x2]
 
+            # Ensure crop has valid data
+            if crop is None or crop.size == 0:
+                logger.warning(f"Empty crop for {class_name}")
+                return None
+
+            # Handle different color formats - ensure BGR for proper JPEG encoding
+            if len(crop.shape) == 2:
+                # Grayscale - convert to BGR
+                crop = cv2.cvtColor(crop, cv2.COLOR_GRAY2BGR)
+            elif crop.shape[2] == 4:
+                # RGBA/BGRA - convert to BGR
+                crop = cv2.cvtColor(crop, cv2.COLOR_BGRA2BGR)
+            # 3 channel is assumed BGR (standard OpenCV format) - no conversion needed
+
             # Resize if too large (keep aspect ratio)
             crop_h, crop_w = crop.shape[:2]
             if crop_w > max_size or crop_h > max_size:
@@ -1430,7 +1467,11 @@ class DetectionLoop:
                 crop = cv2.resize(crop, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
             # Encode to JPEG with good quality
-            _, buffer = cv2.imencode('.jpg', crop, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
+            success, buffer = cv2.imencode('.jpg', crop, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
+            if not success:
+                logger.warning(f"Failed to encode JPEG for {class_name}")
+                return None
+
             base64_str = base64.b64encode(buffer).decode('utf-8')
 
             logger.debug(f"Generated enhanced cutout for {class_name}: {len(base64_str)} bytes (from {'crop' if is_already_cropped else 'full'})")

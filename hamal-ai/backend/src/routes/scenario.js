@@ -836,4 +836,299 @@ router.post('/test/transcription', async (req, res) => {
   }
 });
 
+// ===========================================================================
+// MANUAL DEMO TRIGGERS WITH REAL DATA
+// ===========================================================================
+
+/**
+ * POST /api/scenario/demo/full-scenario
+ * Trigger full demo scenario with realistic data
+ * This simulates detecting a stolen vehicle followed by armed persons
+ */
+router.post('/demo/full-scenario', async (req, res) => {
+  if (!SCENARIO_CONFIG.demo.enabled) {
+    return res.status(403).json({ error: 'Demo mode is disabled' });
+  }
+
+  try {
+    const manager = getScenarioManager();
+    if (!manager) {
+      return res.status(503).json({
+        error: 'Scenario manager not initialized'
+      });
+    }
+
+    const io = manager.io;
+    const cameraId = req.body.cameraId || 'cam-1';
+
+    // Realistic stolen vehicle data
+    const vehicleData = {
+      licensePlate: '12-345-67',  // Matches stolen vehicles in config
+      color: 'לבנה',
+      make: 'מזדה',
+      model: '3',
+      vehicleType: 'sedan',
+      cameraId,
+      trackId: `v_${Date.now()}`,
+      confidence: 0.92,
+      bbox: [120, 200, 400, 450],
+      timestamp: new Date().toISOString()
+    };
+
+    console.log('[Demo] Starting full scenario with vehicle:', vehicleData);
+
+    // Step 1: Trigger stolen vehicle detection
+    const vehicleTriggered = await manager.handleStolenVehicle(vehicleData);
+
+    // Step 2: Add armed persons (delayed to simulate detection over time)
+    const armedPersons = [];
+    const weaponTypes = ['רובה', 'אקדח', 'רובה קצר'];
+    const clothingColors = ['שחור', 'ירוק כהה', 'חאקי'];
+    const clothingTypes = ['אפוד טקטי', 'מדים צבאיים', 'בגדים כהים'];
+
+    // Add 3 armed persons progressively
+    for (let i = 0; i < 3; i++) {
+      setTimeout(async () => {
+        const personData = {
+          trackId: `t_${Date.now()}_${i}`,
+          clothing: clothingTypes[i % clothingTypes.length],
+          clothingColor: clothingColors[i % clothingColors.length],
+          weaponType: weaponTypes[i % weaponTypes.length],
+          armed: true,
+          confidence: 0.85 + Math.random() * 0.1,
+          cameraId,
+          bbox: [300 + i * 80, 150, 380 + i * 80, 450],
+          timestamp: new Date().toISOString()
+        };
+
+        armedPersons.push(personData);
+        console.log(`[Demo] Adding armed person ${i + 1}:`, personData);
+
+        try {
+          await manager.handleArmedPerson(personData);
+        } catch (err) {
+          console.error('[Demo] Error adding armed person:', err);
+        }
+      }, (i + 1) * 2000); // Add each person 2 seconds apart
+    }
+
+    res.json({
+      success: true,
+      vehicleTriggered,
+      message: 'Full demo scenario initiated - 3 armed persons will be added progressively',
+      vehicle: vehicleData,
+      note: 'Watch the UI for scenario progression',
+      state: manager.getState()
+    });
+  } catch (error) {
+    console.error('[Scenario] Demo full scenario error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/scenario/demo/stolen-vehicle
+ * Trigger just the stolen vehicle detection with realistic data
+ */
+router.post('/demo/stolen-vehicle', async (req, res) => {
+  if (!SCENARIO_CONFIG.demo.enabled) {
+    return res.status(403).json({ error: 'Demo mode is disabled' });
+  }
+
+  try {
+    const manager = getScenarioManager();
+    if (!manager) {
+      return res.status(503).json({
+        error: 'Scenario manager not initialized'
+      });
+    }
+
+    const cameraId = req.body.cameraId || 'cam-1';
+
+    // Use custom or default vehicle data
+    const vehicleData = {
+      licensePlate: req.body.licensePlate || '12-345-67',
+      color: req.body.color || 'לבנה',
+      make: req.body.make || 'מזדה',
+      model: req.body.model || '3',
+      vehicleType: req.body.vehicleType || 'sedan',
+      cameraId,
+      trackId: `v_${Date.now()}`,
+      confidence: req.body.confidence || 0.92,
+      bbox: req.body.bbox || [120, 200, 400, 450],
+      timestamp: new Date().toISOString()
+    };
+
+    console.log('[Demo] Triggering stolen vehicle:', vehicleData);
+
+    const triggered = await manager.handleStolenVehicle(vehicleData);
+
+    res.json({
+      success: true,
+      triggered,
+      vehicle: vehicleData,
+      state: manager.getState()
+    });
+  } catch (error) {
+    console.error('[Scenario] Demo stolen vehicle error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/scenario/demo/armed-persons
+ * Add multiple armed persons with realistic data
+ */
+router.post('/demo/armed-persons', async (req, res) => {
+  if (!SCENARIO_CONFIG.demo.enabled) {
+    return res.status(403).json({ error: 'Demo mode is disabled' });
+  }
+
+  try {
+    const manager = getScenarioManager();
+    if (!manager) {
+      return res.status(503).json({
+        error: 'Scenario manager not initialized'
+      });
+    }
+
+    const count = Math.min(req.body.count || 3, 10); // Max 10 at once
+    const cameraId = req.body.cameraId || 'cam-1';
+
+    const weaponTypes = ['רובה', 'אקדח', 'רובה קצר', 'סכין', 'רובה צלפים'];
+    const clothingColors = ['שחור', 'ירוק כהה', 'חאקי', 'כחול כהה', 'אפור'];
+    const clothingTypes = ['אפוד טקטי', 'מדים צבאיים', 'בגדים כהים', 'חולצה ארוכה', 'ז\'קט'];
+
+    const results = [];
+
+    for (let i = 0; i < count; i++) {
+      const personData = {
+        trackId: `t_${Date.now()}_${i}`,
+        clothing: clothingTypes[i % clothingTypes.length],
+        clothingColor: clothingColors[i % clothingColors.length],
+        weaponType: weaponTypes[i % weaponTypes.length],
+        armed: true,
+        confidence: 0.8 + Math.random() * 0.15,
+        cameraId,
+        bbox: [100 + i * 100, 100, 200 + i * 100, 500],
+        timestamp: new Date().toISOString()
+      };
+
+      try {
+        const thresholdReached = await manager.handleArmedPerson(personData);
+        results.push({ person: personData, thresholdReached });
+        console.log(`[Demo] Added armed person ${i + 1}:`, personData);
+      } catch (err) {
+        results.push({ person: personData, error: err.message });
+      }
+    }
+
+    res.json({
+      success: true,
+      count: results.length,
+      results,
+      state: manager.getState()
+    });
+  } catch (error) {
+    console.error('[Scenario] Demo armed persons error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/scenario/demo/keyword
+ * Simulate radio transcription with specific keyword
+ */
+router.post('/demo/keyword', async (req, res) => {
+  if (!SCENARIO_CONFIG.demo.enabled) {
+    return res.status(403).json({ error: 'Demo mode is disabled' });
+  }
+
+  try {
+    const manager = getScenarioManager();
+    if (!manager) {
+      return res.status(503).json({
+        error: 'Scenario manager not initialized'
+      });
+    }
+
+    // Predefined keyword triggers
+    const keywordPresets = {
+      'drone': 'שלחו רחפן לאזור האירוע',
+      'code': 'קוד צפרדע, חוזר, קוד צפרדע',
+      'end': 'חדל חדל חדל, האירוע הסתיים',
+      'custom': req.body.text
+    };
+
+    const keyword = req.body.keyword || 'drone';
+    const text = keywordPresets[keyword] || keywordPresets['custom'];
+
+    if (!text) {
+      return res.status(400).json({
+        error: 'No text provided. Use keyword preset (drone, code, end) or provide custom text.',
+        availablePresets: Object.keys(keywordPresets).filter(k => k !== 'custom')
+      });
+    }
+
+    console.log(`[Demo] Triggering keyword "${keyword}":`, text);
+
+    const keywordMatched = await manager.handleTranscription(text);
+
+    res.json({
+      success: true,
+      keyword,
+      text,
+      keywordMatched,
+      state: manager.getState()
+    });
+  } catch (error) {
+    console.error('[Scenario] Demo keyword error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/scenario/demo/presets
+ * Get available demo presets and their descriptions
+ */
+router.get('/demo/presets', (req, res) => {
+  res.json({
+    endpoints: {
+      'POST /api/scenario/demo/full-scenario': {
+        description: 'Trigger full demo: stolen vehicle + 3 armed persons progressively',
+        params: { cameraId: 'optional, defaults to cam-1' }
+      },
+      'POST /api/scenario/demo/stolen-vehicle': {
+        description: 'Trigger stolen vehicle detection',
+        params: {
+          cameraId: 'optional, defaults to cam-1',
+          licensePlate: 'optional, defaults to 12-345-67',
+          color: 'optional, defaults to לבנה',
+          make: 'optional, defaults to מזדה',
+          model: 'optional, defaults to 3'
+        }
+      },
+      'POST /api/scenario/demo/armed-persons': {
+        description: 'Add armed persons',
+        params: {
+          count: 'number of persons (1-10), defaults to 3',
+          cameraId: 'optional, defaults to cam-1'
+        }
+      },
+      'POST /api/scenario/demo/keyword': {
+        description: 'Trigger keyword detection',
+        params: {
+          keyword: 'preset name (drone, code, end) or provide text',
+          text: 'custom text for keyword=custom'
+        }
+      },
+      'POST /api/scenario/reset': {
+        description: 'Reset scenario to idle state'
+      }
+    },
+    stolenVehiclePlates: SCENARIO_CONFIG.stolenVehicles.map(v => v.licensePlate),
+    keywords: SCENARIO_CONFIG.keywords
+  });
+});
+
 export default router;

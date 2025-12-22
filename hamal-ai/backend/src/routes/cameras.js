@@ -74,6 +74,24 @@ router.post("/", async (req, res) => {
         const io = req.app.get("io");
         io.emit("camera:added", camera);
 
+        // Notify AI service to start detection for new camera
+        if (camera.aiEnabled !== false && camera.rtspUrl) {
+            const aiServiceUrl = process.env.AI_SERVICE_URL || "http://localhost:8000";
+            try {
+                const response = await fetch(
+                    `${aiServiceUrl}/detection/start/${camera.cameraId}?rtsp_url=${encodeURIComponent(camera.rtspUrl)}`,
+                    { method: "POST" }
+                );
+                if (response.ok) {
+                    console.log(`[Cameras] Started AI detection for new camera: ${camera.cameraId}`);
+                } else {
+                    console.warn(`[Cameras] Failed to start AI detection for ${camera.cameraId}: ${response.status}`);
+                }
+            } catch (aiError) {
+                console.warn(`[Cameras] Could not notify AI service: ${aiError.message}`);
+            }
+        }
+
         res.status(201).json(camera);
     } catch (error) {
         if (error.code === 11000) {

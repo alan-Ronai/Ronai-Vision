@@ -1307,100 +1307,100 @@ async def refresh_analysis(
     obj_type = None
     bbox = None
 
-    # Normalize track_id to ensure consistent format
-    # BoT-SORT uses "t_X" format for persons, but input might be "t_5", "p_5", or just "5"
-    normalized_track_id = track_id
-    if not any(track_id.startswith(p) for p in ['t_', 'v_', 'p_']):
-        # No prefix - assume it's a number, try to find it in any tracker
-        pass  # Will search all types below
+    logger.info(f"Refresh analysis request for track_id: {track_id}, gid: {gid}")
 
-    # Check if it's a person (track IDs starting with 't_' or 'p_')
-    if track_id.startswith('t_') or track_id.startswith('p_'):
-        obj_type = 'person'
-        # First check BoT-SORT (main tracker) - compare string track_id
-        if bot_sort:
-            for track in bot_sort.get_active_tracks('person'):
-                # BoT-SORT uses "t_X" format, compare with input track_id
-                if track.track_id == track_id or track.track_id == f"t_{gid}":
-                    obj = track
-                    bbox = track.bbox  # (x, y, w, h) format
-                    if not camera_id:
-                        camera_id = track.last_seen_camera
-                    break
-        # Fallback to stable tracker
-        if not obj:
-            for person in stable_tracker.get_all_persons():
-                if person.track_id == gid or str(person.track_id) == str(gid):
-                    obj = person
-                    bbox = person.bbox
-                    if not camera_id:
-                        camera_id = person.camera_id
-                    break
+    # STEP 1: Try to find using BoT-SORT's get_track method (direct lookup)
+    if bot_sort:
+        obj = bot_sort.get_track(track_id)
+        if obj:
+            obj_type = getattr(obj, 'object_type', 'person' if track_id.startswith('t_') or track_id.startswith('p_') else 'vehicle')
+            bbox = obj.bbox
+            if not camera_id:
+                camera_id = obj.last_seen_camera
+            logger.info(f"Found track {track_id} in BoT-SORT: type={obj_type}, camera={camera_id}")
 
-    # Check if it's a vehicle
-    elif track_id.startswith('v_'):
+    # STEP 2: Try StableTracker's get_track method
+    if not obj:
+        obj = stable_tracker.get_track(track_id)
+        if obj:
+            obj_type = obj.object_type
+            bbox = obj.bbox
+            if not camera_id:
+                camera_id = getattr(obj, 'camera_id', None)
+            logger.info(f"Found track {track_id} in StableTracker: type={obj_type}")
+
+    # STEP 3: Try by string track_id matching in vehicle tracks (handles v_12 format)
+    if not obj and track_id.startswith('v_'):
         obj_type = 'vehicle'
-        # First check BoT-SORT (main tracker) - compare string track_id
+        # Check BoT-SORT vehicles
         if bot_sort:
             for track in bot_sort.get_active_tracks('vehicle'):
-                if track.track_id == track_id or track.track_id == f"v_{gid}":
+                if track.track_id == track_id or str(track.track_id) == track_id:
                     obj = track
-                    bbox = track.bbox  # (x, y, w, h) format
+                    bbox = track.bbox
                     if not camera_id:
                         camera_id = track.last_seen_camera
+                    logger.info(f"Found vehicle track {track_id} by iteration")
                     break
-        # Fallback to stable tracker
+        # Check StableTracker vehicles
         if not obj:
             for vehicle in stable_tracker.get_all_vehicles():
-                if vehicle.track_id == gid or str(vehicle.track_id) == str(gid):
+                if str(vehicle.track_id) == track_id or vehicle.track_id == track_id:
                     obj = vehicle
                     bbox = vehicle.bbox
                     if not camera_id:
-                        camera_id = vehicle.camera_id
+                        camera_id = getattr(vehicle, 'camera_id', None)
+                    logger.info(f"Found vehicle track {track_id} in StableTracker by iteration")
                     break
-    else:
-        # No prefix or unknown prefix - try both types in BoT-SORT first
-        # Try to match by numeric ID (gid) with any prefix
+
+    # STEP 4: Try by string track_id matching in person tracks
+    if not obj and (track_id.startswith('t_') or track_id.startswith('p_')):
+        obj_type = 'person'
+        # Check BoT-SORT persons
         if bot_sort:
             for track in bot_sort.get_active_tracks('person'):
-                # Match by numeric part or exact string
-                if track.track_id == track_id or track.track_id == f"t_{gid}" or track.track_id == f"p_{gid}":
+                if track.track_id == track_id or str(track.track_id) == track_id:
+                    obj = track
+                    bbox = track.bbox
+                    if not camera_id:
+                        camera_id = track.last_seen_camera
+                    logger.info(f"Found person track {track_id} by iteration")
+                    break
+        # Check StableTracker persons
+        if not obj:
+            for person in stable_tracker.get_all_persons():
+                if str(person.track_id) == track_id or person.track_id == track_id:
+                    obj = person
+                    bbox = person.bbox
+                    if not camera_id:
+                        camera_id = getattr(person, 'camera_id', None)
+                    logger.info(f"Found person track {track_id} in StableTracker by iteration")
+                    break
+
+    # STEP 5: Try numeric GID matching (no prefix case)
+    if not obj:
+        # Try persons
+        if bot_sort:
+            for track in bot_sort.get_active_tracks('person'):
+                if track.track_id == f"t_{gid}" or track.track_id == f"p_{gid}":
                     obj = track
                     obj_type = 'person'
                     bbox = track.bbox
                     if not camera_id:
                         camera_id = track.last_seen_camera
                     break
-            if not obj:
-                for track in bot_sort.get_active_tracks('vehicle'):
-                    if track.track_id == track_id or track.track_id == f"v_{gid}":
-                        obj = track
-                        obj_type = 'vehicle'
-                        bbox = track.bbox
-                        if not camera_id:
-                            camera_id = track.last_seen_camera
-                        break
-        # Fallback to stable tracker
-        if not obj:
-            for person in stable_tracker.get_all_persons():
-                if person.track_id == gid or str(person.track_id) == str(gid):
-                    obj = person
-                    obj_type = 'person'
-                    bbox = person.bbox
-                    if not camera_id:
-                        camera_id = person.camera_id
-                    break
-        if not obj:
-            for vehicle in stable_tracker.get_all_vehicles():
-                if vehicle.track_id == gid or str(vehicle.track_id) == str(gid):
-                    obj = vehicle
+        if not obj and bot_sort:
+            for track in bot_sort.get_active_tracks('vehicle'):
+                if track.track_id == f"v_{gid}":
+                    obj = track
                     obj_type = 'vehicle'
-                    bbox = vehicle.bbox
+                    bbox = track.bbox
                     if not camera_id:
-                        camera_id = vehicle.camera_id
+                        camera_id = track.last_seen_camera
                     break
 
     if not obj:
+        logger.warning(f"Track {track_id} not found in any tracker")
         raise HTTPException(404, "האובייקט כבר לא נמצא בסצנה. ניתן לרענן ניתוח רק עבור אובייקטים פעילים.")
 
     if not camera_id:
@@ -2017,7 +2017,7 @@ async def cleanup_cameras():
     try:
         detection_loop = get_detection_loop()
         if detection_loop:
-            detection_loop.stop()
+            await detection_loop.stop()
             logger.info("Stopped detection loop")
     except Exception as e:
         logger.error(f"Error stopping detection loop: {e}")
@@ -2215,6 +2215,59 @@ async def set_detection_fps(
         "reader_fps": detection_loop.config.reader_fps,
         "recording_fps": detection_loop.config.recording_fps,
         "note": "Frontend streams should reconnect to see changes"
+    }
+
+
+@app.post("/detection/config/demo-mode")
+async def set_demo_mode(enabled: bool = Query(..., description="Enable demo mode (slower FPS for longer video duration)")):
+    """Toggle demo mode on/off.
+
+    Demo mode uses lower FPS values to make videos last longer,
+    which is useful for demos and presentations.
+
+    Demo mode settings:
+    - detection_fps: 8 (instead of 20)
+    - stream_fps: 10 (instead of 20)
+    - reader_fps: 10 (instead of 25)
+    - recording_fps: 10 (instead of 15)
+
+    Production mode settings:
+    - detection_fps: 20
+    - stream_fps: 20
+    - reader_fps: 25
+    - recording_fps: 15
+    """
+    detection_loop = get_detection_loop()
+    if not detection_loop:
+        raise HTTPException(503, "Detection loop not running")
+
+    if enabled:
+        # Demo mode - slower FPS for longer video duration
+        detection_loop.set_fps(
+            detection_fps=8,
+            stream_fps=10,
+            reader_fps=10,
+            recording_fps=10
+        )
+        mode = "demo"
+    else:
+        # Production mode - faster FPS
+        detection_loop.set_fps(
+            detection_fps=20,
+            stream_fps=20,
+            reader_fps=25,
+            recording_fps=15
+        )
+        mode = "production"
+
+    return {
+        "message": f"{mode.capitalize()} mode {'enabled' if enabled else 'disabled'}",
+        "mode": mode,
+        "detection_fps": detection_loop.config.detection_fps,
+        "stream_fps": detection_loop.config.stream_fps,
+        "reader_fps": detection_loop.config.reader_fps,
+        "recording_fps": detection_loop.config.recording_fps,
+        "note": "Video processing speed adjusted. Lower FPS = longer video duration."
     }
 
 

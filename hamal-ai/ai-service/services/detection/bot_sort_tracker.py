@@ -25,10 +25,10 @@ logger = logging.getLogger(__name__)
 MIN_HITS = 2  # Detections needed to confirm track (lowered from 3 for faster confirmation)
 MAX_LOST = 15  # Frames before deletion (reduced from 30 for faster ghost cleanup = 1 second at 15fps)
 MAX_LOST_WITH_REID = 90  # Frames before deletion for tracks WITH ReID features (6 seconds at 15fps)
-LAMBDA_APP = 0.8  # Appearance weight in cost matrix (increased from 0.7 for better ReID matching)
-MAX_COST = 0.85  # Maximum cost for assignment (increased for moving object tolerance)
+LAMBDA_APP = 0.85  # Appearance weight in cost matrix (increased for better ReID matching)
+MAX_COST = 0.9  # Maximum cost for assignment (increased for moving object tolerance)
 MAX_COST_REID_ONLY = 0.5  # Maximum cost when using ReID-only matching (no IoU overlap)
-MIN_IOU_THRESHOLD = 0.2  # Minimum IoU for matching (lowered from 0.3 for walking persons)
+MIN_IOU_THRESHOLD = 0.15  # Minimum IoU for matching (lowered for walking persons and fast movement)
 
 # Low confidence deletion (more tolerant to prevent premature ID switching)
 MIN_CONFIDENCE_HISTORY = 0.20  # Avg confidence threshold (lowered from 0.25)
@@ -71,9 +71,10 @@ class KalmanBoxTracker:
         self.P[4:, 4:] *= 100.0  # High uncertainty for velocity
 
         # Process noise covariance (INCREASED for better adaptation to movement)
+        # Higher values = Kalman filter adapts faster to changes (less smooth, more responsive)
         self.Q = np.eye(8)
-        self.Q[0:4, 0:4] *= 1.0  # Position noise (increased from 0.01 for faster adaptation)
-        self.Q[4:, 4:] *= 0.1  # Velocity noise (increased from 0.01 to allow velocity changes)
+        self.Q[0:4, 0:4] *= 2.0  # Position noise (increased for fast-moving objects)
+        self.Q[4:, 4:] *= 0.5  # Velocity noise (increased to allow velocity changes)
 
         # Measurement noise covariance
         self.R = np.eye(4)
@@ -164,16 +165,31 @@ class Track:
     """Single object track with state management."""
 
     track_id_counter = 0
+    vehicle_id_counter = 0
 
-    def __init__(self, detection: Detection, track_id: Optional[str] = None, camera_id: Optional[str] = None):
-        """Initialize track with first detection."""
+    def __init__(self, detection: Detection, track_id: Optional[str] = None, camera_id: Optional[str] = None, object_type: str = "person"):
+        """Initialize track with first detection.
 
-        # Generate unique track ID
+        Args:
+            detection: Detection object
+            track_id: Optional explicit track ID
+            camera_id: Camera ID
+            object_type: 'person' or 'vehicle' - determines track_id prefix
+        """
+
+        # Generate unique track ID with appropriate prefix
         if track_id is None:
-            Track.track_id_counter += 1
-            self.track_id = f"t_{Track.track_id_counter}"
+            if object_type == "vehicle":
+                Track.vehicle_id_counter += 1
+                self.track_id = f"v_{Track.vehicle_id_counter}"
+            else:
+                Track.track_id_counter += 1
+                self.track_id = f"t_{Track.track_id_counter}"
         else:
             self.track_id = track_id
+
+        # Store object type
+        self.object_type = object_type
 
         # Detection info
         self.class_id = detection.class_id
@@ -374,7 +390,7 @@ class BoTSORTTracker:
         new_tracks = []
         for i, detection in enumerate(detections):
             if i not in matched_detections:
-                track = Track(detection, camera_id=camera_id)
+                track = Track(detection, camera_id=camera_id, object_type=object_type)
                 tracks[track.track_id] = track
                 self._stats["total_tracks"] += 1
 
@@ -460,25 +476,41 @@ class BoTSORTTracker:
                         similarity = self._cosine_similarity(track.feature, det.feature)
                         app_cost = 1.0 - similarity
 
-                        # CRITICAL: When IoU is very low (e.g., video loop, object reappears elsewhere),
-                        # rely more heavily on ReID similarity for matching
-                        if iou < 0.1 and similarity > 0.7:
-                            # ReID-only matching: object likely reappeared at different position
-                            # Use only appearance cost when ReID similarity is high
-                            cost_matrix[i, j] = app_cost * 0.6  # Scale down to favor good ReID matches
+                        # CRITICAL FIX FOR TRACK FRAGMENTATION:
+                        # When ReID similarity is high, trust appearance over motion.
+                        # This prevents ID switches when objects move quickly (low IoU).
+                        #
+                        # Strategy:
+                        # - Very high similarity (>0.8): Trust ReID heavily, minimize motion weight
+                        # - High similarity (>0.6): Use ReID-weighted cost even with low IoU
+                        # - Moderate similarity: Use standard combined cost
+                        if similarity > 0.8:
+                            # Very high ReID match - almost certainly the same object
+                            # Use mostly appearance cost, minimal motion influence
+                            cost_matrix[i, j] = app_cost * 0.4 + motion_cost * 0.1
+                            logger.debug(
+                                f"Strong ReID match ({object_type}): track {track.track_id} "
+                                f"similarity={similarity:.3f}, cost={cost_matrix[i, j]:.3f}"
+                            )
+                        elif similarity > 0.6 and iou < 0.3:
+                            # Good ReID match with low IoU - object likely moved
+                            # Trust ReID more than motion
+                            cost_matrix[i, j] = app_cost * 0.5 + motion_cost * 0.2
+                            logger.debug(
+                                f"ReID-preferred match ({object_type}): track {track.track_id} "
+                                f"similarity={similarity:.3f}, iou={iou:.3f}, cost={cost_matrix[i, j]:.3f}"
+                            )
+                        elif iou < 0.1 and similarity > 0.5:
+                            # Very low IoU but decent similarity - object reappeared elsewhere
+                            cost_matrix[i, j] = app_cost * 0.6
                             logger.debug(
                                 f"ReID-only matching ({object_type}): track {track.track_id} "
                                 f"similarity={similarity:.3f}, cost={cost_matrix[i, j]:.3f} "
                                 f"(IoU too low: {iou:.3f})"
                             )
                         else:
-                            # Normal combined cost
+                            # Normal combined cost with standard weights
                             cost_matrix[i, j] = (1 - LAMBDA_APP) * motion_cost + LAMBDA_APP * app_cost
-                            logger.debug(
-                                f"ReID matching ({object_type}): track {track.track_id} "
-                                f"similarity={similarity:.3f}, motion_cost={motion_cost:.3f}, "
-                                f"combined_cost={cost_matrix[i, j]:.3f}"
-                            )
                     else:
                         # Feature dimension mismatch - use only motion cost
                         logger.warning(
@@ -573,6 +605,32 @@ class BoTSORTTracker:
         tracks = self.get_active_tracks(object_type, camera_id)
         return [t for t in tracks if t.state == "confirmed"]
 
+    def get_track(self, track_id: str) -> Optional[Track]:
+        """Get a track by its ID.
+
+        Args:
+            track_id: Track ID (e.g., 't_5', 'v_3')
+
+        Returns:
+            Track object or None if not found
+        """
+        # Check persons (t_ prefix)
+        if track_id.startswith('t_') or track_id.startswith('p_'):
+            return self._persons.get(track_id)
+        # Check vehicles (v_ prefix)
+        elif track_id.startswith('v_'):
+            return self._vehicles.get(track_id)
+        else:
+            # No prefix - try to find by numeric ID
+            # Try both person and vehicle tracks
+            for tid, track in self._persons.items():
+                if tid.endswith(f"_{track_id}"):
+                    return track
+            for tid, track in self._vehicles.items():
+                if tid.endswith(f"_{track_id}"):
+                    return track
+        return None
+
     def get_stats(self) -> dict:
         """Get tracker statistics."""
         return {
@@ -586,6 +644,7 @@ class BoTSORTTracker:
         self._persons.clear()
         self._vehicles.clear()
         Track.track_id_counter = 0
+        Track.vehicle_id_counter = 0
         self._stats = {
             "total_tracks": 0,
             "active_tracks": 0,

@@ -181,11 +181,70 @@ class GeminiTranscriber:
             "total_duration": 0.0,
             "transcriptions": 0,
             "errors": 0,
+            "overlaps_removed": 0,
         }
+
+        # Overlap removal: Track last N words to detect duplicates at chunk boundaries
+        self._last_words: List[str] = []  # Last 5 words from previous transcription
+        self._max_overlap_words = 5  # Maximum words to check for overlap
 
     def is_configured(self) -> bool:
         """Check if transcriber is configured."""
         return self.model is not None
+
+    def _remove_overlap(self, text: str) -> str:
+        """Remove overlapping words from the beginning of new transcription.
+
+        When audio chunks overlap, the same words may appear at the end of one
+        transcription and the beginning of the next. This method detects and
+        removes such duplicates.
+
+        Args:
+            text: New transcription text
+
+        Returns:
+            Text with overlapping prefix removed
+        """
+        if not self._last_words or not text:
+            return text
+
+        words = text.split()
+        if not words:
+            return text
+
+        # Try to find overlap: check if first N words of new text match last N words of previous
+        # Start with longest possible overlap and work down
+        max_check = min(len(words), len(self._last_words), self._max_overlap_words)
+
+        for overlap_len in range(max_check, 0, -1):
+            # Check if first overlap_len words match last overlap_len of previous
+            new_prefix = words[:overlap_len]
+            old_suffix = self._last_words[-overlap_len:]
+
+            if new_prefix == old_suffix:
+                # Found overlap - remove duplicated words
+                removed_words = words[:overlap_len]
+                remaining_text = " ".join(words[overlap_len:])
+                logger.info(
+                    f"🔄 Removed {overlap_len} overlapping word(s): {removed_words}"
+                )
+                self._stats["overlaps_removed"] += overlap_len
+                return remaining_text
+
+        return text
+
+    def _update_last_words(self, text: str):
+        """Update the last words buffer for overlap detection.
+
+        Args:
+            text: The final transcription text (after overlap removal)
+        """
+        if not text:
+            return
+
+        words = text.split()
+        # Keep last N words
+        self._last_words = words[-self._max_overlap_words:] if words else []
 
     def set_event_loop(self, loop: asyncio.AbstractEventLoop):
         """Set the event loop for cross-thread task scheduling."""
@@ -448,6 +507,19 @@ class GeminiTranscriber:
             # Combine all transcriptions and send as single result
             if all_transcriptions:
                 combined_text = " ".join(all_transcriptions)
+
+                # Remove overlapping words from previous transcription
+                original_text = combined_text
+                combined_text = self._remove_overlap(combined_text)
+
+                # Skip if nothing left after overlap removal
+                if not combined_text.strip():
+                    logger.info("⚠️  All text was overlap, skipping empty transcription")
+                    return
+
+                # Update last words for next overlap check
+                self._update_last_words(combined_text)
+
                 combined_result = TranscriptionResult(
                     text=combined_text,
                     timestamp=datetime.now(),

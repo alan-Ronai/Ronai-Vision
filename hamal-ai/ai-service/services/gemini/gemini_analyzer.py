@@ -122,8 +122,20 @@ class GeminiAnalyzer:
 
             frame = frame[y1:y2, x1:x2]
 
-        # Convert BGR to RGB
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        # Handle color conversion based on frame format
+        if len(frame.shape) == 2:
+            # Grayscale - convert to RGB
+            rgb = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
+        elif frame.shape[2] == 4:
+            # RGBA/BGRA - convert to RGB
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGB)
+        elif frame.shape[2] == 3:
+            # Assume BGR (standard OpenCV) - convert to RGB
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        else:
+            # Unknown format - use as-is
+            rgb = frame
+
         return Image.fromarray(rgb)
 
     def _get_cutout_base64(self, frame, bbox: List[float], max_size: int = 300, margin_percent: float = 0.25) -> Optional[str]:
