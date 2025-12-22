@@ -1098,7 +1098,7 @@ class DetectionLoop:
 
             reid_post_elapsed = (time.time() - reid_post_start) * 1000
             # Add to ReID timing (this is more accurate as it's the actual ReID work)
-            self._update_timing("reid_ms", reid_post_elapsed)
+            self._update_timing("reid_extract_ms", reid_post_elapsed)
 
             # STEP 4: Weapon Detection - detect firearms and mark nearby persons as armed
             weapon_start = time.time()
