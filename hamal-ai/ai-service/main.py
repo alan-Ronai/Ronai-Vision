@@ -139,12 +139,16 @@ logger.info(f"Detection FPS:            {DETECTION_FPS}")
 logger.info(f"Stream FPS:               {STREAM_FPS}")
 logger.info("=" * 60)
 
-# Try to find model in various locations
+# Models directory - all models should be in hamal-ai/ai-service/models/
+MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
+os.makedirs(MODELS_DIR, exist_ok=True)
+logger.info(f"Models directory: {MODELS_DIR}")
+
+# Try to find model in various locations (prioritize ai-service/models)
 model_locations = [
-    MODEL_PATH,
-    f"models/{MODEL_PATH}",
-    f"../models/{MODEL_PATH}",
-    f"../../models/{MODEL_PATH}",
+    os.path.join(MODELS_DIR, MODEL_PATH),  # Primary: ai-service/models/
+    MODEL_PATH,                             # Direct path if absolute
+    f"models/{MODEL_PATH}",                 # Relative
 ]
 
 # Load main YOLO model
@@ -165,10 +169,13 @@ if yolo is None:
 
 # Optional: Load weapon detection model
 weapon_detector = None
-weapon_model_path = os.getenv("WEAPON_MODEL", "models/firearm-yolov8n.pt")
+weapon_model_name = os.getenv("WEAPON_MODEL", "firearm-yolov8n.pt")
+# Strip "models/" prefix if present
+if weapon_model_name.startswith("models/"):
+    weapon_model_name = weapon_model_name[7:]
 weapon_model_locations = [
-    weapon_model_path,
-    f"../../{weapon_model_path}",  # From ai-service to Ronai-Vision root
+    os.path.join(MODELS_DIR, weapon_model_name),  # Primary: ai-service/models/
+    weapon_model_name,                             # Direct path if absolute
 ]
 
 for wm_path in weapon_model_locations:

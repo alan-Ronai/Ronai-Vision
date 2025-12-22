@@ -59,25 +59,25 @@ class UniversalReID(BaseReID):
         try:
             from transformers import CLIPProcessor, CLIPVisionModel
 
-            # Find models directory - go up from hamal-ai/ai-service/services/
+            # Find models directory - primary location is hamal-ai/ai-service/models/
             current_dir = os.path.dirname(os.path.abspath(__file__))
-            possible_roots = [
-                os.path.abspath(os.path.join(current_dir, "..", "..", "..")),  # Ronai-Vision/
-                os.path.abspath(os.path.join(current_dir, "..", "..")),
-                os.path.abspath(os.path.join(current_dir, "..")),
-            ]
+            # Go up from services/reid/ to ai-service/
+            ai_service_dir = os.path.abspath(os.path.join(current_dir, "..", ".."))
+            models_dir = os.path.join(ai_service_dir, "models")
 
             # Resolve processor path
-            if processor_path is None:
-                for root in possible_roots:
-                    candidate = os.path.join(root, "models", "clip-vit-base-patch32-processor")
+            if processor_path is None or not os.path.exists(processor_path):
+                # Search in models directories
+                search_name = processor_path or "clip-vit-base-patch32-processor"
+                processor_path = None
+                for candidate in [os.path.join(models_dir, search_name), search_name]:
                     if os.path.exists(candidate):
                         processor_path = candidate
                         break
 
             if processor_path is None or not os.path.exists(processor_path):
                 raise FileNotFoundError(
-                    f"CLIP processor not found. Expected at models/clip-vit-base-patch32-processor/"
+                    f"CLIP processor not found. Expected at: {os.path.join(models_dir, 'clip-vit-base-patch32-processor')}"
                 )
 
             # Load processor from local directory with use_fast=True
@@ -87,9 +87,11 @@ class UniversalReID(BaseReID):
             logger.info(f"✅ CLIP processor loaded from {processor_path}")
 
             # Try to load model from local file first
-            if model_path is None:
-                for root in possible_roots:
-                    candidate = os.path.join(root, "models", "clip-vit-base-patch32-full.pt")
+            if model_path is None or not os.path.exists(model_path):
+                # Search in models directories
+                search_name = model_path or "clip-vit-base-patch32-full.pt"
+                model_path = None
+                for candidate in [os.path.join(models_dir, search_name), search_name]:
                     if os.path.exists(candidate):
                         model_path = candidate
                         break

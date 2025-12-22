@@ -23,6 +23,14 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
+# Import image enhancer for quality improvement before Gemini analysis
+try:
+    from ..frame_selection.image_enhancer import get_image_enhancer, EnhancementLevel
+    IMAGE_ENHANCER_AVAILABLE = True
+except ImportError:
+    IMAGE_ENHANCER_AVAILABLE = False
+    logger.warning("Image enhancer not available - using raw images for Gemini")
+
 # Try to import Google Generative AI
 try:
     import google.generativeai as genai
@@ -48,6 +56,25 @@ class GeminiAnalyzer:
         self.model = None
         self.vision_model = None
         self._call_count = 0  # Centralized API call counter
+        self._image_enhancer = None
+
+        # Initialize image enhancer for better Gemini analysis
+        use_enhancement = os.getenv("USE_IMAGE_ENHANCEMENT", "true").lower() in ("true", "1", "yes")
+        if use_enhancement and IMAGE_ENHANCER_AVAILABLE:
+            try:
+                self._image_enhancer = get_image_enhancer()
+                # Set to moderate level for good quality without too much processing
+                enhancement_level = os.getenv("IMAGE_ENHANCEMENT_LEVEL", "moderate").lower()
+                if enhancement_level == "light":
+                    self._image_enhancer.set_level(EnhancementLevel.LIGHT)
+                elif enhancement_level == "aggressive":
+                    self._image_enhancer.set_level(EnhancementLevel.AGGRESSIVE)
+                else:
+                    self._image_enhancer.set_level(EnhancementLevel.MODERATE)
+                logger.info(f"✅ Image enhancement enabled: {enhancement_level}")
+            except Exception as e:
+                logger.warning(f"Failed to initialize image enhancer: {e}")
+                self._image_enhancer = None
 
         if not GEMINI_AVAILABLE:
             logger.warning("⚠️ Gemini not available - install google-generativeai")
@@ -90,14 +117,16 @@ class GeminiAnalyzer:
         self._call_count += 1
         return await self.model.generate_content_async(content_parts)
 
-    def _frame_to_pil(self, frame, bbox: Optional[List[float]] = None, margin_percent: float = 0.25) -> Image.Image:
+    def _frame_to_pil(self, frame, bbox: Optional[List[float]] = None, margin_percent: float = 0.50, class_name: str = "unknown") -> Image.Image:
         """
         Convert OpenCV frame to PIL Image, optionally cropping to bbox WITH MARGIN.
+        Applies image enhancement for better Gemini analysis.
 
         Args:
             frame: OpenCV BGR numpy array
             bbox: Optional [x1, y1, x2, y2] to crop
-            margin_percent: Percentage of bbox size to add as margin (default 25%)
+            margin_percent: Percentage of bbox size to add as margin (default 50%)
+            class_name: Object class for class-specific enhancement (e.g., "car", "person")
 
         Returns:
             PIL Image in RGB format with the subject fully visible in the center
@@ -110,7 +139,7 @@ class GeminiAnalyzer:
             bbox_w = x2 - x1
             bbox_h = y2 - y1
 
-            # Add margin around the bbox (25% of bbox size on each side)
+            # Add margin around the bbox (50% of bbox size on each side for better context)
             margin_x = int(bbox_w * margin_percent)
             margin_y = int(bbox_h * margin_percent)
 
@@ -121,6 +150,14 @@ class GeminiAnalyzer:
             y2 = min(h, y2 + margin_y)
 
             frame = frame[y1:y2, x1:x2]
+
+        # Apply image enhancement for better Gemini analysis
+        if self._image_enhancer is not None:
+            try:
+                frame = self._image_enhancer.enhance(frame, class_name=class_name)
+                logger.debug(f"Applied image enhancement for {class_name}")
+            except Exception as e:
+                logger.warning(f"Image enhancement failed: {e}")
 
         # Handle color conversion based on frame format
         if len(frame.shape) == 2:
@@ -138,7 +175,7 @@ class GeminiAnalyzer:
 
         return Image.fromarray(rgb)
 
-    def _get_cutout_base64(self, frame, bbox: List[float], max_size: int = 300, margin_percent: float = 0.25) -> Optional[str]:
+    def _get_cutout_base64(self, frame, bbox: List[float], max_size: int = 400, margin_percent: float = 0.40) -> Optional[str]:
         """
         Get a base64 encoded JPEG of the cropped bbox area WITH MARGIN.
 
@@ -148,8 +185,8 @@ class GeminiAnalyzer:
         Args:
             frame: OpenCV BGR numpy array
             bbox: Bounding box [x1, y1, x2, y2]
-            max_size: Maximum dimension for the thumbnail (increased to 300 for better quality)
-            margin_percent: Percentage of bbox size to add as margin (default 25%)
+            max_size: Maximum dimension for the thumbnail (increased to 400 for better quality)
+            margin_percent: Percentage of bbox size to add as margin (default 40% for better context)
 
         Returns:
             Base64 encoded JPEG string or None on error
@@ -165,7 +202,7 @@ class GeminiAnalyzer:
             if bbox_w <= 0 or bbox_h <= 0:
                 return None
 
-            # Add margin around the bbox (25% of bbox size on each side)
+            # Add margin around the bbox (40% of bbox size on each side for better context)
             margin_x = int(bbox_w * margin_percent)
             margin_y = int(bbox_h * margin_percent)
 
@@ -292,25 +329,34 @@ class GeminiAnalyzer:
             return {"error": "Gemini not configured"}
 
         try:
-            img = self._frame_to_pil(frame, bbox)
+            # Use "vehicle" class for enhanced license plate region processing
+            img = self._frame_to_pil(frame, bbox, class_name="vehicle")
 
-            prompt = """
-            נתח את הרכב במרכז התמונה בקפידה. הרכב הרלוונטי נמצא במרכז התמונה.
-            החזר JSON בלבד (ללא markdown):
-            {
-                "color": "צבע הרכב בעברית (אדום/כחול/לבן/שחור/כסוף/אפור וכו')",
-                "model": "דגם הרכב אם ניתן לזהות, אחרת הערך המדויק: לא זוהה",
-                "manufacturer": "יצרן הרכב (טויוטה/יונדאי/מזדה וכו'), אחרת הערך המדויק: לא זוהה",
-                "licensePlate": "מספר הרכב אם נראה בבירור ומלא (7-8 ספרות), אחרת הערך המדויק: לא זוהה",
-                "vehicleType": "סוג: רכב פרטי/משאית/טנדר/אוטובוס/אופנוע/רכב צבאי/טרקטורון",
-                "condition": "תקין/פגום/מוסווה/חשוד",
-                "confidence": 0.0-1.0
-            }
-            חשוב מאוד:
-            1. החזר רק JSON תקין, בלי טקסט נוסף לפני או אחרי.
-            2. לכל ערך לא ידוע/לא נראה השתמש בערך המדויק "לא זוהה" (לא null, לא "לא נראה בבירור", לא ערך אחר).
-            3. התמקד ברכב שבמרכז התמונה, התעלם מרכבים אחרים שעשויים להיות בקצוות.
-            """
+            prompt = """אתה מנתח ביטחוני. נתח את הרכב בתמונה בקפידה רבה.
+זהה את כל הפרטים הנראים לעין. תן תשובה מלאה ומפורטת.
+
+החזר JSON בלבד (ללא markdown, ללא טקסט לפני או אחרי):
+{
+    "color": "צבע הרכב בעברית - בחר אחד: לבן/שחור/אפור/כסוף/אדום/כחול/ירוק/צהוב/כתום/חום/בז'/זהב/בורדו/תכלת/סגול",
+    "secondaryColor": "צבע משני אם יש (גג, פסים) או null",
+    "manufacturer": "יצרן הרכב - נסה לזהות לפי הלוגו, צורת הפנסים, גריל: טויוטה/יונדאי/קיא/מזדה/הונדה/ניסאן/מיצובישי/סוזוקי/פולקסווגן/סקודה/שברולט/פורד/BMW/מרצדס/אאודי/סובארו/וולוו/פיג'ו/סיטרואן/רנו/דאצ'יה/סיאט",
+    "model": "דגם הרכב אם ניתן לזהות - נסה לזהות לפי צורת הרכב, או לא זוהה",
+    "vehicleType": "סוג הרכב - בחר אחד: רכב פרטי/SUV/ג'יפ/טנדר/משאית/אוטובוס/מיניבוס/אופנוע/קטנוע/אופניים/רכב מסחרי/רכב צבאי/אמבולנס/משטרה",
+    "licensePlate": "מספר הרכב אם נראה - רשום את כל הספרות והאותיות שניתן לקרוא, או לא זוהה",
+    "licensePlatePartial": true/false,
+    "bodyStyle": "סדאן/האצ'בק/סטיישן/קופה/קבריולט/וואן/פיקאפ",
+    "approximateYear": "משוער: ישן (לפני 2010)/בינוני (2010-2018)/חדש (2018+)",
+    "condition": "מצב הרכב: תקין/פגום/מלוכלך/נקי/משופץ",
+    "distinguishingFeatures": ["מאפיינים בולטים: מדבקות, פגיעות, ספוילר, חלונות כהים, גגון, מזוודות"],
+    "confidence": 0.85
+}
+
+הוראות חשובות:
+1. מלא את כל השדות - אל תשאיר שדות ריקים
+2. אם לא ניתן לזהות ערך, כתוב "לא זוהה"
+3. נסה מאוד לזהות את היצרן - בדוק לוגו, צורת גריל, פנסים
+4. נסה לזהות צבע מדויק - לא רק "בהיר" או "כהה"
+5. אם רואים חלק מלוח הרישוי, רשום מה שנראה"""
 
             response = await self._generate_content([prompt, img])
             result = self._parse_json(response.text)
@@ -392,30 +438,47 @@ class GeminiAnalyzer:
             return {"error": "Gemini not configured"}
 
         try:
-            img = self._frame_to_pil(frame, bbox)
+            # Use "person" class for person-specific enhancement
+            img = self._frame_to_pil(frame, bbox, class_name="person")
 
-            prompt = """
-            נתח את האדם במרכז התמונה בזהירות מנקודת מבט ביטחונית.
-            האדם הרלוונטי נמצא במרכז התמונה.
-            החזר JSON בלבד (ללא markdown):
-            {
-                "shirtColor": "צבע החולצה/הגופייה בעברית, או הערך המדויק: לא זוהה",
-                "pantsColor": "צבע המכנסיים בעברית, או הערך המדויק: לא זוהה",
-                "headwear": "כובע/קסדה/כיפה/כאפייה/מסכה/ללא",
-                "additionalClothing": ["אפוד", "מעיל", "תיק גב"],
-                "faceCovered": true/false,
-                "armed": true/false,
-                "weaponType": "סוג הנשק אם חמוש: רובה/אקדח/סכין/מטען חבלה, או הערך המדויק: לא זוהה",
-                "weaponVisible": true/false,
-                "posture": "עומד/יושב/רוכן/רץ/שוכב",
-                "suspiciousLevel": 1-5,
-                "description": "תיאור קצר של המראה"
-            }
-            חשוב מאוד:
-            1. החזר רק JSON תקין, בלי טקסט נוסף לפני או אחרי.
-            2. לכל ערך לא ידוע/לא נראה השתמש בערך המדויק "לא זוהה" (לא null, לא "לא נראה בבירור", לא ערך אחר).
-            3. התמקד באדם שבמרכז התמונה, התעלם מאנשים אחרים שעשויים להיות בקצוות.
-            """
+            prompt = """אתה מנתח ביטחוני מקצועי. נתח את האדם בתמונה בקפידה רבה.
+תאר את כל מה שאתה רואה בפירוט מלא. זה חשוב לזיהוי.
+
+החזר JSON בלבד (ללא markdown, ללא טקסט לפני או אחרי):
+{
+    "gender": "זכר/נקבה/לא ניתן לקבוע",
+    "approximateAge": "ילד (0-12)/נער (13-19)/צעיר (20-35)/מבוגר (36-55)/קשיש (55+)",
+    "shirtColor": "צבע החולצה - בחר: לבן/שחור/אפור/כחול/אדום/ירוק/צהוב/כתום/ורוד/סגול/חום/בז'/חאקי/צבאי/פסים/משובץ",
+    "shirtType": "סוג: חולצה/טישרט/חולצה מכופתרת/גופייה/סווטשירט/ז'קט/מעיל/אפודה",
+    "pantsColor": "צבע המכנסיים - בחר: שחור/כחול/ג'ינס/אפור/חום/בז'/חאקי/צבאי/לבן",
+    "pantsType": "סוג: מכנסיים ארוכים/שורטס/חצאית/שמלה",
+    "footwear": "סוג נעליים: נעלי ספורט/סנדלים/מגפיים/נעליים רגילות/יחף/לא נראה",
+    "footwearColor": "צבע הנעליים",
+    "headwear": "כיסוי ראש: כובע מצחייה/כובע צמר/כיפה/כאפייה/מטפחת/קסדה/ברדס/ללא",
+    "headwearColor": "צבע כיסוי הראש",
+    "accessories": ["משקפיים", "משקפי שמש", "שעון", "שרשרת", "עגילים", "תיק גב", "תיק צד", "תיק יד"],
+    "facialHair": "זקן מלא/זקן קצר/שפם/מגולח/לא נראה",
+    "hairColor": "צבע שיער: שחור/חום/בלונד/ג'ינג'י/אפור/לבן/קירח/לא נראה",
+    "hairStyle": "קצר/ארוך/קוקו/צמות/קירח/לא נראה",
+    "build": "מבנה גוף: רזה/ממוצע/שרירי/מוצק/כבד",
+    "posture": "עומד/הולך/רץ/יושב/רוכן/שוכב",
+    "faceCovered": false,
+    "maskType": "אם הפנים מכוסות: מסכה רפואית/מסכת סקי/כאפייה על הפנים/ברדס/לא מכוסה",
+    "carryingItems": ["תיק", "שקית", "חפץ לא מזוהה"],
+    "armed": false,
+    "weaponType": "אם חמוש: רובה/אקדח/סכין/מקל/לא חמוש",
+    "weaponLocation": "אם חמוש: ביד/בחגורה/על הגב/לא רלוונטי",
+    "suspiciousIndicators": ["התנהגות חשודה", "ביגוד לא תואם מזג אוויר", "מסתיר פנים"],
+    "suspiciousLevel": 1,
+    "description": "תיאור מילולי קצר וממוקד לזיהוי: גבר צעיר בחולצה כחולה ומכנסי ג'ינס עם תיק גב שחור"
+}
+
+הוראות קריטיות:
+1. מלא את כל השדות - זה חשוב לזיהוי!
+2. תאר צבעים ספציפיים, לא "בהיר" או "כהה"
+3. שדה description חייב לכלול תיאור שימושי לזיהוי
+4. armed=true רק אם רואים נשק בבירור
+5. אם לא רואים פרט מסוים, כתוב "לא נראה" """
 
             response = await self._generate_content([prompt, img])
             result = self._parse_json(response.text)

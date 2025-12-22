@@ -404,8 +404,9 @@ class DetectionLoop:
 
         # Initialize OSNet for person ReID
         try:
-            self.osnet = OSNetReID()
-            logger.info("✅ OSNet ReID (person) initialized: 512-dim features")
+            osnet_model = os.environ.get("OSNET_MODEL", "osnet_x0_5_imagenet.pth")
+            self.osnet = OSNetReID(model_name=osnet_model)
+            logger.info(f"✅ OSNet ReID (person) initialized: 512-dim features ({osnet_model})")
         except Exception as e:
             logger.warning(f"⚠️ OSNet initialization failed: {e} - Person ReID disabled")
 
@@ -419,9 +420,10 @@ class DetectionLoop:
         else:
             # Initialize TransReID for vehicle ReID
             try:
-                logger.info("Loading TransReID for vehicle ReID (this may take a minute on CPU)...")
-                self.vehicle_reid = TransReIDVehicle()
-                logger.info("✅ TransReID (vehicle) initialized: 768-dim features")
+                transreid_model = os.environ.get("TRANSREID_MODEL", "deit_transreid_vehicleID.pth")
+                logger.info(f"Loading TransReID for vehicle ReID ({transreid_model})...")
+                self.vehicle_reid = TransReIDVehicle(model_name=transreid_model)
+                logger.info(f"✅ TransReID (vehicle) initialized: 768-dim features ({transreid_model})")
             except Exception as e:
                 logger.warning(
                     f"⚠️ TransReID initialization failed: {e} - Vehicle ReID disabled"
@@ -429,9 +431,11 @@ class DetectionLoop:
 
             # Initialize CLIP for universal ReID (fallback for other classes)
             try:
-                logger.info("Loading CLIP for universal ReID (this may take a minute on CPU)...")
-                self.universal_reid = UniversalReID()
-                logger.info("✅ Universal ReID (CLIP) initialized: 768-dim features")
+                clip_model = os.environ.get("CLIP_MODEL", "clip-vit-base-patch32-full.pt")
+                clip_processor = os.environ.get("CLIP_PROCESSOR", "clip-vit-base-patch32-processor")
+                logger.info(f"Loading CLIP for universal ReID ({clip_model})...")
+                self.universal_reid = UniversalReID(model_path=clip_model, processor_path=clip_processor)
+                logger.info(f"✅ Universal ReID (CLIP) initialized: 768-dim features ({clip_model})")
             except Exception as e:
                 logger.warning(
                     f"⚠️ Universal ReID initialization failed: {e} - Universal ReID disabled"

@@ -56,17 +56,20 @@ class TransReIDVehicle(BaseReID):
         else:
             self.device = "cpu"
 
-        # Find models directory - go up from hamal-ai/ai-service/services/
+        # Find models directory - primary location is hamal-ai/ai-service/models/
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        possible_roots = [
-            os.path.abspath(os.path.join(current_dir, "..", "..", "..")),  # Ronai-Vision/
-            os.path.abspath(os.path.join(current_dir, "..", "..")),
-            os.path.abspath(os.path.join(current_dir, "..")),
+        # Go up from services/reid/ to ai-service/
+        ai_service_dir = os.path.abspath(os.path.join(current_dir, "..", ".."))
+        models_dir = os.path.join(ai_service_dir, "models")
+
+        # Search locations (prioritize ai-service/models)
+        search_locations = [
+            os.path.join(models_dir, model_name),  # Primary: ai-service/models/
+            model_name,                             # Direct path if absolute
         ]
 
         checkpoint_path = None
-        for root in possible_roots:
-            candidate = os.path.join(root, "models", model_name)
+        for candidate in search_locations:
             if os.path.exists(candidate):
                 checkpoint_path = candidate
                 break
@@ -74,7 +77,7 @@ class TransReIDVehicle(BaseReID):
         if checkpoint_path is None or not os.path.exists(checkpoint_path):
             raise FileNotFoundError(
                 f"TransReID Vehicle checkpoint '{model_name}' not found. "
-                f"Searched in: {[os.path.join(r, 'models', model_name) for r in possible_roots]}"
+                f"Expected at: {os.path.join(models_dir, model_name)}"
             )
 
         try:

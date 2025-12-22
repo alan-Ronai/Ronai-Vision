@@ -1,7 +1,35 @@
 import express from 'express';
+import mongoose from 'mongoose';
 import Event from '../models/Event.js';
 
 const router = express.Router();
+
+// In-memory event store for when MongoDB is not available
+const inMemoryEvents = [];
+const MAX_INMEMORY_EVENTS = 200;
+
+/**
+ * Check if MongoDB is connected
+ */
+function isMongoConnected() {
+  return mongoose.connection.readyState === 1;
+}
+
+/**
+ * Add event to in-memory store
+ */
+function addInMemoryEvent(event) {
+  inMemoryEvents.unshift({
+    ...event,
+    _id: `local-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+    createdAt: new Date(),
+    updatedAt: new Date()
+  });
+  // Keep only the most recent events
+  if (inMemoryEvents.length > MAX_INMEMORY_EVENTS) {
+    inMemoryEvents.pop();
+  }
+}
 
 /**
  * GET /api/events
@@ -19,6 +47,26 @@ router.get('/', async (req, res) => {
       startDate,
       endDate
     } = req.query;
+
+    // Use in-memory store if MongoDB not available
+    if (!isMongoConnected()) {
+      let filtered = [...inMemoryEvents];
+      if (type) filtered = filtered.filter(e => e.type === type);
+      if (severity) filtered = filtered.filter(e => e.severity === severity);
+      if (cameraId) filtered = filtered.filter(e => e.cameraId === cameraId);
+      if (acknowledged !== undefined) {
+        const ack = acknowledged === 'true';
+        filtered = filtered.filter(e => e.acknowledged === ack);
+      }
+      const paginated = filtered.slice(parseInt(offset), parseInt(offset) + parseInt(limit));
+      return res.json({
+        events: paginated,
+        total: filtered.length,
+        limit: parseInt(limit),
+        offset: parseInt(offset),
+        storage: 'in-memory'
+      });
+    }
 
     const query = {};
 
@@ -61,6 +109,12 @@ router.get('/', async (req, res) => {
 router.get('/recent', async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 50;
+
+    // Use in-memory store if MongoDB not available
+    if (!isMongoConnected()) {
+      return res.json(inMemoryEvents.slice(0, limit));
+    }
+
     const events = await Event.getRecent(limit);
     res.json(events);
   } catch (error) {
@@ -74,6 +128,12 @@ router.get('/recent', async (req, res) => {
  */
 router.get('/critical', async (req, res) => {
   try {
+    // Use in-memory store if MongoDB not available
+    if (!isMongoConnected()) {
+      const critical = inMemoryEvents.filter(e => e.severity === 'critical' && !e.acknowledged);
+      return res.json(critical);
+    }
+
     const events = await Event.getUnacknowledgedCritical();
     res.json(events);
   } catch (error) {
@@ -127,15 +187,19 @@ router.post('/', async (req, res) => {
     let savedEvent = eventData;
 
     // Try to save to MongoDB if connected
-    try {
-      const event = new Event(eventData);
-      savedEvent = await event.save();
-    } catch (dbError) {
-      // MongoDB not available - continue without saving
-      console.warn('⚠️  MongoDB not available, event not saved:', dbError.message);
-      // Add a temporary ID for the event
-      savedEvent._id = `temp-${Date.now()}`;
-      savedEvent.createdAt = new Date();
+    if (isMongoConnected()) {
+      try {
+        const event = new Event(eventData);
+        savedEvent = await event.save();
+      } catch (dbError) {
+        console.warn('⚠️  MongoDB save failed:', dbError.message);
+        addInMemoryEvent(eventData);
+        savedEvent = inMemoryEvents[0];
+      }
+    } else {
+      // MongoDB not available - save to in-memory store
+      addInMemoryEvent(eventData);
+      savedEvent = inMemoryEvents[0];
     }
 
     // Emit to all connected clients (works even without MongoDB)
