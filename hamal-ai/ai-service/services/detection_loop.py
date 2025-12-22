@@ -409,23 +409,33 @@ class DetectionLoop:
         except Exception as e:
             logger.warning(f"⚠️ OSNet initialization failed: {e} - Person ReID disabled")
 
-        # Initialize TransReID for vehicle ReID
-        try:
-            self.vehicle_reid = TransReIDVehicle()
-            logger.info("✅ TransReID (vehicle) initialized: 768-dim features")
-        except Exception as e:
-            logger.warning(
-                f"⚠️ TransReID initialization failed: {e} - Vehicle ReID disabled"
-            )
+        # Check if we should skip heavy models (for faster startup on CPU)
+        skip_heavy_models = os.environ.get("SKIP_HEAVY_REID_MODELS", "").lower() in ("1", "true", "yes")
 
-        # Initialize CLIP for universal ReID (fallback for other classes)
-        try:
-            self.universal_reid = UniversalReID()
-            logger.info("✅ Universal ReID (CLIP) initialized: 768-dim features")
-        except Exception as e:
-            logger.warning(
-                f"⚠️ Universal ReID initialization failed: {e} - Universal ReID disabled"
-            )
+        if skip_heavy_models:
+            logger.info("⏩ Skipping TransReID and CLIP models (SKIP_HEAVY_REID_MODELS=1)")
+            self.vehicle_reid = None
+            self.universal_reid = None
+        else:
+            # Initialize TransReID for vehicle ReID
+            try:
+                logger.info("Loading TransReID for vehicle ReID (this may take a minute on CPU)...")
+                self.vehicle_reid = TransReIDVehicle()
+                logger.info("✅ TransReID (vehicle) initialized: 768-dim features")
+            except Exception as e:
+                logger.warning(
+                    f"⚠️ TransReID initialization failed: {e} - Vehicle ReID disabled"
+                )
+
+            # Initialize CLIP for universal ReID (fallback for other classes)
+            try:
+                logger.info("Loading CLIP for universal ReID (this may take a minute on CPU)...")
+                self.universal_reid = UniversalReID()
+                logger.info("✅ Universal ReID (CLIP) initialized: 768-dim features")
+            except Exception as e:
+                logger.warning(
+                    f"⚠️ Universal ReID initialization failed: {e} - Universal ReID disabled"
+                )
 
         # CRITICAL: Per-Class Confidence Thresholds
         # Different classes can have different minimum confidence scores
