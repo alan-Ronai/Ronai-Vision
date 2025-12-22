@@ -72,7 +72,8 @@ logs/
 *.log
 
 # Data and weights
-data/
+hamal-ai/ai-service/data/
+node_modules/
 weights/
 models/
 output/
