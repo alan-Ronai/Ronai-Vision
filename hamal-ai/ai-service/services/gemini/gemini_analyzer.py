@@ -182,9 +182,12 @@ class GeminiAnalyzer:
         The subject will be fully visible in the center of the image with
         additional context around it.
 
+        IMPORTANT: The frame may already be a crop from AnalysisBuffer.
+        If the bbox coordinates are outside the frame bounds, we use the entire frame.
+
         Args:
-            frame: OpenCV BGR numpy array
-            bbox: Bounding box [x1, y1, x2, y2]
+            frame: OpenCV BGR numpy array (may be full frame or pre-cropped)
+            bbox: Bounding box [x1, y1, x2, y2] (in original frame coordinates)
             max_size: Maximum dimension for the thumbnail (increased to 400 for better quality)
             margin_percent: Percentage of bbox size to add as margin (default 40% for better context)
 
@@ -192,6 +195,9 @@ class GeminiAnalyzer:
             Base64 encoded JPEG string or None on error
         """
         try:
+            if frame is None or frame.size == 0:
+                return None
+
             x1, y1, x2, y2 = map(int, bbox)
             h, w = frame.shape[:2]
 
@@ -202,21 +208,36 @@ class GeminiAnalyzer:
             if bbox_w <= 0 or bbox_h <= 0:
                 return None
 
-            # Add margin around the bbox (40% of bbox size on each side for better context)
-            margin_x = int(bbox_w * margin_percent)
-            margin_y = int(bbox_h * margin_percent)
+            # Check if frame is already a crop from AnalysisBuffer
+            # If bbox coordinates don't fit frame, or frame is small, use entire frame
+            bbox_outside_frame = (x1 >= w or y1 >= h or x2 > w * 1.5 or y2 > h * 1.5)
+            frame_is_small_crop = (w < bbox_w or h < bbox_h) or (w < 600 and h < 600 and w < bbox_w * 2)
 
-            # Expand bbox with margin, clamped to frame bounds
-            x1 = max(0, x1 - margin_x)
-            y1 = max(0, y1 - margin_y)
-            x2 = min(w, x2 + margin_x)
-            y2 = min(h, y2 + margin_y)
+            if bbox_outside_frame or frame_is_small_crop:
+                # Frame is already a crop - use entire frame as cutout
+                logger.debug(f"Frame appears pre-cropped ({w}x{h}), using entire frame")
+                crop = frame.copy()
+            else:
+                # Frame is full-size - need to crop
+                # Add margin around the bbox (40% of bbox size on each side for better context)
+                margin_x = int(bbox_w * margin_percent)
+                margin_y = int(bbox_h * margin_percent)
 
-            if x2 <= x1 or y2 <= y1:
+                # Expand bbox with margin, clamped to frame bounds
+                x1 = max(0, x1 - margin_x)
+                y1 = max(0, y1 - margin_y)
+                x2 = min(w, x2 + margin_x)
+                y2 = min(h, y2 + margin_y)
+
+                if x2 <= x1 or y2 <= y1:
+                    return None
+
+                # Crop the region with margin
+                crop = frame[y1:y2, x1:x2]
+
+            # Ensure crop has valid data
+            if crop is None or crop.size == 0:
                 return None
-
-            # Crop the region with margin
-            crop = frame[y1:y2, x1:x2]
 
             # Resize if too large (keep aspect ratio)
             crop_h, crop_w = crop.shape[:2]
@@ -226,7 +247,10 @@ class GeminiAnalyzer:
                 crop = cv2.resize(crop, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
             # Encode to JPEG with good quality
-            _, buffer = cv2.imencode('.jpg', crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
+            success, buffer = cv2.imencode('.jpg', crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
+            if not success:
+                return None
+
             return base64.b64encode(buffer).decode('utf-8')
 
         except Exception as e:

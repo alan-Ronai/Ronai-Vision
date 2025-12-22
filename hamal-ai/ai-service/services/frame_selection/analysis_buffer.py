@@ -13,7 +13,7 @@ import logging
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Dict, Optional, List, Tuple, Callable, Any
-from collections import deque
+from collections import deque, OrderedDict
 
 from .quality_scorer import (
     FrameQualityScorer,
@@ -112,6 +112,10 @@ class AnalysisBuffer:
 
         # Per-track buffers
         self._buffers: Dict[int, TrackBuffer] = {}  # track_id -> TrackBuffer
+        # Track IDs that have been analyzed (for has_been_analyzed check)
+        # Use OrderedDict to maintain insertion order for proper LRU eviction
+        self._analyzed_tracks: OrderedDict = OrderedDict()  # track_id -> timestamp
+        self._max_analyzed_history = 1000  # Max number of analyzed track IDs to remember
         self._lock = threading.Lock()
 
         # Callbacks for when analysis is ready
@@ -398,6 +402,13 @@ class AnalysisBuffer:
             f"frames={buffer.frames_received}, camera={buffer.camera_id}"
         )
 
+        # CRITICAL: Clear frame data from buffer to prevent memory leak
+        # Keep only minimal metadata, not the heavy numpy arrays
+        buffer.frames.clear()
+        if buffer.best_frame:
+            # Keep a reference to best_frame for return, but clear stored reference after
+            pass  # best_frame is already extracted above
+
         # Build metadata
         metadata = {
             "track_id": track_id,
@@ -424,7 +435,29 @@ class AnalysisBuffer:
             except Exception as e:
                 logger.error(f"Analysis callback error: {e}")
 
-        return (best_frame.frame_data, best_frame.bbox, metadata)
+        # Store result for return before clearing
+        result = (best_frame.frame_data, best_frame.bbox, metadata)
+
+        # CRITICAL: Clear the best_frame reference to free memory
+        buffer.best_frame = None
+
+        # Delete the buffer entirely after analysis to prevent memory buildup
+        # The track has been analyzed, we don't need to keep its data
+        del self._buffers[track_id]
+
+        # Remember that this track was analyzed (for has_been_analyzed)
+        # Store with timestamp for potential future use
+        self._analyzed_tracks[track_id] = time.time()
+
+        # Limit the size of analyzed tracks history to prevent unbounded growth
+        # Remove oldest entries (OrderedDict maintains insertion order)
+        while len(self._analyzed_tracks) > self._max_analyzed_history:
+            # popitem(last=False) removes the oldest (first inserted) item
+            self._analyzed_tracks.popitem(last=False)
+
+        logger.debug(f"Buffer cleaned up for track {track_id}")
+
+        return result
 
     def force_trigger(self, track_id: int) -> Optional[Tuple[np.ndarray, Tuple, Dict]]:
         """Force trigger analysis for a track.
@@ -458,13 +491,20 @@ class AnalysisBuffer:
     def has_been_analyzed(self, track_id: int) -> bool:
         """Check if a track's analysis has been triggered.
 
+        This checks the local cache of analyzed track IDs. The actual track data
+        is stored in the backend (MongoDB/trackedStore), not here.
+
         Args:
             track_id: Track identifier
 
         Returns:
-            True if analysis was triggered
+            True if analysis was triggered for this track
         """
         with self._lock:
+            # Check if track is in the analyzed dict (buffer was already cleaned up)
+            if track_id in self._analyzed_tracks:
+                return True
+            # Or check if buffer exists and was triggered (shouldn't happen after fix)
             buffer = self._buffers.get(track_id)
             return buffer is not None and buffer.analysis_triggered
 
@@ -523,16 +563,21 @@ class AnalysisBuffer:
             }
 
     def clear(self):
-        """Clear all buffers."""
+        """Clear all buffers and reset state.
+
+        Note: This does NOT affect tracks stored in the backend.
+        Only clears local buffering state.
+        """
         with self._lock:
-            # Force trigger all pending analyses
+            # Force trigger all pending analyses before clearing
             for track_id in list(self._buffers.keys()):
                 buffer = self._buffers[track_id]
                 if not buffer.analysis_triggered:
                     self._trigger_analysis(track_id, "clear")
 
             self._buffers.clear()
-            logger.info("Analysis buffer cleared")
+            self._analyzed_tracks.clear()
+            logger.info("Analysis buffer cleared (backend track data preserved)")
 
 
 # Global instance
