@@ -186,7 +186,7 @@ class FFmpegRTSPReader:
             '-vf', f'fps={self.config.fps},scale={self.config.width}:{self.config.height}',
             '-pix_fmt', 'bgr24',
             '-f', 'rawvideo',
-            '-fps_mode', 'cfr' if is_network_stream else 'passthrough',  # CFR for streams, passthrough for files
+            '-vsync', 'cfr' if is_network_stream else 'passthrough',  # CFR for streams, passthrough for files (vsync works with FFmpeg 4.x)
             '-an',  # No audio
             '-'
         ])

@@ -142,7 +142,7 @@ class FFmpegStream:
             '-vf', f'fps={self.config.fps},scale={self.config.width}:{self.config.height}',
             '-pix_fmt', 'bgr24',
             '-f', 'rawvideo',
-            '-fps_mode', 'cfr',             # Constant frame rate (replaces deprecated -vsync)
+            '-vsync', 'cfr',                # Constant frame rate (works with FFmpeg 4.x and 5.x)
             '-an',                          # No audio
             '-'
         ]
