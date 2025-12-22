@@ -596,7 +596,10 @@ function ObjectDetail({ object, onRefreshAnalysis }) {
           )}
           {!object.analysis && (
             <div className="col-span-2 text-gray-500 italic text-center py-4">
-              לא בוצע ניתוח עדיין. לחץ על "רענן ניתוח" כדי לנתח את האובייקט.
+              {object.isActive
+                ? 'לא בוצע ניתוח עדיין. לחץ על "רענן ניתוח" כדי לנתח את האובייקט.'
+                : 'האובייקט לא פעיל בסצנה. לא ניתן לבצע ניתוח עבור אובייקטים שאינם נראים במצלמה. זיהוי זה נשמר מהפעלה קודמת.'
+              }
             </div>
           )}
           </div>

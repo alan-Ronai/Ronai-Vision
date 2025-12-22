@@ -1847,6 +1847,8 @@ async def realtime_stats():
     # Build comprehensive response
     timing = detection_stats.get("timing", {})
     config = detection_stats.get("config", {})
+    pipeline_breakdown = detection_stats.get("pipeline_breakdown", {})
+    bottlenecks = detection_stats.get("bottlenecks", [])
 
     return {
         "timestamp": time.time(),
@@ -1854,15 +1856,33 @@ async def realtime_stats():
 
         # Performance metrics (timing in ms)
         "performance": {
+            # Main pipeline stages
             "yolo_ms": round(timing.get("yolo_ms", 0), 1),
-            "reid_ms": round(timing.get("reid_ms", 0), 1),
+            "yolo_postprocess_ms": round(timing.get("yolo_postprocess_ms", 0), 1),
+            "reid_ms": round(timing.get("reid_extract_ms", 0), 1),  # renamed for clarity
+            "reid_extract_ms": round(timing.get("reid_extract_ms", 0), 1),
+            "reid_per_detection_ms": round(timing.get("reid_per_detection_ms", 0), 1),
             "tracker_ms": round(timing.get("tracker_ms", 0), 1),
             "recovery_ms": round(timing.get("recovery_ms", 0), 1),
+            "weapon_ms": round(timing.get("weapon_ms", 0), 1),
             "drawing_ms": round(timing.get("drawing_ms", 0), 1),
             "total_frame_ms": round(timing.get("total_frame_ms", 0), 1),
+            # Gemini analysis timing
+            "gemini_vehicle_ms": round(timing.get("gemini_vehicle_ms", 0), 1),
+            "gemini_person_ms": round(timing.get("gemini_person_ms", 0), 1),
+            "image_enhance_ms": round(timing.get("image_enhance_ms", 0), 1),
+            "cutout_gen_ms": round(timing.get("cutout_gen_ms", 0), 1),
+            "backend_sync_ms": round(timing.get("backend_sync_ms", 0), 1),
+            "frame_quality_ms": round(timing.get("frame_quality_ms", 0), 1),
+            # FPS metrics
             "actual_fps": detection_stats.get("actual_fps", 0),
+            "theoretical_fps": detection_stats.get("theoretical_fps", 0),
             "target_fps": config.get("detection_fps", 15),
         },
+
+        # Pipeline breakdown (percentage of total time per stage)
+        "pipeline_breakdown": pipeline_breakdown,
+        "bottlenecks": bottlenecks,
 
         # Counters
         "counters": {
@@ -1900,6 +1920,15 @@ async def realtime_stats():
 
         # RTSP readers
         "rtsp_readers": rtsp_stats,
+
+        # Frame selection stats
+        "frame_selection": detection_stats.get("frame_selection", {}),
+
+        # Image enhancement stats
+        "image_enhancement": detection_stats.get("image_enhancement", {}),
+
+        # ReID cache stats
+        "reid_cache": detection_stats.get("reid_cache", {}),
     }
 
 

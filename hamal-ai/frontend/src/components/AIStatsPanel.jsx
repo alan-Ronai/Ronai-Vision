@@ -192,11 +192,11 @@ export default function AIStatsPanel({ isOpen, onClose }) {
             </div>
           ) : (
             <div className="space-y-6">
-              {/* Performance Timing Section */}
+              {/* Performance Timing Section - Detection Pipeline */}
               <div className="bg-gray-700 rounded-lg p-4">
                 <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
                   <span>⏱️</span>
-                  <span>זמני עיבוד (מילישניות)</span>
+                  <span>זמני עיבוד - Detection Pipeline</span>
                   <span className="text-sm font-normal text-gray-400 mr-auto">
                     סה"כ: {(perf.total_frame_ms || 0).toFixed(1)} ms/frame
                   </span>
@@ -204,20 +204,77 @@ export default function AIStatsPanel({ isOpen, onClose }) {
 
                 <div className="grid grid-cols-2 gap-x-8 gap-y-2">
                   <TimingBar label="YOLO Detection" value={perf.yolo_ms} maxValue={50} color="yellow" />
-                  <TimingBar label="ReID Extraction" value={perf.reid_ms} maxValue={30} color="purple" />
+                  <TimingBar label="YOLO Postprocess" value={perf.yolo_postprocess_ms} maxValue={10} color="yellow" />
+                  <TimingBar label="ReID Extraction" value={perf.reid_extract_ms} maxValue={50} color="purple" />
+                  <TimingBar label="ReID Per Detection" value={perf.reid_per_detection_ms} maxValue={20} color="purple" />
                   <TimingBar label="BoT-SORT Tracker" value={perf.tracker_ms} maxValue={20} color="cyan" />
-                  <TimingBar label="Recovery" value={perf.recovery_ms} maxValue={30} color="green" />
+                  <TimingBar label="Recovery Pass" value={perf.recovery_ms} maxValue={30} color="green" />
+                  <TimingBar label="Weapon Detection" value={perf.weapon_ms} maxValue={30} color="red" />
                   <TimingBar label="Drawing" value={perf.drawing_ms} maxValue={15} color="blue" />
-                  <div className="flex items-center gap-4">
-                    <div className={`text-2xl font-bold ${fpsEfficiency >= 90 ? 'text-green-400' : fpsEfficiency >= 70 ? 'text-yellow-400' : 'text-red-400'}`}>
-                      {actualFps} FPS
-                    </div>
-                    <div className="text-sm text-gray-400">
-                      יעד: {targetFps} FPS ({fpsEfficiency}%)
-                    </div>
+                </div>
+
+                {/* FPS Display */}
+                <div className="flex items-center gap-4 mt-4 pt-4 border-t border-gray-600">
+                  <div className={`text-2xl font-bold ${fpsEfficiency >= 90 ? 'text-green-400' : fpsEfficiency >= 70 ? 'text-yellow-400' : 'text-red-400'}`}>
+                    {actualFps} FPS
+                  </div>
+                  <div className="text-sm text-gray-400">
+                    יעד: {targetFps} FPS ({fpsEfficiency}%)
+                  </div>
+                  <div className="text-sm text-gray-400 mr-auto">
+                    תיאורטי: {(perf.theoretical_fps || 0).toFixed(1)} FPS
                   </div>
                 </div>
               </div>
+
+              {/* Gemini Analysis Timing */}
+              <div className="bg-gray-700 rounded-lg p-4">
+                <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
+                  <span>🤖</span>
+                  <span>זמני ניתוח Gemini</span>
+                </h3>
+
+                <div className="grid grid-cols-2 gap-x-8 gap-y-2">
+                  <TimingBar label="Frame Quality Score" value={perf.frame_quality_ms} maxValue={20} color="cyan" />
+                  <TimingBar label="Image Enhancement" value={perf.image_enhance_ms} maxValue={50} color="green" />
+                  <TimingBar label="Gemini Vehicle API" value={perf.gemini_vehicle_ms} maxValue={3000} color="yellow" />
+                  <TimingBar label="Gemini Person API" value={perf.gemini_person_ms} maxValue={3000} color="yellow" />
+                  <TimingBar label="Cutout Generation" value={perf.cutout_gen_ms} maxValue={20} color="blue" />
+                  <TimingBar label="Backend Sync" value={perf.backend_sync_ms} maxValue={100} color="purple" />
+                </div>
+              </div>
+
+              {/* Pipeline Breakdown & Bottlenecks */}
+              {stats?.pipeline_breakdown && Object.keys(stats.pipeline_breakdown).length > 0 && (
+                <div className="bg-gray-700 rounded-lg p-4">
+                  <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
+                    <span>📊</span>
+                    <span>פירוט Pipeline (% מזמן כולל)</span>
+                  </h3>
+
+                  <div className="grid grid-cols-4 gap-4 mb-4">
+                    {Object.entries(stats.pipeline_breakdown).map(([stage, data]) => (
+                      <div key={stage} className="text-center">
+                        <div className={`text-lg font-bold ${data.pct > 30 ? 'text-red-400' : data.pct > 20 ? 'text-yellow-400' : 'text-green-400'}`}>
+                          {data.pct}%
+                        </div>
+                        <div className="text-xs text-gray-400">{stage}</div>
+                        <div className="text-xs text-gray-500">{data.ms}ms</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Bottlenecks Warning */}
+                  {stats?.bottlenecks && stats.bottlenecks.length > 0 && stats.bottlenecks[0] !== "None detected" && (
+                    <div className="bg-red-900/30 border border-red-700 rounded p-3">
+                      <div className="text-red-400 font-bold mb-1">⚠️ Bottlenecks Detected:</div>
+                      <div className="text-sm text-red-300">
+                        {stats.bottlenecks.join(' | ')}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Counters Grid */}
               <div className="grid grid-cols-4 gap-4">

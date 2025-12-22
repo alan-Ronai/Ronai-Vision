@@ -520,16 +520,49 @@ class DetectionLoop:
         }
 
         # Timing stats (rolling averages in milliseconds)
+        # Comprehensive timing breakdown for bottleneck analysis
         self._timing_stats = {
-            "yolo_ms": 0.0,
-            "reid_ms": 0.0,
-            "tracker_ms": 0.0,
-            "recovery_ms": 0.0,
-            "drawing_ms": 0.0,
-            "total_frame_ms": 0.0,
+            # Main pipeline stages
+            "yolo_ms": 0.0,              # YOLO inference time
+            "yolo_postprocess_ms": 0.0,  # YOLO result filtering/NMS
+            "reid_extract_ms": 0.0,      # ReID feature extraction (per-frame total)
+            "reid_single_ms": 0.0,       # ReID single extraction average
+            "tracker_ms": 0.0,           # BoT-SORT tracking
+            "recovery_ms": 0.0,          # Detection recovery pass
+            "weapon_ms": 0.0,            # Weapon detection
+            "drawing_ms": 0.0,           # Annotation drawing
+            "total_frame_ms": 0.0,       # Total frame processing time
+
+            # Sub-component breakdowns
+            "kalman_predict_ms": 0.0,    # Kalman filter prediction
+            "hungarian_ms": 0.0,         # Hungarian assignment
+            "cost_matrix_ms": 0.0,       # Cost matrix computation
+
+            # Frame selection & Gemini
+            "frame_quality_ms": 0.0,     # Frame quality scoring
+            "image_enhance_ms": 0.0,     # Image enhancement
+            "gemini_vehicle_ms": 0.0,    # Gemini vehicle analysis
+            "gemini_person_ms": 0.0,     # Gemini person analysis
+            "cutout_gen_ms": 0.0,        # Cutout image generation
+
+            # I/O and sync
+            "backend_sync_ms": 0.0,      # Backend HTTP sync
+            "frame_copy_ms": 0.0,        # Frame memory copy
+            "queue_wait_ms": 0.0,        # Time waiting for queue
+
+            # Per-detection averages
+            "reid_per_detection_ms": 0.0,  # Average ReID per detection
         }
-        self._timing_samples = 0
+        # Per-key sample counts for accurate averaging
+        self._timing_samples = {key: 0 for key in self._timing_stats.keys()}
         self._timing_alpha = 0.1  # Exponential moving average factor
+
+        # Additional counters for rate calculations
+        self._timing_counts = {
+            "reid_extractions_this_frame": 0,
+            "detections_this_frame": 0,
+            "tracks_updated_this_frame": 0,
+        }
 
         # Recovery throttling
         self._recovery_counter = 0
@@ -795,11 +828,11 @@ class DetectionLoop:
                 max_det=30,  # Reduced from 50 - scenes rarely have this many unique objects
                 agnostic_nms=True,  # Merge overlapping boxes across classes
             )[0]
-            yolo_elapsed = (time.time() - yolo_start) * 1000
-            self._update_timing("yolo_ms", yolo_elapsed)
+            yolo_inference_elapsed = (time.time() - yolo_start) * 1000
+            self._update_timing("yolo_ms", yolo_inference_elapsed)
 
-            # Separate detections by class
-            reid_start = time.time()
+            # Separate detections by class (post-processing)
+            postprocess_start = time.time()
             vehicle_detections = []
             person_detections = []
             vehicle_classes = ["car", "truck", "bus", "motorcycle", "bicycle"]
@@ -860,23 +893,21 @@ class DetectionLoop:
             person_detections = self._merge_overlapping_detections(person_detections, iou_threshold=0.5)
             vehicle_detections = self._merge_overlapping_detections(vehicle_detections, iou_threshold=0.5)
 
-            self._stats["detections"] += len(vehicle_detections) + len(
-                person_detections
-            )
-            # Note: reid_extractions is now counted inside the loop only when extraction actually happens
-            reid_elapsed = (time.time() - reid_start) * 1000
-            self._update_timing("reid_ms", reid_elapsed)
+            postprocess_elapsed = (time.time() - postprocess_start) * 1000
+            self._update_timing("yolo_postprocess_ms", postprocess_elapsed)
+
+            num_detections = len(vehicle_detections) + len(person_detections)
+            self._stats["detections"] += num_detections
+            self._timing_counts["detections_this_frame"] = num_detections
 
             # STEP 1.5: Pre-tracking ReID extraction for appearance-based matching
             # CRITICAL FIX FOR TRACK FRAGMENTATION:
             # When objects move quickly, IoU can be low, causing tracks to fragment.
             # By extracting ReID features BEFORE tracking, we enable appearance-based
             # matching as a fallback when motion-based matching (IoU) fails.
-            #
-            # Strategy:
-            # 1. If there are existing tracks with ReID features, extract ReID for
-            #    ALL detections to enable proper matching (prevents fragmentation)
-            # 2. Prioritize tracks that are "at risk" (lower IoU expected)
+            reid_extract_start = time.time()
+            reid_extract_count = 0
+
             if self.use_reid_features and self.bot_sort:
                 # Get all active tracks with ReID features (not just lost ones)
                 active_persons = [t for t in self.bot_sort.get_active_tracks("person", camera_id)
@@ -922,8 +953,15 @@ class DetectionLoop:
                                 except Exception as e:
                                     logger.debug(f"Pre-tracking ReID failed for vehicle: {e}")
 
+                    reid_extract_count += reid_pre_count
                     if reid_pre_count > 0:
                         logger.debug(f"Pre-tracking ReID: extracted {reid_pre_count} features for appearance matching")
+
+            reid_extract_elapsed = (time.time() - reid_extract_start) * 1000
+            self._update_timing("reid_extract_ms", reid_extract_elapsed)
+            self._timing_counts["reid_extractions_this_frame"] = reid_extract_count
+            if reid_extract_count > 0:
+                self._update_timing("reid_per_detection_ms", reid_extract_elapsed / reid_extract_count)
 
             # STEP 2: Run detection recovery BEFORE tracker update (if enabled)
             # This avoids double Kalman prediction
@@ -1063,6 +1101,7 @@ class DetectionLoop:
             self._update_timing("reid_ms", reid_post_elapsed)
 
             # STEP 4: Weapon Detection - detect firearms and mark nearby persons as armed
+            weapon_start = time.time()
             detected_weapons = []
             armed_persons_this_frame = []  # Track armed persons for summary log
 
@@ -1138,6 +1177,9 @@ class DetectionLoop:
                 except Exception as e:
                     logger.error(f"Weapon detection error: {e}")
 
+            weapon_elapsed = (time.time() - weapon_start) * 1000
+            self._update_timing("weapon_ms", weapon_elapsed)
+
             # Check for armed persons
             armed_persons = []
             for p in tracked_persons:
@@ -1198,7 +1240,7 @@ class DetectionLoop:
             # Total frame time
             total_elapsed = (time.time() - frame_start) * 1000
             self._update_timing("total_frame_ms", total_elapsed)
-            self._timing_samples += 1
+            # Note: _timing_samples is now per-key, updated in _update_timing()
 
             return DetectionResult(
                 camera_id=camera_id,
@@ -1962,13 +2004,16 @@ class DetectionLoop:
             if self.analysis_buffer.has_been_analyzed(track_id):
                 continue
 
-            # Add frame to buffer
+            # Add frame to buffer (includes quality scoring)
+            quality_start = time.time()
             trigger_result = self.analysis_buffer.add_frame(
                 track_id=track_id,
                 frame=result.frame,
                 bbox=tuple(v.get("bbox", [0, 0, 0, 0])),
                 confidence=v.get("confidence", 0.5),
             )
+            quality_elapsed = (time.time() - quality_start) * 1000
+            self._update_timing("frame_quality_ms", quality_elapsed)
 
             # If buffer triggered, queue analysis
             if trigger_result:
@@ -1986,13 +2031,16 @@ class DetectionLoop:
             if self.analysis_buffer.has_been_analyzed(track_id):
                 continue
 
-            # Add frame to buffer
+            # Add frame to buffer (includes quality scoring)
+            quality_start = time.time()
             trigger_result = self.analysis_buffer.add_frame(
                 track_id=track_id,
                 frame=result.frame,
                 bbox=tuple(p.get("bbox", [0, 0, 0, 0])),
                 confidence=p.get("confidence", 0.5),
             )
+            quality_elapsed = (time.time() - quality_start) * 1000
+            self._update_timing("frame_quality_ms", quality_elapsed)
 
             # If buffer triggered, queue analysis
             if trigger_result:
@@ -2017,25 +2065,36 @@ class DetectionLoop:
     ):
         """Run Gemini analysis on optimal vehicle frame with image enhancement."""
         try:
+            analysis_start = time.time()
+
             # Cooldown check
             if time.time() - self._last_gemini.get(track_id, 0) < self.config.gemini_cooldown:
                 return
 
             # ENHANCEMENT: Enhance the frame before Gemini analysis
+            enhance_start = time.time()
             if self._use_image_enhancement and self.image_enhancer:
                 enhanced_frame = self.image_enhancer.enhance(frame, class_name="vehicle")
             else:
                 enhanced_frame = frame
+            enhance_elapsed = (time.time() - enhance_start) * 1000
+            self._update_timing("image_enhance_ms", enhance_elapsed)
 
             # Run Gemini analysis on the ENHANCED optimal frame
+            gemini_start = time.time()
             analysis = await self.gemini.analyze_vehicle(enhanced_frame, list(bbox))
+            gemini_elapsed = (time.time() - gemini_start) * 1000
+            self._update_timing("gemini_vehicle_ms", gemini_elapsed)
 
             # CRITICAL: Generate enhanced cutout for frontend display
             # This is the image that will appear in GlobalIDStore UI
+            cutout_start = time.time()
             is_pre_cropped = frame_metadata.get("is_crop", False)
             enhanced_cutout_b64 = self._generate_enhanced_cutout(
                 enhanced_frame, bbox, class_name="vehicle", is_pre_cropped=is_pre_cropped
             )
+            cutout_elapsed = (time.time() - cutout_start) * 1000
+            self._update_timing("cutout_gen_ms", cutout_elapsed)
             if enhanced_cutout_b64:
                 analysis["cutout_image"] = enhanced_cutout_b64
 
@@ -2062,18 +2121,25 @@ class DetectionLoop:
 
             self._last_gemini[track_id] = time.time()
 
+            # Log what we're syncing (for debugging cutout issues)
+            has_cutout = "cutout_image" in analysis and analysis["cutout_image"]
+            cutout_size = len(analysis.get("cutout_image", "")) if has_cutout else 0
             logger.info(
                 f"Analyzed vehicle {track_id} (optimal frame): "
                 f"{analysis.get('manufacturer', '?')} {analysis.get('color', '?')} "
                 f"plate={analysis.get('licensePlate', '?')} "
-                f"quality={frame_metadata.get('quality_score', 0):.2f} enhanced={self._use_image_enhancement}"
+                f"quality={frame_metadata.get('quality_score', 0):.2f} enhanced={self._use_image_enhancement} "
+                f"cutout={cutout_size}B"
             )
 
             # Sync analysis to backend (includes enhanced cutout)
+            sync_start = time.time()
             try:
                 await backend_sync.update_analysis(gid=track_id, analysis=analysis)
             except Exception as sync_error:
-                logger.debug(f"Backend sync error: {sync_error}")
+                logger.warning(f"Backend sync error for vehicle {track_id}: {sync_error}")
+            sync_elapsed = (time.time() - sync_start) * 1000
+            self._update_timing("backend_sync_ms", sync_elapsed)
 
             # SCENARIO HOOK: Report vehicle with license plate to scenario manager
             # This will trigger the Armed Attack scenario if the plate is stolen
@@ -2107,25 +2173,36 @@ class DetectionLoop:
     ):
         """Run Gemini analysis on optimal person frame with image enhancement."""
         try:
+            analysis_start = time.time()
+
             # Cooldown check
             if time.time() - self._last_gemini.get(track_id, 0) < self.config.gemini_cooldown:
                 return
 
             # ENHANCEMENT: Enhance the frame before Gemini analysis
+            enhance_start = time.time()
             if self._use_image_enhancement and self.image_enhancer:
                 enhanced_frame = self.image_enhancer.enhance(frame, class_name="person")
             else:
                 enhanced_frame = frame
+            enhance_elapsed = (time.time() - enhance_start) * 1000
+            self._update_timing("image_enhance_ms", enhance_elapsed)
 
             # Run Gemini analysis on the ENHANCED optimal frame
+            gemini_start = time.time()
             analysis = await self.gemini.analyze_person(enhanced_frame, list(bbox))
+            gemini_elapsed = (time.time() - gemini_start) * 1000
+            self._update_timing("gemini_person_ms", gemini_elapsed)
 
             # CRITICAL: Generate enhanced cutout for frontend display
             # This is the image that will appear in GlobalIDStore UI
+            cutout_start = time.time()
             is_pre_cropped = frame_metadata.get("is_crop", False)
             enhanced_cutout_b64 = self._generate_enhanced_cutout(
                 enhanced_frame, bbox, class_name="person", is_pre_cropped=is_pre_cropped
             )
+            cutout_elapsed = (time.time() - cutout_start) * 1000
+            self._update_timing("cutout_gen_ms", cutout_elapsed)
             if enhanced_cutout_b64:
                 analysis["cutout_image"] = enhanced_cutout_b64
 
@@ -2152,17 +2229,24 @@ class DetectionLoop:
 
             self._last_gemini[track_id] = time.time()
 
+            # Log what we're syncing (for debugging cutout issues)
+            has_cutout = "cutout_image" in analysis and analysis["cutout_image"]
+            cutout_size = len(analysis.get("cutout_image", "")) if has_cutout else 0
             logger.info(
                 f"Analyzed person {track_id} (optimal frame): "
                 f"armed={analysis.get('armed', False)} "
-                f"quality={frame_metadata.get('quality_score', 0):.2f} enhanced={self._use_image_enhancement}"
+                f"quality={frame_metadata.get('quality_score', 0):.2f} enhanced={self._use_image_enhancement} "
+                f"cutout={cutout_size}B"
             )
 
             # Sync analysis to backend (includes enhanced cutout)
+            sync_start = time.time()
             try:
                 await backend_sync.update_analysis(gid=track_id, analysis=analysis)
             except Exception as sync_error:
-                logger.debug(f"Backend sync error: {sync_error}")
+                logger.warning(f"Backend sync error for person {track_id}: {sync_error}")
+            sync_elapsed = (time.time() - sync_start) * 1000
+            self._update_timing("backend_sync_ms", sync_elapsed)
 
             # Check if armed
             is_armed = analysis.get("armed") or analysis.get("חמוש")
@@ -2567,11 +2651,13 @@ class DetectionLoop:
 
     def _update_timing(self, key: str, elapsed_ms: float):
         """Update timing stat with exponential moving average."""
-        if self._timing_samples < 10:
+        samples = self._timing_samples.get(key, 0)
+
+        if samples < 10:
             # Use simple average for first 10 samples
             self._timing_stats[key] = (
-                (self._timing_stats[key] * self._timing_samples + elapsed_ms)
-                / (self._timing_samples + 1)
+                (self._timing_stats[key] * samples + elapsed_ms)
+                / (samples + 1)
             )
         else:
             # Use exponential moving average after warmup
@@ -2580,11 +2666,47 @@ class DetectionLoop:
                 + (1 - self._timing_alpha) * self._timing_stats[key]
             )
 
+        self._timing_samples[key] = samples + 1
+
     def get_stats(self) -> dict:
-        """Get loop statistics."""
+        """Get loop statistics with comprehensive timing breakdown."""
         # Calculate FPS from frames processed
         uptime = time.time() - getattr(self, '_start_time', time.time())
         actual_fps = self._stats["frames_processed"] / max(1, uptime)
+
+        # Calculate theoretical max FPS from timing
+        total_ms = self._timing_stats.get("total_frame_ms", 0)
+        theoretical_fps = 1000 / max(1, total_ms) if total_ms > 0 else 0
+
+        # Create formatted timing with sample counts for debugging
+        timing_with_samples = {}
+        for key, value in self._timing_stats.items():
+            samples = self._timing_samples.get(key, 0)
+            timing_with_samples[key] = {
+                "avg_ms": round(value, 2),
+                "samples": samples,
+            }
+
+        # Calculate pipeline breakdown percentages (what % of total time each step takes)
+        pipeline_breakdown = {}
+        if total_ms > 0:
+            pipeline_stages = [
+                "yolo_ms", "yolo_postprocess_ms", "reid_extract_ms",
+                "tracker_ms", "recovery_ms", "weapon_ms", "drawing_ms"
+            ]
+            for stage in pipeline_stages:
+                stage_ms = self._timing_stats.get(stage, 0)
+                percentage = (stage_ms / total_ms) * 100
+                pipeline_breakdown[stage.replace("_ms", "")] = {
+                    "ms": round(stage_ms, 2),
+                    "pct": round(percentage, 1),
+                }
+
+        # Identify bottlenecks (stages taking >20% of total time)
+        bottlenecks = []
+        for stage, data in pipeline_breakdown.items():
+            if data["pct"] > 20:
+                bottlenecks.append(f"{stage}: {data['pct']}%")
 
         stats = {
             **self._stats,
@@ -2593,8 +2715,12 @@ class DetectionLoop:
             "result_queue_size": self._result_queue.qsize(),
             "active_cameras": list(self._annotated_frames.keys()),
             "actual_fps": round(actual_fps, 1),
+            "theoretical_fps": round(theoretical_fps, 1),
             "uptime_seconds": round(uptime, 1),
             "timing": self._timing_stats,
+            "timing_detailed": timing_with_samples,
+            "pipeline_breakdown": pipeline_breakdown,
+            "bottlenecks": bottlenecks if bottlenecks else ["None detected"],
             "config": {
                 "detection_fps": self.config.detection_fps,
                 "stream_fps": self.config.stream_fps,
