@@ -342,7 +342,7 @@ class BBoxDrawer:
 class LoopConfig:
     """Detection loop configuration."""
 
-    backend_url: str = "http://localhost:3000"
+    backend_url: str = field(default_factory=lambda: os.environ.get("BACKEND_URL", "http://localhost:3000"))
 
     # FPS Settings - Lower values = slower processing = longer video duration
     # For demos, use lower FPS to extend video playback time

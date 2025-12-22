@@ -44,7 +44,7 @@ def validate_video_file(video_path: str) -> bool:
     return True
 
 
-def create_camera(video_path: str, camera_id: str, camera_name: str) -> bool:
+def create_camera(video_path: str, camera_id: str, camera_name: str, backend_url: str) -> bool:
     """Create a camera entry pointing to the video file."""
 
     # Convert to absolute path
@@ -66,7 +66,7 @@ def create_camera(video_path: str, camera_id: str, camera_name: str) -> bool:
         # Create camera in backend
         print(f"\n📡 Creating camera in backend...")
         response = requests.post(
-            f"{BACKEND_URL}/api/cameras",
+            f"{backend_url}/api/cameras",
             json=camera_data,
             timeout=10
         )
@@ -79,7 +79,7 @@ def create_camera(video_path: str, camera_id: str, camera_name: str) -> bool:
             # Camera might already exist - try to update
             print(f"⚠️  Camera {camera_id} may already exist, attempting update...")
             response = requests.put(
-                f"{BACKEND_URL}/api/cameras/{camera_id}",
+                f"{backend_url}/api/cameras/{camera_id}",
                 json=camera_data,
                 timeout=10
             )
@@ -93,7 +93,7 @@ def create_camera(video_path: str, camera_id: str, camera_name: str) -> bool:
             return False
 
     except requests.exceptions.ConnectionError:
-        print(f"❌ Cannot connect to backend at {BACKEND_URL}")
+        print(f"❌ Cannot connect to backend at {backend_url}")
         print("   Make sure the backend is running: npm run dev")
         return False
     except Exception as e:
@@ -103,14 +103,14 @@ def create_camera(video_path: str, camera_id: str, camera_name: str) -> bool:
     return True
 
 
-def start_detection(camera_id: str, video_path: str) -> bool:
+def start_detection(camera_id: str, video_path: str, ai_service_url: str) -> bool:
     """Start AI detection for the camera."""
     abs_path = str(Path(video_path).absolute())
 
     try:
         print(f"\n🤖 Starting AI detection...")
         response = requests.post(
-            f"{AI_SERVICE_URL}/detection/start/{camera_id}",
+            f"{ai_service_url}/detection/start/{camera_id}",
             params={"rtsp_url": abs_path},
             timeout=30
         )
@@ -125,7 +125,7 @@ def start_detection(camera_id: str, video_path: str) -> bool:
             return False
 
     except requests.exceptions.ConnectionError:
-        print(f"❌ Cannot connect to AI service at {AI_SERVICE_URL}")
+        print(f"❌ Cannot connect to AI service at {ai_service_url}")
         print("   Make sure the AI service is running: python main.py")
         return False
     except Exception as e:
@@ -133,12 +133,12 @@ def start_detection(camera_id: str, video_path: str) -> bool:
         return False
 
 
-def enable_demo_mode() -> bool:
+def enable_demo_mode(ai_service_url: str) -> bool:
     """Enable demo mode (slower FPS for longer video duration)."""
     try:
         print(f"\n🐌 Enabling demo mode (slower processing)...")
         response = requests.post(
-            f"{AI_SERVICE_URL}/detection/config/demo-mode",
+            f"{ai_service_url}/detection/config/demo-mode",
             params={"enabled": True},
             timeout=10
         )
@@ -207,10 +207,9 @@ Examples:
 
     args = parser.parse_args()
 
-    # Update URLs if provided
-    global BACKEND_URL, AI_SERVICE_URL
-    BACKEND_URL = args.backend_url
-    AI_SERVICE_URL = args.ai_url
+    # Use URLs from args (they already default to the module-level constants)
+    backend_url = args.backend_url
+    ai_service_url = args.ai_url
 
     print("=" * 60)
     print("🎬 HAMAL-AI Soldier Video Upload Script")
@@ -221,17 +220,17 @@ Examples:
         sys.exit(1)
 
     # Step 2: Create camera
-    if not create_camera(args.video_path, args.camera_id, args.camera_name):
+    if not create_camera(args.video_path, args.camera_id, args.camera_name, backend_url):
         sys.exit(1)
 
     # Step 3: Start detection
-    if not start_detection(args.camera_id, args.video_path):
+    if not start_detection(args.camera_id, args.video_path, ai_service_url):
         print("\n⚠️  Camera created but detection not started.")
         print("   You may need to start detection manually from the UI.")
 
     # Step 4: Enable demo mode if requested
     if args.demo_mode:
-        enable_demo_mode()
+        enable_demo_mode(ai_service_url)
 
     print("\n" + "=" * 60)
     print("✅ Setup complete!")

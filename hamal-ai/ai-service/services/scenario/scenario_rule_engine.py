@@ -5,6 +5,7 @@ Processes scenario rules defined in scenario_rules.json.
 Manages multi-stage scenarios with automatic and manual transitions.
 """
 
+import os
 import json
 import asyncio
 import logging
@@ -17,7 +18,7 @@ from dataclasses import dataclass, field
 logger = logging.getLogger(__name__)
 
 # Backend API URL
-BACKEND_URL = "http://localhost:3000"
+BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:3000")
 
 
 @dataclass

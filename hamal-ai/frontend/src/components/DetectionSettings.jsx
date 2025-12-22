@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 
-const AI_SERVICE_URL = 'http://localhost:8000';
+const AI_SERVICE_URL = import.meta.env.VITE_AI_SERVICE_URL || 'http://localhost:8000';
 
 export default function DetectionSettings({ isOpen, onClose }) {
   const [config, setConfig] = useState({
