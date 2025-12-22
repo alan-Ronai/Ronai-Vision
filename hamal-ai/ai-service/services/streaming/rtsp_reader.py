@@ -148,7 +148,7 @@ class FFmpegRTSPReader:
             cmd.extend([
                 # RTSP transport - TCP is more reliable for H264
                 '-rtsp_transport', 'tcp' if self.config.tcp_transport else 'udp',
-                '-stimeout', '5000000',         # Socket timeout 5 seconds (more reliable than -timeout)
+                '-timeout', '5000000',          # Connection timeout 5 seconds (in microseconds)
 
                 # Buffer settings - balance between latency and stability
                 # NOTE: nobuffer causes H264 decode errors - using genpts+discardcorrupt instead
