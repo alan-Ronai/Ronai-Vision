@@ -149,9 +149,14 @@ export function updateAnalysis(gid, analysis) {
     analyzedAt: now,
   };
 
-  // Sync armed status
-  if (analysis.armed !== undefined) {
+  // Sync armed status - ONLY for persons (vehicles can't be armed)
+  if (analysis.armed !== undefined && obj.type === 'person') {
     obj.isArmed = analysis.armed;
+  } else if (obj.type === 'vehicle' && analysis.armed) {
+    // Remove armed flag from vehicles - this is an error
+    delete obj.analysis.armed;
+    delete obj.analysis.חמוש;
+    console.warn(`[TrackedStore] Ignoring armed=true for vehicle GID ${gid}`);
   }
 
   obj.updatedAt = now;

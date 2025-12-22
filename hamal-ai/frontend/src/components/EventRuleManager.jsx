@@ -2,8 +2,8 @@ import { useState, useEffect, useRef } from 'react';
 import { useApp } from '../context/AppContext';
 import { useScenario } from '../context/ScenarioContext';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
-const AI_API_URL = import.meta.env.VITE_AI_API_URL || 'http://localhost:8000';
+const API_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3000';
+const AI_SERVICE_URL = import.meta.env.VITE_AI_SERVICE_URL || 'http://localhost:8000';
 
 // Available placeholders that can be used in templates
 const AVAILABLE_PLACEHOLDERS = [
@@ -98,7 +98,7 @@ export default function EventRuleManager({ isOpen, onClose }) {
   const fetchScenarioRules = async () => {
     try {
       setScenarioLoading(true);
-      const res = await fetch(`${AI_API_URL}/scenario-rules`);
+      const res = await fetch(`${AI_SERVICE_URL}/scenario-rules`);
       if (res.ok) {
         const data = await res.json();
         setScenarioRules(data.scenarios || []);

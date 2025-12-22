@@ -1,6 +1,8 @@
 import { useApp } from '../context/AppContext';
 import { useState } from 'react';
 
+const AI_SERVICE_URL = import.meta.env.VITE_AI_SERVICE_URL || 'http://localhost:8000';
+
 // Armed indicator badge
 const ArmedBadge = ({ armed, weaponType }) => {
   if (!armed) return null;
@@ -169,8 +171,7 @@ function EventItem({ event, severityColors, typeIcons, formatTime }) {
     // If it's already a full URL, use it directly
     if (videoClip.startsWith('http')) return videoClip;
     // If it's a relative path starting with /recordings, point to AI service
-    const aiServiceUrl = API_URL?.replace(':3000', ':8000') || 'http://localhost:8000';
-    return `${aiServiceUrl}${videoClip}`;
+    return `${AI_SERVICE_URL}${videoClip}`;
   };
 
   return (

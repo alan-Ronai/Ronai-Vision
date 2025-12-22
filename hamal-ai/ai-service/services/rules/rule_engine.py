@@ -379,10 +379,15 @@ class RuleEngine:
 
         relevant_conditions = type_mapping.get(event_type, [])
         if not relevant_conditions:
-            return self.rules  # Return all rules if event type not mapped
+            # Return all enabled rules if event type not mapped
+            return [r for r in self.rules if r.get("enabled", True)]
 
         matching_rules = []
         for rule in self.rules:
+            # Skip disabled rules (safety check - should already be filtered by backend)
+            if not rule.get("enabled", True):
+                continue
+
             conditions = rule.get("conditions", {})
             condition_items = conditions.get("items", [])
 

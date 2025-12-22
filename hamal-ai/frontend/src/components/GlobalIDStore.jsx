@@ -281,14 +281,14 @@ export default function GlobalIDStore({ isOpen, onClose }) {
                         ) : (
                           <span className="text-2xl">
                             {obj.type === 'person'
-                              ? (obj.isArmed || obj.analysis?.armed ? '🔫' : '👤')
+                              ? ((obj.isArmed || obj.analysis?.armed) ? '🔫' : '👤')
                               : '🚗'}
                           </span>
                         )}
                         <div>
                           <div className="font-bold">
                             GID #{obj.gid}
-                            {(obj.isArmed || obj.analysis?.armed) && (
+                            {obj.type === 'person' && (obj.isArmed || obj.analysis?.armed) && (
                               <span className="mr-2 text-red-400 text-sm">⚠️ חמוש</span>
                             )}
                           </div>
@@ -339,7 +339,8 @@ function ObjectDetail({ object, onRefreshAnalysis }) {
     return new Date(date).toLocaleString('he-IL');
   };
 
-  const isArmed = object.isArmed || object.analysis?.armed;
+  // Armed status only applies to persons, not vehicles
+  const isArmed = object.type === 'person' && (object.isArmed || object.analysis?.armed);
 
   const handleRefreshAnalysis = async () => {
     setRefreshing(true);
