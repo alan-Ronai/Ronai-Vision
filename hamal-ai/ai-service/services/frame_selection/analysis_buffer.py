@@ -408,6 +408,7 @@ class AnalysisBuffer:
             "score_breakdown": best_frame.score_breakdown,
             "frames_buffered": buffer.frames_received,
             "buffer_time_ms": (time.time() - buffer.created_at) * 1000,
+            "is_crop": best_frame.is_crop,  # True if frame_data is pre-cropped
         }
 
         # Call registered callbacks

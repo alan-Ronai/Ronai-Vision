@@ -1686,6 +1686,7 @@ async def auto_load_cameras():
     """Load cameras from backend and start RTSP readers."""
     import httpx
 
+    logger.info(f"🔄 Auto-loading cameras from backend: {BACKEND_URL}/api/cameras")
     await asyncio.sleep(2)  # Wait for backend to be ready
 
     try:
@@ -1697,7 +1698,14 @@ async def auto_load_cameras():
                 return
 
             cameras = response.json()
+            logger.info(f"📋 Found {len(cameras)} cameras from backend")
             rtsp_manager = get_rtsp_manager()
+            detection_loop = get_detection_loop()
+
+            # Ensure the frame callback is registered
+            if detection_loop and detection_loop.on_frame not in rtsp_manager._frame_callbacks:
+                rtsp_manager.add_frame_callback(detection_loop.on_frame)
+                logger.info(f"Registered detection loop frame callback")
 
             for camera in cameras:
                 rtsp_url = camera.get('rtspUrl')
@@ -2081,15 +2089,40 @@ async def stop_camera(camera_id: str):
 
 
 @app.post("/detection/start/{camera_id}")
-async def start_camera_detection(camera_id: str):
-    """Start detection for a specific camera."""
+async def start_camera_detection(camera_id: str, rtsp_url: Optional[str] = None):
+    """Start detection for a specific camera.
+
+    Args:
+        camera_id: Camera identifier
+        rtsp_url: Optional RTSP URL or video file path. If not provided, fetches from backend.
+
+    Examples:
+        POST /detection/start/cam-1?rtsp_url=assets/test2.mp4
+        POST /detection/start/cam-1?rtsp_url=rtsp://192.168.1.100/stream
+    """
     import httpx
 
     try:
+        rtsp_manager = get_rtsp_manager()
+        detection_loop = get_detection_loop()
+
+        # Ensure the frame callback is registered (in case it wasn't during startup)
+        if detection_loop and detection_loop.on_frame not in rtsp_manager._frame_callbacks:
+            rtsp_manager.add_frame_callback(detection_loop.on_frame)
+            logger.info(f"Re-registered detection loop frame callback")
+
+        # If rtsp_url provided directly, use it
+        if rtsp_url:
+            config = RTSPConfig(width=1280, height=720, fps=TARGET_FPS, tcp_transport=True)
+            rtsp_manager.add_camera(camera_id, rtsp_url, config)
+            logger.info(f"Started camera {camera_id} with URL: {rtsp_url}")
+            return {"status": "started", "camera_id": camera_id, "rtsp_url": rtsp_url}
+
+        # Otherwise fetch from backend
         async with httpx.AsyncClient() as client:
             response = await client.get(f"{BACKEND_URL}/api/cameras/{camera_id}")
             if response.status_code != 200:
-                raise HTTPException(404, f"Camera {camera_id} not found")
+                raise HTTPException(404, f"Camera {camera_id} not found in backend. Use ?rtsp_url= to provide URL directly.")
 
             camera = response.json()
             rtsp_url = camera.get('rtspUrl')
@@ -2097,9 +2130,9 @@ async def start_camera_detection(camera_id: str):
                 raise HTTPException(400, f"Camera {camera_id} has no RTSP URL")
 
             config = RTSPConfig(width=1280, height=720, fps=TARGET_FPS, tcp_transport=True)
-            get_rtsp_manager().add_camera(camera_id, rtsp_url, config)
+            rtsp_manager.add_camera(camera_id, rtsp_url, config)
 
-            return {"status": "started", "camera_id": camera_id}
+            return {"status": "started", "camera_id": camera_id, "rtsp_url": rtsp_url}
 
     except HTTPException:
         raise

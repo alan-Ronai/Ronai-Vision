@@ -538,9 +538,11 @@ class DetectionLoop:
         self.scenario_hooks = get_scenario_hooks()
         logger.info("✅ Scenario hooks initialized for Armed Attack demo")
 
-        # Parallel Detection Pipeline (optional, enabled via env var)
+        # Parallel Detection Pipeline (DISABLED - causes track fragmentation)
+        # TODO: Fix parallel detection to properly handle centralized tracking
         # When enabled, uses multiple YOLO workers with dynamic scaling
-        self._use_parallel_detection = os.environ.get("USE_PARALLEL_DETECTION", "false").lower() == "true"
+        # TEMPORARILY FORCE DISABLED until track fragmentation is fixed
+        self._use_parallel_detection = False  # os.environ.get("USE_PARALLEL_DETECTION", "false").lower() == "true"
         self.parallel_integration: Optional[ParallelDetectionIntegration] = None
 
         if self._use_parallel_detection:
@@ -762,8 +764,8 @@ class DetectionLoop:
                 frame,
                 verbose=False,
                 conf=base_confidence,  # Low base threshold - filter per-class below
-                iou=0.4,  # Stricter NMS to prevent overlaps
-                max_det=50,  # Allow more detections
+                iou=0.5,  # Higher NMS threshold = more aggressive merging of overlapping boxes
+                max_det=30,  # Reduced from 50 - scenes rarely have this many unique objects
                 agnostic_nms=True,  # Merge overlapping boxes across classes
             )[0]
             yolo_elapsed = (time.time() - yolo_start) * 1000
@@ -825,6 +827,11 @@ class DetectionLoop:
                     vehicle_detections.append(det)
                 elif label == "person":
                     person_detections.append(det)
+
+            # ADDITIONAL NMS: Merge highly overlapping detections within each class
+            # YOLO's NMS may not catch all duplicates (e.g., partial body + full body detections)
+            person_detections = self._merge_overlapping_detections(person_detections, iou_threshold=0.5)
+            vehicle_detections = self._merge_overlapping_detections(vehicle_detections, iou_threshold=0.5)
 
             self._stats["detections"] += len(vehicle_detections) + len(
                 person_detections
@@ -1332,6 +1339,7 @@ class DetectionLoop:
         max_size: int = 400,
         jpeg_quality: int = 90,
         margin_percent: float = 0.25,
+        is_pre_cropped: bool = False,
     ) -> Optional[str]:
         """Generate an enhanced cutout image for frontend display.
 
@@ -1367,18 +1375,30 @@ class DetectionLoop:
             if bbox_w <= 0 or bbox_h <= 0:
                 return None
 
-            # CRITICAL FIX: Detect if frame is already a crop from AnalysisBuffer
-            # If frame dimensions are close to bbox dimensions (with margin), it's already cropped
-            # AnalysisBuffer uses 25% margin, so expected crop size is ~1.5x bbox
-            expected_crop_w = int(bbox_w * 1.5)
-            expected_crop_h = int(bbox_h * 1.5)
+            # Check if frame is already a crop from AnalysisBuffer
+            # Use the explicit flag if provided, otherwise try to detect
+            if is_pre_cropped:
+                is_already_cropped = True
+            else:
+                # Fallback detection: If frame dimensions are close to bbox dimensions (with margin)
+                # AnalysisBuffer uses 25% margin, so expected crop size is ~1.5x bbox
+                expected_crop_w = int(bbox_w * 1.5)
+                expected_crop_h = int(bbox_h * 1.5)
 
-            # If frame is small and close to expected crop size, it's already cropped
-            is_already_cropped = (
-                w <= expected_crop_w * 1.3 and  # Allow some tolerance
-                h <= expected_crop_h * 1.3 and
-                w < 800 and h < 800  # Full frames are typically larger
-            )
+                # Check if bbox coordinates are outside frame bounds - clear sign of pre-cropped frame
+                bbox_outside_frame = (x1 >= w or y1 >= h or x2 > w * 1.5 or y2 > h * 1.5)
+
+                # If frame is small and close to expected crop size, it's already cropped
+                # OR if the bbox coordinates don't make sense for this frame size
+                is_already_cropped = (
+                    bbox_outside_frame or  # Bbox coords don't fit frame = definitely pre-cropped
+                    (w < bbox_w or h < bbox_h) or  # Frame smaller than bbox = pre-cropped
+                    (
+                        w <= expected_crop_w * 1.5 and  # Allow more tolerance
+                        h <= expected_crop_h * 1.5 and
+                        w < 600 and h < 600  # Reduced threshold - crops are usually smaller
+                    )
+                )
 
             if is_already_cropped:
                 # Frame is already a crop - use entire frame as cutout
@@ -1419,6 +1439,83 @@ class DetectionLoop:
         except Exception as e:
             logger.warning(f"Failed to generate enhanced cutout: {e}")
             return None
+
+    def _merge_overlapping_detections(
+        self,
+        detections: List[Detection],
+        iou_threshold: float = 0.5
+    ) -> List[Detection]:
+        """Merge overlapping detections within the same class.
+
+        This is an additional NMS step after YOLO's built-in NMS.
+        It catches cases where YOLO detects the same object multiple times
+        (e.g., partial body + full body, or reflections).
+
+        Args:
+            detections: List of Detection objects
+            iou_threshold: IoU threshold for merging
+
+        Returns:
+            Filtered list with overlapping detections merged
+        """
+        if len(detections) <= 1:
+            return detections
+
+        # Sort by confidence (highest first)
+        sorted_dets = sorted(detections, key=lambda d: d.confidence, reverse=True)
+        kept = []
+
+        for det in sorted_dets:
+            should_keep = True
+
+            for kept_det in kept:
+                iou = self._compute_iou_xywh(det.bbox, kept_det.bbox)
+
+                if iou >= iou_threshold:
+                    # Overlapping - merge into the higher confidence one (already kept)
+                    should_keep = False
+                    break
+
+            if should_keep:
+                kept.append(det)
+
+        if len(kept) < len(detections):
+            logger.debug(f"Post-NMS merged {len(detections)} -> {len(kept)} detections")
+
+        return kept
+
+    @staticmethod
+    def _compute_iou_xywh(bbox1: Tuple, bbox2: Tuple) -> float:
+        """Compute IoU between two bboxes in (x, y, w, h) format."""
+        x1, y1, w1, h1 = bbox1
+        x2, y2, w2, h2 = bbox2
+
+        # Convert to xyxy
+        x1_min, y1_min = x1, y1
+        x1_max, y1_max = x1 + w1, y1 + h1
+        x2_min, y2_min = x2, y2
+        x2_max, y2_max = x2 + w2, y2 + h2
+
+        # Intersection
+        inter_x_min = max(x1_min, x2_min)
+        inter_y_min = max(y1_min, y2_min)
+        inter_x_max = min(x1_max, x2_max)
+        inter_y_max = min(y1_max, y2_max)
+
+        if inter_x_max <= inter_x_min or inter_y_max <= inter_y_min:
+            return 0.0
+
+        inter_area = (inter_x_max - inter_x_min) * (inter_y_max - inter_y_min)
+
+        # Union
+        area1 = w1 * h1
+        area2 = w2 * h2
+        union_area = area1 + area2 - inter_area
+
+        if union_area <= 0:
+            return 0.0
+
+        return inter_area / union_area
 
     def _recover_missing_detections(
         self,
@@ -1881,8 +1978,9 @@ class DetectionLoop:
 
             # CRITICAL: Generate enhanced cutout for frontend display
             # This is the image that will appear in GlobalIDStore UI
+            is_pre_cropped = frame_metadata.get("is_crop", False)
             enhanced_cutout_b64 = self._generate_enhanced_cutout(
-                enhanced_frame, bbox, class_name="vehicle"
+                enhanced_frame, bbox, class_name="vehicle", is_pre_cropped=is_pre_cropped
             )
             if enhanced_cutout_b64:
                 analysis["cutout_image"] = enhanced_cutout_b64
@@ -1970,8 +2068,9 @@ class DetectionLoop:
 
             # CRITICAL: Generate enhanced cutout for frontend display
             # This is the image that will appear in GlobalIDStore UI
+            is_pre_cropped = frame_metadata.get("is_crop", False)
             enhanced_cutout_b64 = self._generate_enhanced_cutout(
-                enhanced_frame, bbox, class_name="person"
+                enhanced_frame, bbox, class_name="person", is_pre_cropped=is_pre_cropped
             )
             if enhanced_cutout_b64:
                 analysis["cutout_image"] = enhanced_cutout_b64
