@@ -440,7 +440,6 @@ class DetectionLoop:
         # CRITICAL: Per-Class Confidence Thresholds
         # Different classes can have different minimum confidence scores
         # Higher threshold = fewer false positives for that class
-        import os
         self.class_confidence = {
             "person": float(os.environ.get("CONF_PERSON", "0.35")),
             "car": float(os.environ.get("CONF_CAR", "0.40")),
