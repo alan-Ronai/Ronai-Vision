@@ -185,6 +185,8 @@ function Dashboard() {
 }
 
 // Scenario Test Controls - Demo buttons for testing the scenario
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3000';
+
 function ScenarioTestControls() {
   const {
     scenario,
@@ -197,6 +199,52 @@ function ScenarioTestControls() {
   } = useScenario();
 
   const [showControls, setShowControls] = useState(false);
+  const [realDataLoading, setRealDataLoading] = useState(false);
+  const [realDataMessage, setRealDataMessage] = useState('');
+
+  // Trigger real data scenario
+  const triggerRealScenario = async (type) => {
+    setRealDataLoading(true);
+    setRealDataMessage('');
+    try {
+      let endpoint = '';
+      let body = {};
+
+      switch (type) {
+        case 'real-full':
+          endpoint = '/api/scenario/demo/real/full-scenario';
+          break;
+        case 'real-vehicle':
+          endpoint = '/api/scenario/demo/real/stolen-vehicle';
+          break;
+        case 'real-armed':
+          endpoint = '/api/scenario/demo/real/armed-persons';
+          body = { count: 3 };
+          break;
+        default:
+          return;
+      }
+
+      const response = await fetch(`${BACKEND_URL}${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+
+      const result = await response.json();
+      if (response.ok) {
+        setRealDataMessage(result.message || 'הופעל בהצלחה!');
+      } else {
+        setRealDataMessage(result.error || 'שגיאה');
+      }
+      setTimeout(() => setRealDataMessage(''), 3000);
+    } catch (error) {
+      console.error('Real scenario error:', error);
+      setRealDataMessage('שגיאה בחיבור');
+    } finally {
+      setRealDataLoading(false);
+    }
+  };
 
   return (
     <div className="fixed bottom-4 right-4 z-50">
@@ -208,7 +256,7 @@ function ScenarioTestControls() {
       </button>
 
       {showControls && (
-        <div className="bg-gray-800 rounded-lg shadow-xl p-4 w-80 space-y-2">
+        <div className="bg-gray-800 rounded-lg shadow-xl p-4 w-80 space-y-2 max-h-[80vh] overflow-y-auto">
           <h3 className="text-lg font-bold text-white mb-3">בקרת תרחיש</h3>
 
           {/* Current stage */}
@@ -220,7 +268,46 @@ function ScenarioTestControls() {
             )}
           </div>
 
-          {/* Test buttons */}
+          {/* Real Data Message */}
+          {realDataMessage && (
+            <div className="bg-blue-900 text-blue-200 p-2 rounded text-sm">
+              {realDataMessage}
+            </div>
+          )}
+
+          {/* REAL DATA BUTTONS - NEW! */}
+          <div className="border-2 border-green-500 rounded-lg p-3 bg-green-900/20">
+            <h4 className="text-green-400 font-bold mb-2 text-sm">🎯 נתונים אמיתיים מהסצנה:</h4>
+            <div className="space-y-2">
+              <button
+                onClick={() => triggerRealScenario('real-full')}
+                disabled={realDataLoading}
+                className="w-full bg-green-600 hover:bg-green-500 disabled:bg-gray-600 px-3 py-2 rounded text-sm font-bold"
+              >
+                🎯 תרחיש מלא (נתונים אמיתיים)
+              </button>
+              <button
+                onClick={() => triggerRealScenario('real-vehicle')}
+                disabled={realDataLoading}
+                className="w-full bg-green-700 hover:bg-green-600 disabled:bg-gray-600 px-3 py-2 rounded text-sm"
+              >
+                🚗 רכב גנוב מהסצנה
+              </button>
+              <button
+                onClick={() => triggerRealScenario('real-armed')}
+                disabled={realDataLoading}
+                className="w-full bg-green-700 hover:bg-green-600 disabled:bg-gray-600 px-3 py-2 rounded text-sm"
+              >
+                🔫 סמן אנשים כחמושים
+              </button>
+            </div>
+          </div>
+
+          {/* Divider */}
+          <div className="border-t border-gray-600 my-2"></div>
+
+          {/* Test buttons (fake data) */}
+          <h4 className="text-gray-400 text-sm">נתונים מדומים:</h4>
           <div className="space-y-2">
             <button
               onClick={() => testStartScenario('cam-1')}

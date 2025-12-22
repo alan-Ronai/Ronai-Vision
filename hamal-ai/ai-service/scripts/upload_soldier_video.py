@@ -32,7 +32,7 @@ def validate_video_file(video_path: str) -> bool:
         print(f"❌ Error: Video file not found: {video_path}")
         return False
 
-    valid_extensions = {'.mp4', '.avi', '.mkv', '.mov', '.webm', '.m4v'}
+    valid_extensions = {".mp4", ".avi", ".mkv", ".mov", ".webm", ".m4v"}
     if path.suffix.lower() not in valid_extensions:
         print(f"⚠️  Warning: Unusual video extension: {path.suffix}")
         print(f"   Supported formats: {', '.join(valid_extensions)}")
@@ -44,7 +44,9 @@ def validate_video_file(video_path: str) -> bool:
     return True
 
 
-def create_camera(video_path: str, camera_id: str, camera_name: str, backend_url: str) -> bool:
+def create_camera(
+    video_path: str, camera_id: str, camera_name: str, backend_url: str
+) -> bool:
     """Create a camera entry pointing to the video file."""
 
     # Convert to absolute path
@@ -66,9 +68,7 @@ def create_camera(video_path: str, camera_id: str, camera_name: str, backend_url
         # Create camera in backend
         print(f"\n📡 Creating camera in backend...")
         response = requests.post(
-            f"{backend_url}/api/cameras",
-            json=camera_data,
-            timeout=10
+            f"{backend_url}/api/cameras", json=camera_data, timeout=10
         )
 
         if response.status_code == 201:
@@ -79,9 +79,7 @@ def create_camera(video_path: str, camera_id: str, camera_name: str, backend_url
             # Camera might already exist - try to update
             print(f"⚠️  Camera {camera_id} may already exist, attempting update...")
             response = requests.put(
-                f"{backend_url}/api/cameras/{camera_id}",
-                json=camera_data,
-                timeout=10
+                f"{backend_url}/api/cameras/{camera_id}", json=camera_data, timeout=10
             )
             if response.ok:
                 print(f"✅ Camera updated: {camera_id}")
@@ -89,7 +87,9 @@ def create_camera(video_path: str, camera_id: str, camera_name: str, backend_url
                 print(f"❌ Failed to update camera: {response.text}")
                 return False
         else:
-            print(f"❌ Failed to create camera: {response.status_code} - {response.text}")
+            print(
+                f"❌ Failed to create camera: {response.status_code} - {response.text}"
+            )
             return False
 
     except requests.exceptions.ConnectionError:
@@ -112,7 +112,7 @@ def start_detection(camera_id: str, video_path: str, ai_service_url: str) -> boo
         response = requests.post(
             f"{ai_service_url}/detection/start/{camera_id}",
             params={"rtsp_url": abs_path},
-            timeout=30
+            timeout=30,
         )
 
         if response.ok:
@@ -121,7 +121,9 @@ def start_detection(camera_id: str, video_path: str, ai_service_url: str) -> boo
             print(f"   Status: {result.get('status', 'unknown')}")
             return True
         else:
-            print(f"❌ Failed to start detection: {response.status_code} - {response.text}")
+            print(
+                f"❌ Failed to start detection: {response.status_code} - {response.text}"
+            )
             return False
 
     except requests.exceptions.ConnectionError:
@@ -140,7 +142,7 @@ def enable_demo_mode(ai_service_url: str) -> bool:
         response = requests.post(
             f"{ai_service_url}/detection/config/demo-mode",
             params={"enabled": True},
-            timeout=10
+            timeout=10,
         )
 
         if response.ok:
@@ -167,42 +169,44 @@ Examples:
   python scripts/upload_soldier_video.py demo_videos/soldier.mp4
   python scripts/upload_soldier_video.py /absolute/path/video.mp4 --camera-id cam-demo
   python scripts/upload_soldier_video.py video.mp4 --camera-name "Armed Soldier Demo" --demo-mode
-        """
+        """,
     )
 
     parser.add_argument(
-        "video_path",
-        help="Path to the soldier video file (.mp4, .avi, etc.)"
+        "video_path", help="Path to the soldier video file (.mp4, .avi, etc.)"
     )
 
     parser.add_argument(
-        "--camera-id", "-i",
+        "--camera-id",
+        "-i",
         default="cam-soldier",
-        help="Camera ID to use (default: cam-soldier)"
+        help="Camera ID to use (default: cam-soldier)",
     )
 
     parser.add_argument(
-        "--camera-name", "-n",
-        default="חייל מזוין - הדגמה",
-        help="Camera name to display (default: 'חייל מזוין - הדגמה')"
+        "--camera-name",
+        "-n",
+        default="חייל  - הדגמה",
+        help="Camera name to display (default: 'חייל מזוין - הדגמה')",
     )
 
     parser.add_argument(
-        "--demo-mode", "-d",
+        "--demo-mode",
+        "-d",
         action="store_true",
-        help="Enable demo mode (slower FPS for longer video)"
+        help="Enable demo mode (slower FPS for longer video)",
     )
 
     parser.add_argument(
         "--backend-url",
         default=BACKEND_URL,
-        help=f"Backend URL (default: {BACKEND_URL})"
+        help=f"Backend URL (default: {BACKEND_URL})",
     )
 
     parser.add_argument(
         "--ai-url",
         default=AI_SERVICE_URL,
-        help=f"AI Service URL (default: {AI_SERVICE_URL})"
+        help=f"AI Service URL (default: {AI_SERVICE_URL})",
     )
 
     args = parser.parse_args()
@@ -220,7 +224,9 @@ Examples:
         sys.exit(1)
 
     # Step 2: Create camera
-    if not create_camera(args.video_path, args.camera_id, args.camera_name, backend_url):
+    if not create_camera(
+        args.video_path, args.camera_id, args.camera_name, backend_url
+    ):
         sys.exit(1)
 
     # Step 3: Start detection
