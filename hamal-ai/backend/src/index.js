@@ -29,14 +29,37 @@ const app = express();
 const server = createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: process.env.FRONTEND_URL || '*',
-    methods: ['GET', 'POST']
+    origin: true, // Allow all origins for Socket.IO
+    methods: ['GET', 'POST'],
+    credentials: true
   }
 });
 
-// Middleware
+// CORS configuration - allow multiple origins for EC2/local development
+const allowedOrigins = process.env.FRONTEND_URL
+  ? process.env.FRONTEND_URL.split(',').map(url => url.trim())
+  : null; // null means allow all origins
+
 app.use(cors({
-  origin: process.env.FRONTEND_URL || '*',
+  origin: (origin, callback) => {
+    // Allow requests with no origin (like mobile apps or curl)
+    if (!origin) return callback(null, true);
+
+    // If no specific origins configured, allow all
+    if (!allowedOrigins) return callback(null, true);
+
+    // Check if origin is in allowed list
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    // Also allow localhost variants
+    if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
+      return callback(null, true);
+    }
+
+    callback(null, true); // Allow all for development
+  },
   credentials: true
 }));
 app.use(express.json({ limit: '50mb' }));
