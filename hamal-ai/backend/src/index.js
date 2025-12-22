@@ -19,6 +19,7 @@ import stolenPlatesRoutes from './routes/stolenPlates.js';
 import scenarioRoutes from './routes/scenario.js';
 import { setupSocket } from './socket/handlers.js';
 import { initScenarioManager } from './services/scenarioManager.js';
+import cameraStorage from './services/cameraStorage.js';
 
 // Load environment variables
 dotenv.config();
@@ -130,6 +131,54 @@ console.log('✅ Scenario Manager initialized');
 // Export io for use in other modules
 export { io };
 
+// Camera status sync function - syncs camera status from AI service
+async function syncCameraStatusFromAI() {
+  const aiServiceUrl = process.env.AI_SERVICE_URL || 'http://localhost:8000';
+
+  try {
+    // Get active streams from AI service
+    const response = await fetch(`${aiServiceUrl}/detection/active`);
+    if (!response.ok) {
+      console.log('[CameraSync] AI service not available yet');
+      return;
+    }
+
+    const activeData = await response.json();
+    const activeStreams = activeData.active_cameras || [];
+
+    console.log(`[CameraSync] AI service has ${activeStreams.length} active streams:`, activeStreams);
+
+    // Get all cameras from database
+    const cameras = await cameraStorage.find();
+
+    // Update status for each camera based on AI service
+    for (const camera of cameras) {
+      const isActive = activeStreams.includes(camera.cameraId);
+      const newStatus = isActive ? 'online' : camera.status;
+
+      // Only update if camera is now online but was showing otherwise
+      if (isActive && camera.status !== 'online') {
+        await cameraStorage.update(
+          { cameraId: camera.cameraId },
+          { status: 'online', lastSeen: new Date().toISOString() }
+        );
+        console.log(`[CameraSync] Updated ${camera.cameraId} status to online`);
+
+        // Notify frontend via socket
+        io.emit('camera:status', {
+          cameraId: camera.cameraId,
+          status: 'online',
+          lastSeen: new Date().toISOString()
+        });
+      }
+    }
+
+    console.log(`[CameraSync] Status sync complete`);
+  } catch (error) {
+    console.log(`[CameraSync] Could not sync with AI service: ${error.message}`);
+  }
+}
+
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`
@@ -142,4 +191,14 @@ server.listen(PORT, () => {
 ║                                                        ║
 ╚════════════════════════════════════════════════════════╝
   `);
+
+  // Sync camera status from AI service after startup (with delay for AI service to be ready)
+  setTimeout(() => {
+    syncCameraStatusFromAI();
+  }, 5000); // 5 second delay to allow AI service to start first
+
+  // Also sync periodically every 30 seconds
+  setInterval(() => {
+    syncCameraStatusFromAI();
+  }, 30000);
 });

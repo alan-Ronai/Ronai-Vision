@@ -2117,6 +2117,20 @@ async def update_fps_config(
     }
 
 
+@app.get("/detection/active")
+async def get_active_cameras():
+    """Get list of cameras with active detection streams.
+
+    Used by backend to sync camera status on startup.
+    """
+    rtsp_manager = get_rtsp_manager()
+    active_cameras = rtsp_manager.get_active_cameras()
+    return {
+        "active_cameras": active_cameras,
+        "count": len(active_cameras)
+    }
+
+
 @app.post("/detection/reload")
 async def reload_cameras():
     """Reload cameras from backend."""
