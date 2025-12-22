@@ -15,8 +15,9 @@ export default function DemoControls() {
   const [loading, setLoading] = useState(false);
   const [scenarioLoading, setScenarioLoading] = useState(false);
   const [message, setMessage] = useState('');
+  const [availableObjects, setAvailableObjects] = useState({ vehicles: 0, persons: 0 });
 
-  // Fetch current demo mode state
+  // Fetch current demo mode state and available objects
   useEffect(() => {
     const fetchDemoMode = async () => {
       try {
@@ -30,7 +31,29 @@ export default function DemoControls() {
         console.error('Failed to fetch demo mode:', error);
       }
     };
-    if (isOpen) fetchDemoMode();
+
+    const fetchAvailableObjects = async () => {
+      try {
+        const response = await fetch(`${BACKEND_URL}/api/scenario/demo/real/available`);
+        if (response.ok) {
+          const data = await response.json();
+          setAvailableObjects({
+            vehicles: data.summary?.totalVehicles || 0,
+            persons: data.summary?.totalPersons || 0
+          });
+        }
+      } catch (error) {
+        console.error('Failed to fetch available objects:', error);
+      }
+    };
+
+    if (isOpen) {
+      fetchDemoMode();
+      fetchAvailableObjects();
+      // Refresh available objects every 5 seconds when panel is open
+      const interval = setInterval(fetchAvailableObjects, 5000);
+      return () => clearInterval(interval);
+    }
   }, [isOpen]);
 
   // Toggle demo mode
@@ -62,6 +85,7 @@ export default function DemoControls() {
       let body = {};
 
       switch (type) {
+        // Fake data scenarios
         case 'full':
           endpoint = '/api/scenario/demo/full-scenario';
           break;
@@ -72,6 +96,18 @@ export default function DemoControls() {
           endpoint = '/api/scenario/demo/armed-persons';
           body = { count: 3 };
           break;
+        // Real data scenarios (uses actual objects in scene)
+        case 'real-full':
+          endpoint = '/api/scenario/demo/real/full-scenario';
+          break;
+        case 'real-vehicle':
+          endpoint = '/api/scenario/demo/real/stolen-vehicle';
+          break;
+        case 'real-armed':
+          endpoint = '/api/scenario/demo/real/armed-persons';
+          body = { count: 3 };
+          break;
+        // Keywords
         case 'drone':
           endpoint = '/api/scenario/demo/keyword';
           body = { keyword: 'drone' };
@@ -174,30 +210,63 @@ export default function DemoControls() {
         </p>
       </div>
 
-      {/* Scenario Triggers */}
+      {/* Real Scene Data Triggers */}
       <div className="mb-4">
-        <p className="text-xs text-gray-400 mb-2 font-medium">🎬 תרחישים מוכנים:</p>
+        <p className="text-xs text-gray-400 mb-2 font-medium">
+          🎯 תרחישים עם נתונים אמיתיים מהסצנה:
+        </p>
+        <div className="text-xs text-gray-500 mb-2 p-2 bg-gray-700/30 rounded">
+          זמין: {availableObjects.vehicles} רכבים, {availableObjects.persons} אנשים
+        </div>
+        <div className="space-y-2">
+          <button
+            onClick={() => triggerScenario('real-full')}
+            disabled={scenarioLoading || (availableObjects.vehicles === 0 && availableObjects.persons === 0)}
+            className="w-full bg-red-600 hover:bg-red-500 px-3 py-2 rounded text-sm text-right disabled:opacity-50 border border-red-400"
+          >
+            🎯 תרחיש מלא (נתונים אמיתיים)
+          </button>
+          <button
+            onClick={() => triggerScenario('real-vehicle')}
+            disabled={scenarioLoading || availableObjects.vehicles === 0}
+            className="w-full bg-orange-600 hover:bg-orange-500 px-3 py-2 rounded text-sm text-right disabled:opacity-50 border border-orange-400"
+          >
+            🎯 רכב גנוב (מהסצנה)
+          </button>
+          <button
+            onClick={() => triggerScenario('real-armed')}
+            disabled={scenarioLoading || availableObjects.persons === 0}
+            className="w-full bg-yellow-600 hover:bg-yellow-500 px-3 py-2 rounded text-sm text-right disabled:opacity-50 border border-yellow-400"
+          >
+            🎯 סימון אנשים כחמושים (מהסצנה)
+          </button>
+        </div>
+      </div>
+
+      {/* Fake Data Scenario Triggers */}
+      <div className="mb-4">
+        <p className="text-xs text-gray-400 mb-2 font-medium">🎬 תרחישים עם נתונים מדומים:</p>
         <div className="space-y-2">
           <button
             onClick={() => triggerScenario('full')}
             disabled={scenarioLoading}
             className="w-full bg-red-700 hover:bg-red-600 px-3 py-2 rounded text-sm text-right disabled:opacity-50"
           >
-            🚗💥 תרחיש מלא (רכב גנוב + חמושים)
+            🚗💥 תרחיש מלא (נתונים מדומים)
           </button>
           <button
             onClick={() => triggerScenario('vehicle')}
             disabled={scenarioLoading}
             className="w-full bg-orange-700 hover:bg-orange-600 px-3 py-2 rounded text-sm text-right disabled:opacity-50"
           >
-            🚗 זיהוי רכב גנוב
+            🚗 זיהוי רכב גנוב (מדומה)
           </button>
           <button
             onClick={() => triggerScenario('armed')}
             disabled={scenarioLoading}
             className="w-full bg-yellow-700 hover:bg-yellow-600 px-3 py-2 rounded text-sm text-right disabled:opacity-50"
           >
-            🔫 הוספת 3 חמושים
+            🔫 הוספת 3 חמושים (מדומים)
           </button>
         </div>
       </div>

@@ -250,7 +250,7 @@ export default function AIStatsPanel({ isOpen, onClose }) {
                   trend={rates.events}
                 />
                 <Counter
-                  label="Gemini Calls"
+                  label="AI Calls"
                   value={counters.gemini_calls}
                   icon="🤖"
                 />

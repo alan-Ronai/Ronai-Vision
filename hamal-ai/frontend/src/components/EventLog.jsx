@@ -227,7 +227,7 @@ function EventItem({ event, severityColors, typeIcons, formatTime }) {
           </p>
         )}
 
-        {/* Clothing details (Hebrew format from Gemini) */}
+        {/* Clothing details (Hebrew format from AI analysis) */}
         {event.details?.לבוש && (
           <p className="text-xs text-gray-400">
             👔 {event.details.לבוש.חולצה}
@@ -265,7 +265,7 @@ function EventItem({ event, severityColors, typeIcons, formatTime }) {
           {/* ReID Analysis Details */}
           {event.details?.analysis && (
             <div className="bg-gray-700/50 p-2 rounded mt-1">
-              <p className="font-semibold mb-1">🔍 ניתוח Gemini:</p>
+              <p className="font-semibold mb-1">🔍 ניתוח AI:</p>
               {/* Vehicle analysis */}
               {event.details.analysis.manufacturer && (
                 <p>יצרן: {event.details.analysis.manufacturer} {event.details.analysis.model}</p>

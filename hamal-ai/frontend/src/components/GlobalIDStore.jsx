@@ -452,7 +452,7 @@ function ObjectDetail({ object, onRefreshAnalysis }) {
       {/* Analysis */}
       <div className="bg-gray-800 rounded p-4">
         <div className="flex items-center justify-between mb-2">
-          <h4 className="font-bold">ניתוח Gemini</h4>
+          <h4 className="font-bold">ניתוח AI</h4>
           <button
             onClick={handleRefreshAnalysis}
             disabled={refreshing || !object.isActive}

@@ -12,6 +12,7 @@ import fs from 'fs/promises';
 import { fileURLToPath } from 'url';
 import { getScenarioManager } from '../services/scenarioManager.js';
 import { SCENARIO_CONFIG, isPlateStolen } from '../config/scenarioConfig.js';
+import * as trackedStore from '../stores/trackedStore.js';
 
 const router = express.Router();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1124,11 +1125,383 @@ router.get('/demo/presets', (req, res) => {
       },
       'POST /api/scenario/reset': {
         description: 'Reset scenario to idle state'
+      },
+      'POST /api/scenario/demo/real/stolen-vehicle': {
+        description: 'Mark a REAL vehicle from scene as stolen (uses actual tracked data)',
+        params: { gid: 'optional - specific vehicle GID to use' }
+      },
+      'POST /api/scenario/demo/real/armed-persons': {
+        description: 'Mark REAL persons from scene as armed (uses actual tracked data)',
+        params: { count: 'number of persons to mark as armed' }
+      },
+      'POST /api/scenario/demo/real/full-scenario': {
+        description: 'Run full scenario using REAL objects from the scene'
       }
     },
     stolenVehiclePlates: SCENARIO_CONFIG.stolenVehicles.map(v => v.licensePlate),
     keywords: SCENARIO_CONFIG.keywords
   });
+});
+
+// ===========================================================================
+// REAL DATA DEMO TRIGGERS - Uses actual tracked objects from the scene
+// ===========================================================================
+
+/**
+ * GET /api/scenario/demo/real/available
+ * Get available real objects in the scene that can be used for demo
+ */
+router.get('/demo/real/available', (req, res) => {
+  try {
+    const vehicles = trackedStore.getAll({ type: 'vehicle', isActive: true });
+    const persons = trackedStore.getAll({ type: 'person', isActive: true });
+
+    res.json({
+      vehicles: vehicles.map(v => ({
+        gid: v.gid,
+        licensePlate: v.analysis?.licensePlate || 'Unknown',
+        color: v.analysis?.color || 'Unknown',
+        make: v.analysis?.make || v.analysis?.manufacturer || 'Unknown',
+        model: v.analysis?.model || 'Unknown',
+        cameraId: v.cameraId,
+        lastSeen: v.lastSeen,
+        hasAnalysis: !!v.analysis?.licensePlate
+      })),
+      persons: persons.map(p => ({
+        gid: p.gid,
+        isArmed: p.isArmed || p.analysis?.armed || false,
+        clothing: p.analysis?.clothing || 'Unknown',
+        clothingColor: p.analysis?.clothingColor || 'Unknown',
+        weaponType: p.analysis?.weaponType || null,
+        cameraId: p.cameraId,
+        lastSeen: p.lastSeen,
+        hasAnalysis: !!p.analysis?.clothing
+      })),
+      summary: {
+        totalVehicles: vehicles.length,
+        vehiclesWithPlates: vehicles.filter(v => v.analysis?.licensePlate).length,
+        totalPersons: persons.length,
+        armedPersons: persons.filter(p => p.isArmed || p.analysis?.armed).length
+      }
+    });
+  } catch (error) {
+    console.error('[Scenario] Real available error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/scenario/demo/real/stolen-vehicle
+ * Use a REAL vehicle from the scene and mark it as stolen
+ */
+router.post('/demo/real/stolen-vehicle', async (req, res) => {
+  if (!SCENARIO_CONFIG.demo.enabled) {
+    return res.status(403).json({ error: 'Demo mode is disabled' });
+  }
+
+  try {
+    const manager = getScenarioManager();
+    if (!manager) {
+      return res.status(503).json({ error: 'Scenario manager not initialized' });
+    }
+
+    // Get real vehicles from scene
+    const vehicles = trackedStore.getAll({ type: 'vehicle', isActive: true });
+
+    if (vehicles.length === 0) {
+      return res.status(404).json({
+        error: 'No vehicles currently in scene',
+        hint: 'Wait for AI to detect a vehicle, or use the fake demo endpoint instead'
+      });
+    }
+
+    // Use specified GID or pick the most recently seen vehicle
+    let vehicle;
+    if (req.body.gid) {
+      vehicle = trackedStore.getByGid(req.body.gid);
+      if (!vehicle || vehicle.type !== 'vehicle') {
+        return res.status(404).json({ error: `Vehicle with GID ${req.body.gid} not found` });
+      }
+    } else {
+      // Get vehicle with analysis data preferably, or most recent
+      vehicle = vehicles.find(v => v.analysis?.licensePlate) || vehicles[0];
+    }
+
+    // Build vehicle data from real tracked object
+    const vehicleData = {
+      gid: vehicle.gid,
+      licensePlate: vehicle.analysis?.licensePlate || `REAL-${vehicle.gid}`,
+      color: vehicle.analysis?.color || 'לא ידוע',
+      make: vehicle.analysis?.make || vehicle.analysis?.manufacturer || 'לא ידוע',
+      model: vehicle.analysis?.model || 'לא ידוע',
+      vehicleType: vehicle.analysis?.vehicleType || vehicle.subType || 'רכב',
+      cameraId: vehicle.cameraId,
+      trackId: vehicle.gid,
+      confidence: vehicle.confidence || 0.9,
+      bbox: vehicle.bbox,
+      timestamp: new Date().toISOString(),
+      _realData: true  // Flag indicating this is real scene data
+    };
+
+    // Temporarily add this plate to stolen list if not already there
+    if (!isPlateStolen(vehicleData.licensePlate)) {
+      SCENARIO_CONFIG.stolenVehicles.push({
+        licensePlate: vehicleData.licensePlate,
+        description: `Demo - Real vehicle GID ${vehicle.gid}`,
+        reportedAt: new Date().toISOString(),
+        _temporary: true
+      });
+    }
+
+    console.log('[Demo Real] Triggering stolen vehicle from scene:', vehicleData);
+
+    const triggered = await manager.handleStolenVehicle(vehicleData);
+
+    res.json({
+      success: true,
+      triggered,
+      message: 'Used REAL vehicle from scene',
+      vehicle: vehicleData,
+      state: manager.getState()
+    });
+  } catch (error) {
+    console.error('[Scenario] Real stolen vehicle error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/scenario/demo/real/armed-persons
+ * Mark REAL persons from the scene as armed
+ */
+router.post('/demo/real/armed-persons', async (req, res) => {
+  if (!SCENARIO_CONFIG.demo.enabled) {
+    return res.status(403).json({ error: 'Demo mode is disabled' });
+  }
+
+  try {
+    const manager = getScenarioManager();
+    if (!manager) {
+      return res.status(503).json({ error: 'Scenario manager not initialized' });
+    }
+
+    // Get real persons from scene
+    const persons = trackedStore.getAll({ type: 'person', isActive: true });
+
+    if (persons.length === 0) {
+      return res.status(404).json({
+        error: 'No persons currently in scene',
+        hint: 'Wait for AI to detect persons, or use the fake demo endpoint instead'
+      });
+    }
+
+    const count = Math.min(req.body.count || 3, persons.length);
+    const weaponTypes = ['רובה', 'אקדח', 'רובה קצר', 'סכין'];
+    const results = [];
+
+    // Use specified GIDs or pick random persons
+    let selectedPersons;
+    if (req.body.gids && Array.isArray(req.body.gids)) {
+      selectedPersons = req.body.gids
+        .map(gid => trackedStore.getByGid(gid))
+        .filter(p => p && p.type === 'person');
+    } else {
+      // Prefer persons with analysis, then most recent
+      selectedPersons = [...persons]
+        .sort((a, b) => {
+          // Prioritize those with analysis
+          const aHasAnalysis = a.analysis?.clothing ? 1 : 0;
+          const bHasAnalysis = b.analysis?.clothing ? 1 : 0;
+          if (bHasAnalysis !== aHasAnalysis) return bHasAnalysis - aHasAnalysis;
+          // Then by recency
+          return new Date(b.lastSeen) - new Date(a.lastSeen);
+        })
+        .slice(0, count);
+    }
+
+    for (let i = 0; i < selectedPersons.length; i++) {
+      const person = selectedPersons[i];
+
+      // Build person data from real tracked object
+      const personData = {
+        gid: person.gid,
+        trackId: person.gid,
+        clothing: person.analysis?.clothing || 'בגדים רגילים',
+        clothingColor: person.analysis?.clothingColor || 'לא ידוע',
+        weaponType: person.analysis?.weaponType || weaponTypes[i % weaponTypes.length],
+        armed: true,
+        confidence: person.confidence || 0.85,
+        cameraId: person.cameraId,
+        bbox: person.bbox,
+        timestamp: new Date().toISOString(),
+        _realData: true
+      };
+
+      try {
+        // Update the tracked object to be armed
+        trackedStore.updateAnalysis(person.gid, {
+          armed: true,
+          weaponType: personData.weaponType
+        });
+
+        const thresholdReached = await manager.handleArmedPerson(personData);
+        results.push({ person: personData, thresholdReached, success: true });
+        console.log(`[Demo Real] Marked person GID ${person.gid} as armed:`, personData);
+      } catch (err) {
+        results.push({ gid: person.gid, error: err.message, success: false });
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Marked ${results.filter(r => r.success).length} REAL persons as armed`,
+      count: results.length,
+      results,
+      state: manager.getState()
+    });
+  } catch (error) {
+    console.error('[Scenario] Real armed persons error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/scenario/demo/real/full-scenario
+ * Run full scenario using REAL objects currently in the scene
+ */
+router.post('/demo/real/full-scenario', async (req, res) => {
+  if (!SCENARIO_CONFIG.demo.enabled) {
+    return res.status(403).json({ error: 'Demo mode is disabled' });
+  }
+
+  try {
+    const manager = getScenarioManager();
+    if (!manager) {
+      return res.status(503).json({ error: 'Scenario manager not initialized' });
+    }
+
+    // Get real objects from scene
+    const vehicles = trackedStore.getAll({ type: 'vehicle', isActive: true });
+    const persons = trackedStore.getAll({ type: 'person', isActive: true });
+
+    if (vehicles.length === 0 && persons.length === 0) {
+      return res.status(404).json({
+        error: 'No objects currently in scene',
+        hint: 'Wait for AI to detect vehicles and persons, or use the fake demo endpoint instead',
+        available: { vehicles: 0, persons: 0 }
+      });
+    }
+
+    const results = {
+      vehicle: null,
+      persons: [],
+      warnings: []
+    };
+
+    // Step 1: Use a real vehicle if available
+    if (vehicles.length > 0) {
+      const vehicle = vehicles.find(v => v.analysis?.licensePlate) || vehicles[0];
+
+      const vehicleData = {
+        gid: vehicle.gid,
+        licensePlate: vehicle.analysis?.licensePlate || `SCENE-${vehicle.gid}`,
+        color: vehicle.analysis?.color || 'לא ידוע',
+        make: vehicle.analysis?.make || vehicle.analysis?.manufacturer || 'לא ידוע',
+        model: vehicle.analysis?.model || 'לא ידוע',
+        vehicleType: vehicle.analysis?.vehicleType || vehicle.subType || 'רכב',
+        cameraId: vehicle.cameraId,
+        trackId: vehicle.gid,
+        confidence: vehicle.confidence || 0.9,
+        bbox: vehicle.bbox,
+        timestamp: new Date().toISOString(),
+        _realData: true
+      };
+
+      // Add to stolen list temporarily
+      if (!isPlateStolen(vehicleData.licensePlate)) {
+        SCENARIO_CONFIG.stolenVehicles.push({
+          licensePlate: vehicleData.licensePlate,
+          description: `Demo - Real vehicle GID ${vehicle.gid}`,
+          reportedAt: new Date().toISOString(),
+          _temporary: true
+        });
+      }
+
+      console.log('[Demo Real Full] Using real vehicle:', vehicleData);
+      await manager.handleStolenVehicle(vehicleData);
+      results.vehicle = vehicleData;
+    } else {
+      results.warnings.push('No vehicles in scene - skipping stolen vehicle trigger');
+    }
+
+    // Step 2: Mark real persons as armed (progressively)
+    if (persons.length > 0) {
+      const weaponTypes = ['רובה', 'אקדח', 'רובה קצר'];
+      const count = Math.min(3, persons.length);
+
+      // Sort to prefer persons with analysis
+      const sortedPersons = [...persons].sort((a, b) => {
+        const aHasAnalysis = a.analysis?.clothing ? 1 : 0;
+        const bHasAnalysis = b.analysis?.clothing ? 1 : 0;
+        return bHasAnalysis - aHasAnalysis;
+      });
+
+      for (let i = 0; i < count; i++) {
+        setTimeout(async () => {
+          const person = sortedPersons[i];
+
+          const personData = {
+            gid: person.gid,
+            trackId: person.gid,
+            clothing: person.analysis?.clothing || 'בגדים רגילים',
+            clothingColor: person.analysis?.clothingColor || 'לא ידוע',
+            weaponType: weaponTypes[i % weaponTypes.length],
+            armed: true,
+            confidence: person.confidence || 0.85,
+            cameraId: person.cameraId,
+            bbox: person.bbox,
+            timestamp: new Date().toISOString(),
+            _realData: true
+          };
+
+          console.log(`[Demo Real Full] Marking person ${i + 1} as armed:`, personData);
+
+          // Update tracked store
+          trackedStore.updateAnalysis(person.gid, {
+            armed: true,
+            weaponType: personData.weaponType
+          });
+
+          try {
+            await manager.handleArmedPerson(personData);
+          } catch (err) {
+            console.error('[Demo Real Full] Error adding armed person:', err);
+          }
+        }, (i + 1) * 2000); // Add each person 2 seconds apart
+      }
+
+      results.persons = sortedPersons.slice(0, count).map((p, i) => ({
+        gid: p.gid,
+        clothing: p.analysis?.clothing || 'בגדים רגילים',
+        weaponType: weaponTypes[i % weaponTypes.length]
+      }));
+    } else {
+      results.warnings.push('No persons in scene - skipping armed persons trigger');
+    }
+
+    res.json({
+      success: true,
+      message: 'Full scenario initiated using REAL scene data',
+      results,
+      note: results.persons.length > 0
+        ? `${results.persons.length} persons will be marked as armed progressively (2s intervals)`
+        : 'No persons to mark as armed',
+      state: manager.getState()
+    });
+  } catch (error) {
+    console.error('[Scenario] Real full scenario error:', error);
+    res.status(500).json({ error: error.message });
+  }
 });
 
 export default router;
