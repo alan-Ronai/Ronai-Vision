@@ -148,8 +148,7 @@ class FFmpegRTSPReader:
             cmd.extend([
                 # RTSP transport - TCP is more reliable for H264
                 '-rtsp_transport', 'tcp' if self.config.tcp_transport else 'udp',
-                '-rtsp_flags', 'prefer_tcp',
-                '-timeout', '5000000',          # 5 second timeout (in microseconds)
+                '-stimeout', '5000000',         # Socket timeout 5 seconds (more reliable than -timeout)
 
                 # Buffer settings - balance between latency and stability
                 # NOTE: nobuffer causes H264 decode errors - using genpts+discardcorrupt instead
@@ -203,9 +202,12 @@ class FFmpegRTSPReader:
                 except:
                     self._process.kill()
                 self._process = None
+                # Small delay after killing previous process to release resources
+                time.sleep(0.5)
 
             cmd = self._build_ffmpeg_command()
             logger.info(f"Camera {self.camera_id}: Starting FFmpeg...")
+            logger.debug(f"Camera {self.camera_id}: FFmpeg command: {' '.join(cmd)}")
 
             self._process = subprocess.Popen(
                 cmd,
@@ -214,8 +216,8 @@ class FFmpegRTSPReader:
                 bufsize=10**7  # 10MB buffer for large frames
             )
 
-            # Wait a bit and check if process is running
-            time.sleep(1.0)
+            # Wait for FFmpeg to establish connection (RTSP handshake takes time)
+            time.sleep(2.0)
             if self._process.poll() is not None:
                 stderr = self._process.stderr.read().decode() if self._process.stderr else ""
                 logger.error(f"Camera {self.camera_id}: FFmpeg failed: {stderr[:500]}")
