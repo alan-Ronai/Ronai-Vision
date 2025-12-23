@@ -333,7 +333,10 @@ class WhisperTranscriber:
 
     async def _process_buffer(self):
         """Process accumulated audio buffer."""
-        if self._processing or not self._audio_buffer:
+        if self._processing:
+            logger.debug("[Whisper] Skipping - already processing")
+            return
+        if not self._audio_buffer:
             return
 
         self._processing = True
@@ -358,15 +361,18 @@ class WhisperTranscriber:
 
                 if self.on_transcription:
                     self.on_transcription(result)
+            else:
+                logger.info(f"[Whisper] No speech detected in {duration:.1f}s audio")
 
             self._stats["chunks_processed"] += 1
             self._stats["total_duration"] += duration
 
         except Exception as e:
-            logger.error(f"[Whisper] Buffer processing error: {e}")
+            logger.error(f"[Whisper] Buffer processing error: {e}", exc_info=True)
             self._stats["errors"] += 1
         finally:
             self._processing = False
+            logger.debug("[Whisper] Processing complete, ready for next buffer")
 
     async def transcribe_audio(
         self, audio_bytes: bytes, duration: float
@@ -455,6 +461,7 @@ class WhisperTranscriber:
                 return segments, full_text
 
             segments, full_text = await asyncio.to_thread(do_transcription)
+            logger.debug(f"[Whisper] Got {len(segments)} segments from transcription")
 
             text = " ".join(full_text)
 
