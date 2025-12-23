@@ -17,7 +17,7 @@ import os
 # when using subprocess (FFmpeg) alongside gRPC (Gemini API)
 os.environ["GRPC_ENABLE_FORK_SUPPORT"] = "0"
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Query
+from fastapi import FastAPI, File, UploadFile, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from pydantic import BaseModel
@@ -43,6 +43,25 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+# Filter to suppress noisy polling endpoint logs
+class PollingEndpointFilter(logging.Filter):
+    """Filter out frequent polling endpoint logs to reduce noise."""
+    SUPPRESSED_PATHS = [
+        "/api/detections/",  # WebRTC overlay polling
+        "/detection/stats",  # Stats polling
+        "/health",           # Health checks
+    ]
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        for path in self.SUPPRESSED_PATHS:
+            if path in message and "HTTP/1.1\" 200" in message:
+                return False  # Suppress successful polling requests
+        return True
+
+# Apply filter to uvicorn access logger
+logging.getLogger("uvicorn.access").addFilter(PollingEndpointFilter())
 
 # Import services
 from services.reid import ReIDTracker
@@ -1445,11 +1464,14 @@ async def refresh_analysis(
                     logger.info(f"Found person track {track_id} in StableTracker by iteration")
                     break
 
-    # STEP 5: Try numeric GID matching (no prefix case)
+    # STEP 5: Try numeric GID matching (handles both old and new ID formats)
+    # Old format: t_5, v_10
+    # New format: p_0_5, v_1_10 (prefix_session_gid)
     if not obj:
         # Try persons
         if bot_sort:
             for track in bot_sort.get_active_tracks('person'):
+                # Check old format (t_gid, p_gid)
                 if track.track_id == f"t_{gid}" or track.track_id == f"p_{gid}":
                     obj = track
                     obj_type = 'person'
@@ -1457,8 +1479,19 @@ async def refresh_analysis(
                     if not camera_id:
                         camera_id = track.last_seen_camera
                     break
+                # Check new format (p_session_gid) - extract gid from end
+                if isinstance(track.track_id, str) and track.track_id.startswith('p_'):
+                    parts = track.track_id.split('_')
+                    if len(parts) >= 3 and parts[-1] == str(gid):
+                        obj = track
+                        obj_type = 'person'
+                        bbox = track.bbox
+                        if not camera_id:
+                            camera_id = track.last_seen_camera
+                        break
         if not obj and bot_sort:
             for track in bot_sort.get_active_tracks('vehicle'):
+                # Check old format (v_gid)
                 if track.track_id == f"v_{gid}":
                     obj = track
                     obj_type = 'vehicle'
@@ -1466,6 +1499,16 @@ async def refresh_analysis(
                     if not camera_id:
                         camera_id = track.last_seen_camera
                     break
+                # Check new format (v_session_gid) - extract gid from end
+                if isinstance(track.track_id, str) and track.track_id.startswith('v_'):
+                    parts = track.track_id.split('_')
+                    if len(parts) >= 3 and parts[-1] == str(gid):
+                        obj = track
+                        obj_type = 'vehicle'
+                        bbox = track.bbox
+                        if not camera_id:
+                            camera_id = track.last_seen_camera
+                        break
 
     if not obj:
         logger.warning(f"Track {track_id} not found in any tracker")
@@ -1908,6 +1951,34 @@ async def detection_stats():
     }
 
 
+@app.get("/detection/gemini-debug")
+async def gemini_debug_status():
+    """Get Gemini analyzer debug information.
+
+    Use this to diagnose why Gemini analysis might not be running.
+    """
+    detection_loop = get_detection_loop()
+
+    result = {
+        "gemini_configured": gemini.is_configured() if gemini else False,
+        "gemini_api_calls": gemini.get_call_count() if gemini else 0,
+        "gemini_model": str(gemini.model) if gemini and gemini.model else None,
+    }
+
+    if detection_loop:
+        # Get analysis buffer stats
+        if hasattr(detection_loop, 'analysis_buffer') and detection_loop.analysis_buffer:
+            result["analysis_buffer"] = detection_loop.analysis_buffer.get_stats()
+        else:
+            result["analysis_buffer"] = "not_initialized"
+
+        # Check if Gemini is being used in the loop
+        result["loop_has_gemini"] = detection_loop.gemini is not None
+        result["loop_gemini_configured"] = detection_loop.gemini.is_configured() if detection_loop.gemini else False
+
+    return result
+
+
 @app.get("/api/stats/realtime")
 async def realtime_stats():
     """Get comprehensive real-time statistics for all AI components.
@@ -2242,18 +2313,60 @@ async def stop_camera(camera_id: str):
 
 
 @app.post("/detection/start/{camera_id}")
-async def start_camera_detection(camera_id: str, rtsp_url: Optional[str] = None):
+async def start_camera_detection(
+    camera_id: str,
+    rtsp_url: Optional[str] = None,
+    use_go2rtc: Optional[bool] = True
+):
     """Start detection for a specific camera.
 
     Args:
         camera_id: Camera identifier
         rtsp_url: Optional RTSP URL or video file path. If not provided, fetches from backend.
+        use_go2rtc: If True and go2rtc is available, use go2rtc's RTSP re-stream (default: True)
+                    This prevents multiple connections to the camera.
 
     Examples:
         POST /detection/start/cam-1?rtsp_url=assets/test2.mp4
         POST /detection/start/cam-1?rtsp_url=rtsp://192.168.1.100/stream
     """
     import httpx
+
+    GO2RTC_URL = os.getenv("GO2RTC_URL", "http://localhost:1984")
+    GO2RTC_RTSP_PORT = os.getenv("GO2RTC_RTSP_PORT", "8554")
+
+    async def check_go2rtc_available():
+        """Check if go2rtc is running."""
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                response = await client.get(f"{GO2RTC_URL}/api")
+                return response.status_code == 200
+        except:
+            return False
+
+    async def register_with_go2rtc(cam_id: str, original_url: str):
+        """Register stream with go2rtc and return the re-stream URL."""
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                # Add TCP transport for more reliable streaming over network
+                # This prevents packet loss and stream freezing
+                src_url = original_url
+                if original_url.startswith("rtsp://") and "#" not in original_url:
+                    src_url = f"{original_url}#transport=tcp"
+                elif original_url.startswith("rtsp://") and "transport=" not in original_url:
+                    src_url = f"{original_url}&transport=tcp"
+
+                # Add stream to go2rtc
+                response = await client.put(
+                    f"{GO2RTC_URL}/api/streams",
+                    params={"name": cam_id, "src": src_url}
+                )
+                if response.status_code in [200, 201]:
+                    # Return go2rtc's RTSP re-stream URL
+                    return f"rtsp://localhost:{GO2RTC_RTSP_PORT}/{cam_id}"
+        except Exception as e:
+            logger.warning(f"Failed to register {cam_id} with go2rtc: {e}")
+        return None
 
     try:
         rtsp_manager = get_rtsp_manager()
@@ -2266,26 +2379,43 @@ async def start_camera_detection(camera_id: str, rtsp_url: Optional[str] = None)
 
         # If rtsp_url provided directly, use it
         if rtsp_url:
-            config = RTSPConfig(width=1280, height=720, fps=TARGET_FPS, tcp_transport=True)
-            rtsp_manager.add_camera(camera_id, rtsp_url, config)
-            logger.info(f"Started camera {camera_id} with URL: {rtsp_url}")
-            return {"status": "started", "camera_id": camera_id, "rtsp_url": rtsp_url}
+            original_url = rtsp_url
+        else:
+            # Fetch from backend
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{BACKEND_URL}/api/cameras/{camera_id}")
+                if response.status_code != 200:
+                    raise HTTPException(404, f"Camera {camera_id} not found in backend. Use ?rtsp_url= to provide URL directly.")
 
-        # Otherwise fetch from backend
-        async with httpx.AsyncClient() as client:
-            response = await client.get(f"{BACKEND_URL}/api/cameras/{camera_id}")
-            if response.status_code != 200:
-                raise HTTPException(404, f"Camera {camera_id} not found in backend. Use ?rtsp_url= to provide URL directly.")
+                camera = response.json()
+                original_url = camera.get('rtspUrl')
+                if not original_url:
+                    raise HTTPException(400, f"Camera {camera_id} has no RTSP URL")
 
-            camera = response.json()
-            rtsp_url = camera.get('rtspUrl')
-            if not rtsp_url:
-                raise HTTPException(400, f"Camera {camera_id} has no RTSP URL")
+        # Determine the URL to use for AI service
+        stream_url = original_url
+        using_go2rtc = False
 
-            config = RTSPConfig(width=1280, height=720, fps=TARGET_FPS, tcp_transport=True)
-            rtsp_manager.add_camera(camera_id, rtsp_url, config)
+        # For RTSP streams (not local files), try to use go2rtc if available
+        if use_go2rtc and original_url.startswith("rtsp://"):
+            if await check_go2rtc_available():
+                go2rtc_url = await register_with_go2rtc(camera_id, original_url)
+                if go2rtc_url:
+                    stream_url = go2rtc_url
+                    using_go2rtc = True
+                    logger.info(f"Using go2rtc re-stream for {camera_id}: {go2rtc_url}")
 
-            return {"status": "started", "camera_id": camera_id, "rtsp_url": rtsp_url}
+        config = RTSPConfig(width=1280, height=720, fps=TARGET_FPS, tcp_transport=True)
+        rtsp_manager.add_camera(camera_id, stream_url, config)
+
+        logger.info(f"Started camera {camera_id} with URL: {stream_url}")
+        return {
+            "status": "started",
+            "camera_id": camera_id,
+            "rtsp_url": stream_url,
+            "original_url": original_url,
+            "using_go2rtc": using_go2rtc
+        }
 
     except HTTPException:
         raise
@@ -2482,6 +2612,40 @@ async def set_confidence_thresholds(
         "weapon_confidence": detection_loop.config.weapon_confidence,
         "recovery_confidence": detection_loop.config.recovery_confidence,
         "note": "Changes take effect immediately on next frame"
+    }
+
+
+@app.post("/detection/reset-gemini")
+async def reset_gemini_state(
+    reset_tracker: bool = Query(True, description="Also reset BoT-SORT tracker (clears all track IDs)")
+):
+    """Reset Gemini analysis state to force re-analysis of all tracks.
+
+    Use this when:
+    - Starting a new session and want fresh Gemini analysis
+    - AI Calls shows 0 but you expect analysis to happen
+    - Tracks from previous session are preventing new analysis
+    - You want to force re-analyze all currently visible objects
+
+    This clears:
+    - Gemini cooldown timers (allows immediate re-analysis)
+    - Gemini API call counter (resets stats)
+    - Alert and event cooldowns
+    - Optionally: All BoT-SORT tracks (new track IDs assigned)
+
+    Args:
+        reset_tracker: If True (default), also reset tracker so objects get new IDs
+    """
+    detection_loop = get_detection_loop()
+    if not detection_loop:
+        raise HTTPException(503, "Detection loop not running")
+
+    result = detection_loop.reset_gemini_state(reset_tracker=reset_tracker)
+
+    return {
+        "message": "Gemini analysis state reset - new tracks will be analyzed",
+        "details": result,
+        "note": "Objects will now be re-analyzed by Gemini as they appear"
     }
 
 
@@ -2711,6 +2875,207 @@ async def stream_debug(camera_id: str):
         state["detection_stats"] = detection_loop.get_stats()
 
     return state
+
+
+@app.get("/api/detections/{camera_id}/latest")
+async def get_latest_detections(camera_id: str):
+    """
+    Get latest detections for a camera (for WebRTC overlay).
+
+    Returns JSON-serializable detection data including bounding boxes,
+    class labels, confidence scores, and track IDs.
+
+    This endpoint is optimized for low overhead to support polling
+    at 5-10 FPS from the frontend WebRTC overlay.
+    """
+    detection_loop = get_detection_loop()
+    if not detection_loop:
+        raise HTTPException(503, "Detection loop not running")
+
+    detections = detection_loop.get_latest_detections(camera_id)
+
+    return {
+        "camera_id": camera_id,
+        "timestamp": time.time(),
+        "detections": detections,
+        "count": len(detections)
+    }
+
+
+@app.websocket("/api/detections/{camera_id}/ws")
+async def websocket_detections(websocket: WebSocket, camera_id: str):
+    """
+    WebSocket endpoint for real-time detection streaming.
+
+    Clients connect and receive detection updates pushed from the server
+    whenever new detections are available. This eliminates polling overhead.
+
+    Message format (JSON):
+    {
+        "camera_id": "test",
+        "timestamp": 1703348000.123,
+        "detections": [...],
+        "count": 5
+    }
+    """
+    from services.detection_loop import get_ws_manager
+
+    ws_manager = get_ws_manager()
+
+    try:
+        await ws_manager.connect(camera_id, websocket)
+
+        # Keep connection alive
+        while True:
+            try:
+                # Wait for any message (ping/pong or close)
+                # Timeout every 30s to check connection is still alive
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+                # Client can send "ping" to keep alive
+                if data == "ping":
+                    await websocket.send_text("pong")
+            except asyncio.TimeoutError:
+                # Send ping to check connection
+                try:
+                    await websocket.send_text('{"type":"ping"}')
+                except Exception:
+                    break
+            except WebSocketDisconnect:
+                break
+            except Exception:
+                break
+    finally:
+        await ws_manager.disconnect(camera_id, websocket)
+
+
+@app.post("/api/ai/{camera_id}/enable")
+async def enable_ai(camera_id: str, rtsp_url: Optional[str] = None):
+    """Enable AI processing for a specific camera.
+
+    This will:
+    1. Enable AI processing flag for the camera
+    2. Ensure the camera stream is in the RTSP reader (starts it if needed)
+
+    If camera not in RTSP reader, tries to get RTSP URL from:
+    - rtsp_url parameter (if provided)
+    - go2rtc streams API
+    - Backend camera config
+    """
+    import httpx
+
+    detection_loop = get_detection_loop()
+    if not detection_loop:
+        raise HTTPException(503, "Detection loop not running")
+
+    rtsp_manager = get_rtsp_manager()
+    active_cameras = rtsp_manager.get_active_cameras()
+
+    # Check if camera already in RTSP reader
+    camera_needs_start = camera_id not in active_cameras
+
+    if camera_needs_start:
+        logger.info(f"Camera {camera_id} not in RTSP reader, attempting to start...")
+
+        # Try to get RTSP URL
+        source_url = rtsp_url
+
+        # If no URL provided, try go2rtc first
+        if not source_url:
+            try:
+                GO2RTC_URL = os.getenv("GO2RTC_URL", "http://localhost:1984")
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    response = await client.get(f"{GO2RTC_URL}/api/streams")
+                    if response.status_code == 200:
+                        streams = response.json()
+                        if camera_id in streams:
+                            # Get the source URL from go2rtc config
+                            sources = streams[camera_id]
+                            if isinstance(sources, list) and sources:
+                                source_url = sources[0]
+                                # Clean up go2rtc format (remove #transport=tcp etc for our reader)
+                                if "#" in source_url:
+                                    source_url = source_url.split("#")[0]
+                                logger.info(f"Got RTSP URL from go2rtc: {source_url[:50]}...")
+            except Exception as e:
+                logger.debug(f"Could not get URL from go2rtc: {e}")
+
+        # If still no URL, try backend
+        if not source_url:
+            try:
+                BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:3000")
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    response = await client.get(f"{BACKEND_URL}/api/cameras/{camera_id}")
+                    if response.status_code == 200:
+                        camera_config = response.json()
+                        source_url = camera_config.get("rtspUrl")
+                        if source_url:
+                            logger.info(f"Got RTSP URL from backend")
+            except Exception as e:
+                logger.debug(f"Could not get URL from backend: {e}")
+
+        if not source_url:
+            raise HTTPException(400, f"Camera {camera_id} not found and no RTSP URL provided. "
+                              "Add camera to go2rtc or provide rtsp_url parameter.")
+
+        # Start the camera in RTSP reader
+        config = RTSPConfig(
+            width=1280,
+            height=720,
+            fps=TARGET_FPS,
+            tcp_transport=True
+        )
+
+        try:
+            rtsp_manager.add_camera(camera_id, source_url, config)
+            # Wait for first frame
+            await asyncio.sleep(1.0)
+            logger.info(f"✅ Started RTSP reader for camera {camera_id}")
+        except Exception as e:
+            logger.error(f"Failed to start camera {camera_id}: {e}")
+            raise HTTPException(503, f"Failed to start camera stream: {e}")
+
+    # Enable AI processing
+    detection_loop.set_ai_enabled(camera_id, True)
+
+    return {
+        "camera_id": camera_id,
+        "ai_enabled": True,
+        "stream_started": camera_needs_start,
+        "message": "AI enabled" + (" and RTSP reader started" if camera_needs_start else "")
+    }
+
+
+@app.post("/api/ai/{camera_id}/disable")
+async def disable_ai(camera_id: str):
+    """Disable AI processing for a specific camera (saves resources)."""
+    detection_loop = get_detection_loop()
+    if not detection_loop:
+        raise HTTPException(503, "Detection loop not running")
+
+    detection_loop.set_ai_enabled(camera_id, False)
+    return {"camera_id": camera_id, "ai_enabled": False}
+
+
+@app.get("/api/ai/{camera_id}/status")
+async def get_ai_status(camera_id: str):
+    """Get AI processing status for a specific camera."""
+    detection_loop = get_detection_loop()
+    if not detection_loop:
+        raise HTTPException(503, "Detection loop not running")
+
+    enabled = detection_loop.is_ai_enabled(camera_id)
+    return {"camera_id": camera_id, "ai_enabled": enabled}
+
+
+@app.get("/api/ai/status")
+async def get_all_ai_status():
+    """Get AI processing status for all cameras."""
+    detection_loop = get_detection_loop()
+    if not detection_loop:
+        raise HTTPException(503, "Detection loop not running")
+
+    status = detection_loop.get_ai_status()
+    return {"cameras": status}
 
 
 @app.get("/api/stream/annotated/{camera_id}")

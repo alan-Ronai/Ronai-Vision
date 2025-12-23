@@ -180,7 +180,7 @@ class GeminiAnalyzer:
 
         return response
 
-    def _frame_to_pil(self, frame, bbox: Optional[List[float]] = None, margin_percent: float = 0.50, class_name: str = "unknown") -> Image.Image:
+    def _frame_to_pil(self, frame, bbox: Optional[List[float]] = None, margin_percent: float = 0.50, class_name: str = "unknown") -> Optional[Image.Image]:
         """
         Convert OpenCV frame to PIL Image, optionally cropping to bbox WITH MARGIN.
         Applies image enhancement for better Gemini analysis.
@@ -192,27 +192,51 @@ class GeminiAnalyzer:
             class_name: Object class for class-specific enhancement (e.g., "car", "person")
 
         Returns:
-            PIL Image in RGB format with the subject fully visible in the center
+            PIL Image in RGB format with the subject fully visible in the center, or None if invalid
         """
+        # Validate input frame
+        if frame is None or not hasattr(frame, 'shape') or frame.size == 0:
+            logger.warning("_frame_to_pil received empty or invalid frame")
+            return None
+
         if bbox is not None:
             x1, y1, x2, y2 = map(int, bbox)
             h, w = frame.shape[:2]
 
-            # Calculate bbox dimensions
+            # Validate bbox dimensions
             bbox_w = x2 - x1
             bbox_h = y2 - y1
+            if bbox_w <= 0 or bbox_h <= 0:
+                logger.warning(f"Invalid bbox dimensions: {bbox_w}x{bbox_h}, using entire frame")
+                # Use entire frame instead of failing
+                pass
+            else:
+                # Check if frame appears to be pre-cropped (bbox coords outside frame bounds)
+                # This happens when AnalysisBuffer stores crops instead of full frames
+                bbox_outside_frame = (x1 >= w or y1 >= h or x2 > w * 1.5 or y2 > h * 1.5)
+                frame_is_small_crop = (w < bbox_w or h < bbox_h) or (w < 600 and h < 600)
 
-            # Add margin around the bbox (50% of bbox size on each side for better context)
-            margin_x = int(bbox_w * margin_percent)
-            margin_y = int(bbox_h * margin_percent)
+                if bbox_outside_frame or frame_is_small_crop:
+                    # Frame is already a crop - use entire frame
+                    logger.debug(f"Frame appears pre-cropped ({w}x{h}), bbox={bbox}, using entire frame")
+                else:
+                    # Frame is full-size - need to crop with margin
+                    margin_x = int(bbox_w * margin_percent)
+                    margin_y = int(bbox_h * margin_percent)
 
-            # Expand bbox with margin
-            x1 = max(0, x1 - margin_x)
-            y1 = max(0, y1 - margin_y)
-            x2 = min(w, x2 + margin_x)
-            y2 = min(h, y2 + margin_y)
+                    # Expand bbox with margin
+                    x1 = max(0, x1 - margin_x)
+                    y1 = max(0, y1 - margin_y)
+                    x2 = min(w, x2 + margin_x)
+                    y2 = min(h, y2 + margin_y)
 
-            frame = frame[y1:y2, x1:x2]
+                    # Validate crop coordinates
+                    if x2 > x1 and y2 > y1:
+                        frame = frame[y1:y2, x1:x2]
+                        # Validate cropped frame
+                        if frame is None or frame.size == 0:
+                            logger.warning("Crop resulted in empty frame, using original")
+                            # Revert - but we can't, so just continue with what we have
 
         # Apply image enhancement for better Gemini analysis
         if self._image_enhancer is not None:
@@ -221,6 +245,11 @@ class GeminiAnalyzer:
                 logger.debug(f"Applied image enhancement for {class_name}")
             except Exception as e:
                 logger.warning(f"Image enhancement failed: {e}")
+
+        # Final validation before color conversion
+        if frame is None or frame.size == 0:
+            logger.warning("Frame is empty after enhancement")
+            return None
 
         # Handle color conversion based on frame format
         if len(frame.shape) == 2:
@@ -418,6 +447,8 @@ class GeminiAnalyzer:
         try:
             # Use "vehicle" class for enhanced license plate region processing
             img = self._frame_to_pil(frame, bbox, class_name="vehicle")
+            if img is None:
+                return {"error": "Failed to prepare image - empty or invalid frame"}
 
             prompt = """אתה מנתח ביטחוני. נתח את הרכב בתמונה בקפידה רבה.
 זהה את כל הפרטים הנראים לעין. תן תשובה מלאה ומפורטת.
@@ -527,6 +558,8 @@ class GeminiAnalyzer:
         try:
             # Use "person" class for person-specific enhancement
             img = self._frame_to_pil(frame, bbox, class_name="person")
+            if img is None:
+                return {"error": "Failed to prepare image - empty or invalid frame"}
 
             prompt = """אתה מנתח ביטחוני מקצועי. נתח את האדם בתמונה בקפידה רבה.
 תאר את כל מה שאתה רואה בפירוט מלא. זה חשוב לזיהוי.
@@ -607,6 +640,8 @@ class GeminiAnalyzer:
 
         try:
             img = self._frame_to_pil(frame)
+            if img is None:
+                return {"error": "Failed to prepare image - empty or invalid frame"}
 
             prompt = """
             בדוק את התמונה מנקודת מבט ביטחונית.
@@ -656,6 +691,8 @@ class GeminiAnalyzer:
 
         try:
             img = self._frame_to_pil(frame)
+            if img is None:
+                return {"error": "Failed to prepare image - empty or invalid frame"}
 
             if custom_prompt:
                 prompt = f"{custom_prompt}\nהחזר תשובה בעברית בפורמט JSON אם אפשר."
@@ -740,8 +777,12 @@ class GeminiAnalyzer:
 
         try:
             images = [self._frame_to_pil(f) for f in frames]
+            # Filter out None images
+            valid_images = [img for img in images if img is not None]
+            if not valid_images:
+                return {"error": "Failed to prepare images - all frames empty or invalid"}
 
-            response = await self._generate_content([prompt, *images], analysis_type="multi_frame")
+            response = await self._generate_content([prompt, *valid_images], analysis_type="multi_frame")
             return self._parse_json(response.text)
 
         except Exception as e:
@@ -768,6 +809,8 @@ class GeminiAnalyzer:
         try:
             img1 = self._frame_to_pil(frame1, bbox1)
             img2 = self._frame_to_pil(frame2, bbox2)
+            if img1 is None or img2 is None:
+                return {"error": "Failed to prepare images - one or both frames empty or invalid"}
 
             prompt = """
             בדוק את שתי התמונות. האם זה אותו רכב?
@@ -808,6 +851,8 @@ class GeminiAnalyzer:
         try:
             img1 = self._frame_to_pil(frame1, bbox1)
             img2 = self._frame_to_pil(frame2, bbox2)
+            if img1 is None or img2 is None:
+                return {"error": "Failed to prepare images - one or both frames empty or invalid"}
 
             prompt = """
             בדוק את שתי התמונות. האם זה אותו אדם? (לפי ביגוד, לא פנים)

@@ -10,6 +10,28 @@ const isValidValue = (value) => {
   return !placeholders.includes(String(value).toLowerCase().trim());
 };
 
+// Helper to check if analysis has actual Gemini results (not just initial cutout)
+const hasGeminiAnalysis = (analysis, type) => {
+  if (!analysis) return false;
+  // For vehicles: check for color, manufacturer, or vehicleType
+  if (type === 'vehicle') {
+    return isValidValue(analysis.color) || isValidValue(analysis.manufacturer) || isValidValue(analysis.vehicleType);
+  }
+  // For persons: check for shirtColor, pantsColor, or gender
+  return isValidValue(analysis.shirtColor) || isValidValue(analysis.pantsColor) || isValidValue(analysis.gender);
+};
+
+// Cutout quality badge component
+const CutoutBadge = ({ hasGemini }) => (
+  <span className={`absolute -top-1 -right-1 px-1.5 py-0.5 rounded text-[10px] font-bold ${
+    hasGemini
+      ? 'bg-green-600 text-white'
+      : 'bg-yellow-600 text-black'
+  }`}>
+    {hasGemini ? 'AI' : 'RAW'}
+  </span>
+);
+
 export default function GlobalIDStore({ isOpen, onClose }) {
   const { socket } = useApp();
   const [objects, setObjects] = useState([]);
@@ -273,11 +295,14 @@ export default function GlobalIDStore({ isOpen, onClose }) {
                       <div className="flex items-center gap-3">
                         {/* Cutout thumbnail or fallback icon */}
                         {obj.analysis?.cutout_image ? (
-                          <img
-                            src={`data:image/jpeg;base64,${obj.analysis.cutout_image}`}
-                            alt=""
-                            className="w-10 h-10 object-cover rounded border border-gray-600"
-                          />
+                          <div className="relative">
+                            <img
+                              src={`data:image/jpeg;base64,${obj.analysis.cutout_image}`}
+                              alt=""
+                              className="w-10 h-10 object-cover rounded border border-gray-600"
+                            />
+                            <CutoutBadge hasGemini={hasGeminiAnalysis(obj.analysis, obj.type)} />
+                          </div>
                         ) : (
                           <span className="text-2xl">
                             {obj.type === 'person'
@@ -379,11 +404,14 @@ function ObjectDetail({ object, onRefreshAnalysis }) {
       <div className="flex items-start gap-4">
         {/* Cutout image or fallback icon */}
         {object.analysis?.cutout_image ? (
-          <img
-            src={`data:image/jpeg;base64,${object.analysis.cutout_image}`}
-            alt="Object cutout"
-            className="w-24 h-24 object-cover rounded-lg border-2 border-gray-600"
-          />
+          <div className="relative">
+            <img
+              src={`data:image/jpeg;base64,${object.analysis.cutout_image}`}
+              alt="Object cutout"
+              className="w-24 h-24 object-cover rounded-lg border-2 border-gray-600"
+            />
+            <CutoutBadge hasGemini={hasGeminiAnalysis(object.analysis, object.type)} />
+          </div>
         ) : (
           <div className="w-24 h-24 flex items-center justify-center bg-gray-700 rounded-lg border-2 border-gray-600">
             <span className="text-5xl">

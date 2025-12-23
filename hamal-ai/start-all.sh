@@ -58,6 +58,12 @@ if [ ! -d "$SCRIPT_DIR/ai-service/venv" ]; then
     pip install -r requirements.txt
 fi
 
+# go2rtc (optional but recommended for WebRTC streaming)
+if [ ! -f "$SCRIPT_DIR/go2rtc/go2rtc" ]; then
+    echo "${BLUE}Installing go2rtc for WebRTC streaming...${NC}"
+    cd "$SCRIPT_DIR/go2rtc" && bash install.sh
+fi
+
 echo ""
 echo "✅ Dependencies installed"
 echo ""
@@ -79,6 +85,13 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     # Start AI Service
     osascript -e "tell application \"Terminal\" to do script \"cd '$SCRIPT_DIR/ai-service' && source venv/bin/activate && python main.py\""
 
+    sleep 2
+
+    # Start go2rtc (WebRTC streaming server)
+    if [ -f "$SCRIPT_DIR/go2rtc/go2rtc" ]; then
+        osascript -e "tell application \"Terminal\" to do script \"cd '$SCRIPT_DIR/go2rtc' && ./go2rtc -config go2rtc.yaml\""
+    fi
+
     echo ""
     echo "🚀 All services started in separate terminal windows!"
     echo ""
@@ -86,6 +99,7 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     echo "  - Frontend: http://localhost:5173"
     echo "  - Backend:  http://localhost:3000"
     echo "  - AI API:   http://localhost:8000"
+    echo "  - go2rtc:   http://localhost:1984 (WebRTC streaming)"
     echo ""
 
 else
@@ -101,6 +115,13 @@ else
     cd "$SCRIPT_DIR/ai-service" && source venv/bin/activate && python main.py &
     AI_PID=$!
 
+    # Start go2rtc if available
+    GO2RTC_PID=""
+    if [ -f "$SCRIPT_DIR/go2rtc/go2rtc" ]; then
+        cd "$SCRIPT_DIR/go2rtc" && ./go2rtc -config go2rtc.yaml &
+        GO2RTC_PID=$!
+    fi
+
     echo ""
     echo "🚀 All services started!"
     echo ""
@@ -108,13 +129,17 @@ else
     echo "  - Backend:  $BACKEND_PID"
     echo "  - Frontend: $FRONTEND_PID"
     echo "  - AI:       $AI_PID"
+    if [ -n "$GO2RTC_PID" ]; then
+        echo "  - go2rtc:   $GO2RTC_PID"
+    fi
     echo ""
-    echo "To stop all: kill $BACKEND_PID $FRONTEND_PID $AI_PID"
+    echo "To stop all: kill $BACKEND_PID $FRONTEND_PID $AI_PID $GO2RTC_PID"
     echo ""
     echo "Access the application:"
     echo "  - Frontend: http://localhost:5173"
     echo "  - Backend:  http://localhost:3000"
     echo "  - AI API:   http://localhost:8000"
+    echo "  - go2rtc:   http://localhost:1984 (WebRTC streaming)"
 
     # Wait for all processes
     wait

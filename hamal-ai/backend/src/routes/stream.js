@@ -5,6 +5,7 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { spawn } from 'child_process';
+import go2rtcService from '../services/go2rtcService.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const router = express.Router();
@@ -253,6 +254,155 @@ router.post('/frame', express.raw({ type: 'image/*', limit: '10mb' }), (req, res
 
     res.json({ message: 'Frame broadcasted' });
   } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// go2rtc WebRTC Streaming Routes
+// ============================================
+
+/**
+ * GET /api/stream/go2rtc/health
+ * Check if go2rtc is running
+ */
+router.get('/go2rtc/health', async (req, res) => {
+  try {
+    const healthy = await go2rtcService.isHealthy();
+    res.json({
+      status: healthy ? 'healthy' : 'unhealthy',
+      go2rtcUrl: process.env.GO2RTC_URL || 'http://localhost:1984'
+    });
+  } catch (error) {
+    res.status(503).json({ status: 'error', message: error.message });
+  }
+});
+
+/**
+ * GET /api/stream/go2rtc/streams
+ * Get all streams registered in go2rtc
+ */
+router.get('/go2rtc/streams', async (req, res) => {
+  try {
+    const streams = await go2rtcService.getStreams();
+    res.json(streams);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/stream/go2rtc/add
+ * Add a camera stream to go2rtc
+ * Body: { cameraId, rtspUrl }
+ */
+router.post('/go2rtc/add', async (req, res) => {
+  try {
+    const { cameraId, rtspUrl } = req.body;
+
+    if (!cameraId || !rtspUrl) {
+      return res.status(400).json({ error: 'cameraId and rtspUrl are required' });
+    }
+
+    const result = await go2rtcService.addStream(cameraId, rtspUrl);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * DELETE /api/stream/go2rtc/remove/:cameraId
+ * Remove a camera stream from go2rtc
+ */
+router.delete('/go2rtc/remove/:cameraId', async (req, res) => {
+  try {
+    const { cameraId } = req.params;
+    const result = await go2rtcService.removeStream(cameraId);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/stream/go2rtc/webrtc/:cameraId
+ * Get WebRTC connection info for a camera
+ */
+router.get('/go2rtc/webrtc/:cameraId', (req, res) => {
+  const { cameraId } = req.params;
+  const info = go2rtcService.getWebRTCInfo(cameraId);
+  res.json({
+    cameraId,
+    ...info,
+    instructions: {
+      webrtc: 'Use the whep URL with a WebRTC player or go2rtc client library',
+      mse: 'Connect via WebSocket for MSE playback (fallback)',
+      hls: 'Use HLS.js or native video player for HLS fallback'
+    }
+  });
+});
+
+/**
+ * POST /api/stream/go2rtc/sync
+ * Sync all cameras from database to go2rtc
+ */
+router.post('/go2rtc/sync', async (req, res) => {
+  try {
+    // Get cameras from request body or fetch from database
+    let cameras = req.body.cameras;
+
+    if (!cameras) {
+      // Try to get cameras from database via the app
+      const Camera = req.app.get('Camera');
+      if (Camera) {
+        cameras = await Camera.find({ status: 'online' });
+      } else {
+        // Fallback: use camera storage service
+        const cameraStorage = req.app.get('cameraStorage');
+        if (cameraStorage) {
+          cameras = await cameraStorage.find();
+        }
+      }
+    }
+
+    if (!cameras || cameras.length === 0) {
+      return res.json({ message: 'No cameras to sync', results: [] });
+    }
+
+    const results = await go2rtcService.syncCameras(cameras);
+    res.json({ message: 'Cameras synced to go2rtc', results });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Proxy WebRTC signaling for browsers that can't connect directly to go2rtc
+ * POST /api/stream/go2rtc/webrtc/:cameraId/offer
+ */
+router.post('/go2rtc/webrtc/:cameraId/offer', async (req, res) => {
+  const { cameraId } = req.params;
+  const go2rtcUrl = process.env.GO2RTC_URL || 'http://localhost:1984';
+
+  try {
+    // Forward the SDP offer to go2rtc
+    const response = await fetch(`${go2rtcUrl}/api/webrtc?src=${cameraId}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/sdp'
+      },
+      body: req.body.sdp
+    });
+
+    if (!response.ok) {
+      throw new Error(`go2rtc responded with ${response.status}`);
+    }
+
+    const answerSdp = await response.text();
+    res.json({ sdp: answerSdp, type: 'answer' });
+  } catch (error) {
+    console.error(`[go2rtc] WebRTC offer error for ${cameraId}:`, error.message);
     res.status(500).json({ error: error.message });
   }
 });

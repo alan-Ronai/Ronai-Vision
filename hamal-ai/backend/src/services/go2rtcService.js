@@ -1,0 +1,219 @@
+/**
+ * go2rtc Service for HAMAL-AI
+ * Manages communication with go2rtc streaming server
+ */
+
+import axios from 'axios';
+
+const GO2RTC_URL = process.env.GO2RTC_URL || 'http://localhost:1984';
+
+class Go2rtcService {
+  constructor() {
+    this.baseUrl = GO2RTC_URL;
+    this.streams = new Map();
+  }
+
+  /**
+   * Add a stream to go2rtc
+   * @param {string} streamId - Unique stream identifier
+   * @param {string} rtspUrl - RTSP URL of the camera
+   * @param {boolean} useTcp - Use TCP transport for more reliable streaming (default: true)
+   * @returns {Promise<object>} - Stream info
+   */
+  async addStream(streamId, rtspUrl, useTcp = true) {
+    try {
+      // Use TCP transport for more reliable streaming over the network
+      // TCP is more reliable than UDP especially for remote cameras
+      let source = rtspUrl;
+      if (useTcp && rtspUrl.startsWith('rtsp://')) {
+        // Add TCP transport hint if not already present
+        if (!rtspUrl.includes('#')) {
+          source = `${rtspUrl}#transport=tcp`;
+        } else if (!rtspUrl.includes('transport=')) {
+          source = `${rtspUrl}&transport=tcp`;
+        }
+      }
+
+      // go2rtc API: PUT /api/streams?src=...&name=streamId
+      const response = await axios.put(
+        `${this.baseUrl}/api/streams`,
+        null,
+        {
+          params: {
+            name: streamId,
+            src: source
+          }
+        }
+      );
+
+      this.streams.set(streamId, {
+        rtspUrl,
+        addedAt: new Date(),
+        status: 'active'
+      });
+
+      console.log(`[go2rtc] Added stream: ${streamId}`);
+
+      return {
+        success: true,
+        streamId,
+        webrtcUrl: `${this.baseUrl}/api/webrtc?src=${streamId}`,
+        mseUrl: `${this.baseUrl}/api/ws?src=${streamId}`,
+        hlsUrl: `${this.baseUrl}/api/stream.m3u8?src=${streamId}`,
+        rtspUrl: `rtsp://localhost:8554/${streamId}`
+      };
+    } catch (error) {
+      console.error(`[go2rtc] Error adding stream ${streamId}:`, error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Remove a stream from go2rtc
+   * @param {string} streamId - Stream identifier to remove
+   */
+  async removeStream(streamId) {
+    try {
+      await axios.delete(`${this.baseUrl}/api/streams`, {
+        params: { name: streamId }
+      });
+
+      this.streams.delete(streamId);
+      console.log(`[go2rtc] Removed stream: ${streamId}`);
+
+      return { success: true, streamId };
+    } catch (error) {
+      console.error(`[go2rtc] Error removing stream ${streamId}:`, error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Get all streams from go2rtc
+   * @returns {Promise<object>} - All stream configurations
+   */
+  async getStreams() {
+    try {
+      const response = await axios.get(`${this.baseUrl}/api/streams`);
+      return response.data;
+    } catch (error) {
+      console.error('[go2rtc] Error getting streams:', error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Get stream info for a specific stream
+   * @param {string} streamId - Stream identifier
+   * @returns {Promise<object>} - Stream info with producers/consumers
+   */
+  async getStreamInfo(streamId) {
+    try {
+      const response = await axios.get(`${this.baseUrl}/api/streams`, {
+        params: { name: streamId }
+      });
+      return response.data;
+    } catch (error) {
+      console.error(`[go2rtc] Error getting stream info for ${streamId}:`, error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Check if go2rtc is running and accessible
+   * @returns {Promise<boolean>}
+   */
+  async isHealthy() {
+    try {
+      const response = await axios.get(`${this.baseUrl}/api`, { timeout: 2000 });
+      return response.status === 200;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  /**
+   * Get WebRTC connection URLs for a stream
+   * @param {string} streamId - Stream identifier
+   * @returns {object} - WebRTC connection info
+   */
+  getWebRTCInfo(streamId) {
+    return {
+      // WebRTC WHEP endpoint (browser-compatible)
+      whep: `${this.baseUrl}/api/webrtc?src=${streamId}`,
+      // MSE WebSocket endpoint (fallback)
+      mse: `${this.baseUrl}/api/ws?src=${streamId}`,
+      // go2rtc's internal RTSP output
+      rtsp: `rtsp://localhost:8554/${streamId}`,
+      // HLS fallback
+      hls: `${this.baseUrl}/api/stream.m3u8?src=${streamId}`
+    };
+  }
+
+  /**
+   * Clear all streams from go2rtc
+   * Called on startup to ensure clean state
+   */
+  async clearAllStreams() {
+    try {
+      const streams = await this.getStreams();
+      const streamNames = Object.keys(streams || {});
+
+      if (streamNames.length === 0) {
+        console.log('[go2rtc] No streams to clear');
+        return { success: true, cleared: 0 };
+      }
+
+      console.log(`[go2rtc] Clearing ${streamNames.length} existing streams...`);
+
+      for (const name of streamNames) {
+        try {
+          await this.removeStream(name);
+        } catch (e) {
+          console.warn(`[go2rtc] Failed to remove stream ${name}: ${e.message}`);
+        }
+      }
+
+      this.streams.clear();
+      console.log(`[go2rtc] Cleared ${streamNames.length} streams`);
+      return { success: true, cleared: streamNames.length };
+    } catch (error) {
+      console.error('[go2rtc] Error clearing streams:', error.message);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Sync cameras from database to go2rtc
+   * @param {Array} cameras - Array of camera objects with rtspUrl
+   */
+  async syncCameras(cameras) {
+    const results = [];
+
+    for (const camera of cameras) {
+      // Use cameraId (frontend uses this), fallback to _id
+      const streamId = camera.cameraId || camera._id;
+
+      if (camera.rtspUrl) {
+        try {
+          const result = await this.addStream(streamId, camera.rtspUrl);
+          results.push({ camera: streamId, ...result });
+        } catch (error) {
+          results.push({
+            camera: streamId,
+            success: false,
+            error: error.message
+          });
+        }
+      } else {
+        console.log(`[go2rtc] Skipping ${streamId}: no RTSP URL`);
+      }
+    }
+
+    return results;
+  }
+}
+
+// Singleton instance
+const go2rtcService = new Go2rtcService();
+export default go2rtcService;

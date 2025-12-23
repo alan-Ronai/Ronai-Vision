@@ -26,7 +26,8 @@ def parse_gid(track_id: Union[str, int]) -> Optional[int]:
 
     Track IDs can come in various formats:
     - Integer: 123
-    - Prefixed string: 't_123', 'v_45', 'p_67'
+    - New session format: 'v_0_2', 'p_1_5' (prefix_session_id) - extracts LAST number
+    - Old prefixed string: 't_123', 'v_45', 'p_67'
     - Plain string: '123'
 
     Args:
@@ -45,7 +46,12 @@ def parse_gid(track_id: Union[str, int]) -> Optional[int]:
     # Convert to string and extract numeric part
     track_str = str(track_id)
 
-    # Try to extract number from prefixed format like 't_123', 'v_45', 'p_67'
+    # NEW FORMAT: Try to extract from session format 'v_0_2', 'p_1_5' (get the LAST number)
+    match = re.search(r'[tvp]_\d+_(\d+)', track_str)
+    if match:
+        return int(match.group(1))
+
+    # OLD FORMAT: Try to extract number from prefixed format like 't_123', 'v_45', 'p_67'
     match = re.search(r'[tvp]_(\d+)', track_str)
     if match:
         return int(match.group(1))

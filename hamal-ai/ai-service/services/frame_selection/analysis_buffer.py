@@ -179,7 +179,7 @@ class AnalysisBuffer:
                 # Find oldest buffer and force trigger
                 oldest_id = min(self._buffers.keys(), key=lambda k: self._buffers[k].created_at)
                 self._trigger_analysis(oldest_id, "capacity")
-                del self._buffers[oldest_id]
+                # Note: _trigger_analysis already deletes the buffer, no need to delete again
 
             # Create new buffer
             self._buffers[track_id] = TrackBuffer(
@@ -223,7 +223,22 @@ class AnalysisBuffer:
             self._frame_index += 1
             buffer.frames_received += 1
 
-            # Score this frame
+            # CPU OPTIMIZATION: Skip quality scoring every other frame if we already have a decent frame
+            # This reduces CPU load by ~50% for quality scoring operations
+            skip_scoring = (
+                buffer.best_score >= 0.5 and  # Already have a decent frame
+                buffer.frames_received % 2 == 0  # Skip every other frame
+            )
+
+            if skip_scoring:
+                # Just check timeout without expensive scoring
+                elapsed_ms = (time.time() - buffer.created_at) * 1000
+                if elapsed_ms >= self.config.buffer_timeout_ms:
+                    logger.info(f"Trigger: timeout for track {buffer.track_id} after {elapsed_ms:.0f}ms, {buffer.frames_received} frames (skipped scoring)")
+                    return self._trigger_analysis(track_id, "timeout")
+                return None
+
+            # Score this frame (CPU intensive - Laplacian, Sobel, histogram)
             score_result = self.quality_scorer.score_frame(
                 frame, bbox, buffer.object_class, confidence
             )
@@ -328,7 +343,18 @@ class AnalysisBuffer:
         Returns:
             Trigger reason string, or None if not triggered
         """
-        # Check minimum frames requirement
+        # CRITICAL: Check timeout FIRST - timeout should fire regardless of frame count
+        # This ensures analysis happens even if the object leaves quickly or frames are sparse
+        elapsed_ms = (time.time() - buffer.created_at) * 1000
+        if elapsed_ms >= self.config.buffer_timeout_ms:
+            # Must have at least 1 frame to trigger
+            if buffer.frames_received >= 1:
+                logger.info(f"Trigger: timeout for track {buffer.track_id} after {elapsed_ms:.0f}ms, {buffer.frames_received} frames")
+                return "timeout"
+            else:
+                logger.debug(f"Timeout reached but no frames for track {buffer.track_id}")
+
+        # Check minimum frames requirement for other triggers
         if buffer.frames_received < self.config.min_buffer_frames:
             return None
 
@@ -339,11 +365,6 @@ class AnalysisBuffer:
         # Check buffer full
         if buffer.frames_received >= self.config.max_buffer_frames:
             return "buffer_full"
-
-        # Check timeout
-        elapsed_ms = (time.time() - buffer.created_at) * 1000
-        if elapsed_ms >= self.config.buffer_timeout_ms:
-            return "timeout"
 
         return None
 

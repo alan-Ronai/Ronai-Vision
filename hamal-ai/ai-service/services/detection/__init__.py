@@ -17,7 +17,8 @@ from .bot_sort_tracker import (
     Detection,
     Track,
     BoTSORTTracker,
-    get_bot_sort_tracker
+    get_bot_sort_tracker,
+    reset_bot_sort_tracker
 )
 
 __all__ = [
@@ -31,5 +32,6 @@ __all__ = [
     "Detection",
     "Track",
     "BoTSORTTracker",
-    "get_bot_sort_tracker"
+    "get_bot_sort_tracker",
+    "reset_bot_sort_tracker"
 ]

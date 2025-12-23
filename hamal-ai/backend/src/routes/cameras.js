@@ -1,8 +1,40 @@
 import express from "express";
 import cameraStorage from "../services/cameraStorage.js";
 import autoFocusService from "../services/autoFocusService.js";
+import go2rtcService from "../services/go2rtcService.js";
 
 const router = express.Router();
+
+// Sync cameras to go2rtc on startup (called from index.js)
+export async function syncCamerasToGo2rtc() {
+    try {
+        const isHealthy = await go2rtcService.isHealthy();
+        if (!isHealthy) {
+            console.log("[Cameras] go2rtc not available, skipping sync");
+            return;
+        }
+
+        // Clear all existing streams first to ensure clean state
+        // This prevents stale streams from accumulating in go2rtc
+        console.log("[Cameras] Clearing existing go2rtc streams...");
+        await go2rtcService.clearAllStreams();
+
+        const cameras = await cameraStorage.find();
+        const camerasWithRtsp = cameras.filter(c => c.rtspUrl);
+
+        if (camerasWithRtsp.length === 0) {
+            console.log("[Cameras] No cameras with RTSP URLs to sync");
+            return;
+        }
+
+        console.log(`[Cameras] Syncing ${camerasWithRtsp.length} cameras to go2rtc...`);
+        const results = await go2rtcService.syncCameras(camerasWithRtsp);
+        const successful = results.filter(r => r.success).length;
+        console.log(`[Cameras] Synced ${successful}/${camerasWithRtsp.length} cameras to go2rtc`);
+    } catch (error) {
+        console.warn("[Cameras] Failed to sync cameras to go2rtc:", error.message);
+    }
+}
 
 /**
  * GET /api/cameras
@@ -73,6 +105,16 @@ router.post("/", async (req, res) => {
         // Notify clients
         const io = req.app.get("io");
         io.emit("camera:added", camera);
+
+        // Register camera with go2rtc for WebRTC streaming
+        if (camera.rtspUrl) {
+            try {
+                await go2rtcService.addStream(camera.cameraId, camera.rtspUrl);
+                console.log(`[Cameras] Registered ${camera.cameraId} with go2rtc`);
+            } catch (go2rtcError) {
+                console.warn(`[Cameras] Could not register with go2rtc: ${go2rtcError.message}`);
+            }
+        }
 
         // Notify AI service to start detection for new camera
         if (camera.aiEnabled !== false && camera.rtspUrl) {
@@ -259,22 +301,48 @@ router.post("/:id/test", async (req, res) => {
 
 /**
  * DELETE /api/cameras/:id
- * Delete camera
+ * Delete camera - fully removes from all systems (no zombies!)
  */
 router.delete("/:id", async (req, res) => {
     try {
+        const cameraId = req.params.id;
+
         const camera = await cameraStorage.delete({
-            cameraId: req.params.id,
+            cameraId: cameraId,
         });
         if (!camera) {
             return res.status(404).json({ error: "Camera not found" });
         }
 
+        // Remove from go2rtc (stop WebRTC streaming)
+        try {
+            await go2rtcService.removeStream(cameraId);
+            console.log(`[Cameras] Removed ${cameraId} from go2rtc`);
+        } catch (go2rtcError) {
+            // Not critical - camera might not have been in go2rtc
+            console.warn(`[Cameras] Could not remove from go2rtc: ${go2rtcError.message}`);
+        }
+
+        // Stop AI detection in AI service
+        try {
+            const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://localhost:8000';
+            const axios = (await import('axios')).default;
+            await axios.delete(`${AI_SERVICE_URL}/detection/camera/${cameraId}`, { timeout: 5000 });
+            console.log(`[Cameras] Stopped AI detection for ${cameraId}`);
+        } catch (aiError) {
+            // Not critical - AI service might not be running
+            console.warn(`[Cameras] Could not stop AI detection: ${aiError.message}`);
+        }
+
         // Notify clients
         const io = req.app.get("io");
-        io.emit("camera:removed", { cameraId: req.params.id });
+        io.emit("camera:removed", { cameraId: cameraId });
 
-        res.json({ message: "Camera deleted", cameraId: req.params.id });
+        res.json({
+            message: "Camera fully deleted",
+            cameraId: cameraId,
+            removedFrom: ["database", "go2rtc", "ai-service"]
+        });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }

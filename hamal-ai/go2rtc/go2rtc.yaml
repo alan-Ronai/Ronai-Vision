@@ -1,0 +1,32 @@
+# go2rtc Configuration for HAMAL-AI
+# Documentation: https://github.com/AlexxIT/go2rtc
+#
+# NOTE: Streams are managed dynamically via API by the backend.
+# Do NOT add streams manually here - they will be cleared on startup.
+# The source of truth for cameras is backend/data/cameras.json
+
+# API configuration
+api:
+  listen: ":1984"      # Web UI and API port
+  origin: "*"          # Allow CORS from any origin (for dev)
+
+# WebRTC configuration
+webrtc:
+  listen: ":8555"      # WebRTC UDP port
+  candidates:
+    - stun:stun.l.google.com:19302  # Google STUN server for NAT traversal
+
+# RTSP server (allows other apps to pull streams)
+rtsp:
+  listen: ":8554"      # go2rtc's RTSP output port
+
+# Streams are added dynamically via API - do not define here
+streams: {}
+
+# FFmpeg configuration for transcoding (if needed)
+ffmpeg:
+  bin: ffmpeg          # Path to ffmpeg binary
+
+# Logging
+log:
+  level: info          # debug, info, warn, error

@@ -166,6 +166,9 @@ class Track:
 
     track_id_counter = 0
     vehicle_id_counter = 0
+    # Session counter increments on each tracker reset to prevent ID collisions
+    # This ensures v_1 from session 1 is different from v_1 from session 2
+    session_counter = 0
 
     def __init__(self, detection: Detection, track_id: Optional[str] = None, camera_id: Optional[str] = None, object_type: str = "person"):
         """Initialize track with first detection.
@@ -177,14 +180,15 @@ class Track:
             object_type: 'person' or 'vehicle' - determines track_id prefix
         """
 
-        # Generate unique track ID with appropriate prefix
+        # Generate unique track ID with session prefix to prevent collisions after restart
+        # Format: v_<session>_<id> or p_<session>_<id>
         if track_id is None:
             if object_type == "vehicle":
                 Track.vehicle_id_counter += 1
-                self.track_id = f"v_{Track.vehicle_id_counter}"
+                self.track_id = f"v_{Track.session_counter}_{Track.vehicle_id_counter}"
             else:
                 Track.track_id_counter += 1
-                self.track_id = f"t_{Track.track_id_counter}"
+                self.track_id = f"p_{Track.session_counter}_{Track.track_id_counter}"
         else:
             self.track_id = track_id
 
@@ -643,6 +647,9 @@ class BoTSORTTracker:
         """Reset tracker (clear all tracks)."""
         self._persons.clear()
         self._vehicles.clear()
+        # Increment session counter BEFORE resetting ID counters
+        # This ensures new IDs don't collide with old ones in frontend stores
+        Track.session_counter += 1
         Track.track_id_counter = 0
         Track.vehicle_id_counter = 0
         self._stats = {
@@ -708,4 +715,16 @@ def get_bot_sort_tracker() -> BoTSORTTracker:
     if _tracker is None:
         _tracker = BoTSORTTracker()
         logger.info("BoT-SORT tracker initialized")
+    return _tracker
+
+
+def reset_bot_sort_tracker() -> BoTSORTTracker:
+    """Reset and return the global BoT-SORT tracker.
+
+    This creates a NEW tracker instance, clearing all state from previous runs.
+    Use this on startup to ensure no ghost tracks persist.
+    """
+    global _tracker
+    _tracker = BoTSORTTracker()
+    logger.info("BoT-SORT tracker RESET (new instance created)")
     return _tracker

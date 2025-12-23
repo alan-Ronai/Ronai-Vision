@@ -3,7 +3,7 @@
     "_id": "default-armed-alert",
     "name": "התראת אדם חמוש",
     "description": "הפעלת מצב חירום כאשר מזוהה אדם חמוש",
-    "enabled": true,
+    "enabled": false,
     "priority": 100,
     "conditions": {
       "operator": "AND",
@@ -86,7 +86,7 @@
     "migratedFrom": "alertService",
     "triggerCount": 14,
     "createdAt": "2025-01-01T00:00:00.000Z",
-    "updatedAt": "2025-12-22T11:26:33.837Z",
+    "updatedAt": "2025-12-23T14:02:06.366Z",
     "lastTriggered": "2025-12-22T11:28:13.093Z"
   },
   {

@@ -7,7 +7,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 
-import cameraRoutes from './routes/cameras.js';
+import cameraRoutes, { syncCamerasToGo2rtc } from './routes/cameras.js';
 import eventRoutes from './routes/events.js';
 import uploadRoutes from './routes/uploads.js';
 import radioRoutes from './routes/radio.js';
@@ -191,6 +191,9 @@ server.listen(PORT, () => {
 ║                                                        ║
 ╚════════════════════════════════════════════════════════╝
   `);
+
+  // Sync cameras to go2rtc for WebRTC streaming (immediate)
+  syncCamerasToGo2rtc();
 
   // Sync camera status from AI service after startup (with delay for AI service to be ready)
   setTimeout(() => {

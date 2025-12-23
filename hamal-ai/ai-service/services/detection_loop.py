@@ -19,14 +19,16 @@ import numpy as np
 import httpx
 import base64
 import os
-from typing import Optional, Dict, Any, List, Tuple
+import json
+from typing import Optional, Dict, Any, List, Tuple, Set
 from dataclasses import dataclass, field
 from datetime import datetime
 from queue import Queue, Empty
 import threading
 from collections import OrderedDict
+from fastapi import WebSocket
 
-from .detection import get_bot_sort_tracker, Detection, Track
+from .detection import get_bot_sort_tracker, reset_bot_sort_tracker, Detection, Track
 from .reid import OSNetReID, TransReIDVehicle, UniversalReID
 from . import backend_sync
 from .rules import RuleEngine, RuleContext, get_rule_engine
@@ -51,7 +53,7 @@ RECOVERY_MIN_TRACK_CONFIDENCE = 0.25  # Only recover tracks with decent history
 # Configurable via RECOVERY_EVERY_N_FRAMES env var (default: 3)
 RECOVERY_EVERY_N_FRAMES = int(os.environ.get("RECOVERY_EVERY_N_FRAMES", "3"))
 # Recovery YOLO input size - smaller = faster (default: 480, options: 320, 480, 640)
-RECOVERY_YOLO_IMGSZ = int(os.environ.get("RECOVERY_YOLO_IMGSZ", "480"))
+RECOVERY_YOLO_IMGSZ = int(os.environ.get("RECOVERY_YOLO_IMGSZ", "640"))
 
 
 class ReIDFeatureCache:
@@ -127,6 +129,93 @@ ALLOWED_CLASSES = {"person", "car", "truck", "bus", "motorcycle", "bicycle"}
 MIN_BOX_AREA = 500  # Minimum pixels squared to filter noise
 
 
+class DetectionWebSocketManager:
+    """Manages WebSocket connections for real-time detection streaming.
+
+    Instead of polling /api/detections/{camera}/latest, clients can connect
+    via WebSocket and receive detection updates pushed from the server.
+    """
+
+    def __init__(self):
+        # Map camera_id -> set of connected WebSocket clients
+        self._connections: Dict[str, Set[WebSocket]] = {}
+        self._lock = asyncio.Lock()
+
+    async def connect(self, camera_id: str, websocket: WebSocket):
+        """Register a new WebSocket connection for a camera."""
+        await websocket.accept()
+        async with self._lock:
+            if camera_id not in self._connections:
+                self._connections[camera_id] = set()
+            self._connections[camera_id].add(websocket)
+            logger.info(f"WebSocket connected for camera {camera_id}, total: {len(self._connections[camera_id])}")
+
+    async def disconnect(self, camera_id: str, websocket: WebSocket):
+        """Unregister a WebSocket connection."""
+        async with self._lock:
+            if camera_id in self._connections:
+                self._connections[camera_id].discard(websocket)
+                if not self._connections[camera_id]:
+                    del self._connections[camera_id]
+                logger.debug(f"WebSocket disconnected for camera {camera_id}")
+
+    async def broadcast(self, camera_id: str, detections: List[Dict], frame_width: int = 0, frame_height: int = 0):
+        """Broadcast detections to all connected clients for a camera."""
+        async with self._lock:
+            if camera_id not in self._connections:
+                return
+
+            clients = list(self._connections[camera_id])
+
+        if not clients:
+            return
+
+        # Prepare message - include frame dimensions for coordinate scaling
+        message = json.dumps({
+            "camera_id": camera_id,
+            "timestamp": time.time(),
+            "detections": detections,
+            "count": len(detections),
+            "frame_width": frame_width,
+            "frame_height": frame_height
+        })
+
+        # Send to all clients (remove dead connections)
+        dead_clients = []
+        for websocket in clients:
+            try:
+                await websocket.send_text(message)
+            except Exception:
+                dead_clients.append(websocket)
+
+        # Clean up dead connections
+        if dead_clients:
+            async with self._lock:
+                if camera_id in self._connections:
+                    for ws in dead_clients:
+                        self._connections[camera_id].discard(ws)
+
+    def has_clients(self, camera_id: str) -> bool:
+        """Check if a camera has any connected WebSocket clients."""
+        return camera_id in self._connections and len(self._connections[camera_id]) > 0
+
+    def get_client_count(self, camera_id: str) -> int:
+        """Get number of connected clients for a camera."""
+        return len(self._connections.get(camera_id, set()))
+
+
+# Global WebSocket manager instance
+_ws_manager: Optional[DetectionWebSocketManager] = None
+
+
+def get_ws_manager() -> DetectionWebSocketManager:
+    """Get or create the global WebSocket manager."""
+    global _ws_manager
+    if _ws_manager is None:
+        _ws_manager = DetectionWebSocketManager()
+    return _ws_manager
+
+
 @dataclass
 class DetectionResult:
     """Result from detection pipeline."""
@@ -143,28 +232,50 @@ class DetectionResult:
 
 
 class BBoxDrawer:
-    """Draws bounding boxes and labels on frames."""
+    """Draws bounding boxes and labels on frames.
 
-    # Colors (BGR format)
-    COLORS = {
-        "person": (0, 255, 0),  # Green
-        "person_armed": (0, 0, 255),  # Red
-        "car": (255, 165, 0),  # Orange
-        "truck": (255, 100, 0),  # Dark Orange
-        "motorcycle": (255, 255, 0),  # Cyan
-        "bus": (128, 0, 128),  # Purple
-        "bicycle": (0, 255, 255),  # Yellow
-        "vehicle": (255, 165, 0),  # Orange for generic vehicle
-        "predicted": (128, 128, 128),  # Gray for predicted positions
-        "default": (200, 200, 200),  # Gray
+    Color scheme (BGR format):
+    - GREEN (0, 255, 0): Persons - normal pedestrians
+    - RED (0, 0, 255): Armed persons - security threat
+    - CYAN (255, 191, 0): Vehicles - cars, trucks, buses, motorcycles
+    - GRAY (128, 128, 128): Predicted positions - tracking estimates
+    """
+
+    # Box colors (BGR format) - used for bounding boxes
+    BOX_COLORS = {
+        # Persons
+        "person": (0, 255, 0),         # GREEN - normal person
+        "person_armed": (0, 0, 255),   # RED - armed person (threat)
+
+        # Vehicles - all cyan/light blue
+        "car": (255, 191, 0),          # CYAN
+        "truck": (255, 191, 0),        # CYAN
+        "bus": (255, 191, 0),          # CYAN
+        "motorcycle": (255, 191, 0),   # CYAN
+        "bicycle": (255, 191, 0),      # CYAN
+        "vehicle": (255, 191, 0),      # CYAN (generic)
+
+        # Special states
+        "predicted": (128, 128, 128),  # GRAY - predicted position
+        "default": (255, 191, 0),      # CYAN - fallback
     }
+
+    # Legacy alias for backwards compatibility
+    COLORS = BOX_COLORS
 
     @staticmethod
     def draw_detections(
         frame: np.ndarray, detections: List[Dict], detection_type: str = "object"
     ) -> np.ndarray:
-        """Draw bounding boxes and labels on frame."""
+        """Draw bounding boxes and labels on frame.
+
+        Clean style with:
+        - Colored boxes (cyan for vehicles, green for persons)
+        - Dark semi-transparent label backgrounds
+        - Format: "ID:v_X | class | conf%" positioned inside bbox top
+        """
         annotated = frame.copy()
+        h, w = annotated.shape[:2]
 
         for det in detections:
             bbox = det.get("bbox", det.get("box", []))
@@ -179,93 +290,105 @@ class BBoxDrawer:
 
             # Determine if armed
             is_armed = False
+            weapon_info = ""
             if metadata:
                 analysis = metadata.get("analysis", metadata)
                 is_armed = analysis.get("armed", False) or analysis.get("חמוש", False)
+                if is_armed:
+                    weapon_type = analysis.get("weaponType", analysis.get("סוג_נשק", ""))
+                    if weapon_type and weapon_type != "לא רלוונטי":
+                        weapon_info = {
+                            "רובה": "Rifle", "אקדח": "Handgun", "רובה קצר": "SMG",
+                            "רובה צלפים": "Sniper", "סכין": "Knife", "נשק קר": "Cold",
+                        }.get(weapon_type, "")
 
-            # Check if this is a predicted (not detected) position
-            is_predicted = (
-                det.get("is_predicted", False) or det.get("consecutive_misses", 0) > 0
-            )
+            # Check if predicted position
+            is_predicted = det.get("is_predicted", False) or det.get("consecutive_misses", 0) > 0
 
-            # Select color
+            # Select box color
             if is_armed:
-                color = BBoxDrawer.COLORS["person_armed"]
+                box_color = BBoxDrawer.BOX_COLORS["person_armed"]
             elif is_predicted:
-                color = BBoxDrawer.COLORS["predicted"]
+                box_color = BBoxDrawer.BOX_COLORS["predicted"]
             else:
-                color = BBoxDrawer.COLORS.get(label, BBoxDrawer.COLORS["default"])
+                box_color = BBoxDrawer.BOX_COLORS.get(label, BBoxDrawer.BOX_COLORS["default"])
 
             # Draw bounding box
             thickness = 3 if is_armed else 2
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, thickness)
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), box_color, thickness)
 
-            # Build label text
-            label_parts = []
-            if track_id:
-                label_parts.append(f"ID:{track_id}")
-            label_parts.append(label)
-            if confidence > 0:
-                label_parts.append(f"{confidence:.0%}")
+            # Build label text: "ID:X class [conf%]"
+            # Extract just the numeric ID (remove any v_ or p_ prefix)
+            id_str = str(track_id)
+            if id_str.startswith("v_") or id_str.startswith("p_"):
+                id_display = id_str[2:]  # Remove prefix
+            else:
+                id_display = id_str
 
-            # Add armed warning
+            # Build label - simpler format: "ID:X class [conf%]"
             if is_armed:
-                weapon_type = analysis.get("weaponType", analysis.get("סוג_נשק", ""))
-                label_parts.append(f"ARMED")
-                # Map Hebrew weapon types to English for cv2 rendering (cv2 can't render Hebrew)
-                if weapon_type and weapon_type != "לא רלוונטי":
-                    weapon_type_en = {
-                        "רובה": "Rifle",
-                        "אקדח": "Handgun",
-                        "רובה קצר": "SMG",
-                        "רובה צלפים": "Sniper",
-                        "סכין": "Knife",
-                        "נשק קר": "Cold Weapon",
-                        "לא ידוע": "Unknown",
-                    }.get(weapon_type, weapon_type)
-                    # Only add if it's ASCII (to avoid ?????? on screen)
-                    if weapon_type_en.isascii():
-                        label_parts.append(weapon_type_en)
+                label_text = f"ID:{id_display} {label} ARMED"
+                if weapon_info:
+                    label_text += f" {weapon_info}"
+            elif confidence > 0 and confidence < 0.85:
+                label_text = f"ID:{id_display} {label} {int(confidence * 100)}%"
+            else:
+                label_text = f"ID:{id_display} {label}"
 
-            label_text = " | ".join(label_parts)
-
-            # Draw label background
+            # Font settings - clear and readable
             font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 0.6
-            font_thickness = 2
+            font_scale = 0.5
+            font_thickness = 1
             (text_width, text_height), baseline = cv2.getTextSize(
                 label_text, font, font_scale, font_thickness
             )
 
-            # Label position (above bbox)
-            label_y = max(y1 - 10, text_height + 10)
+            # Label dimensions
+            padding_x = 4
+            padding_y = 3
+            label_h = text_height + padding_y * 2
+            label_w = text_width + padding_x * 2
+
+            # Position: INSIDE the bbox at the top (like a header bar)
             label_x = x1
+            label_y = y1
 
-            # Background rectangle
+            # Ensure label fits within frame
+            if label_x + label_w > w:
+                label_x = w - label_w
+            if label_x < 0:
+                label_x = 0
+
+            # Draw dark semi-transparent background for label
+            overlay = annotated.copy()
             cv2.rectangle(
-                annotated,
-                (label_x, label_y - text_height - 5),
-                (label_x + text_width + 10, label_y + 5),
-                color,
-                -1,  # Filled
+                overlay,
+                (label_x, label_y),
+                (label_x + label_w, label_y + label_h),
+                (0, 0, 0),  # Black background
+                -1,
             )
+            # Blend with 65% opacity for readability
+            cv2.addWeighted(overlay, 0.65, annotated, 0.35, 0, annotated)
 
-            # Text
+            # Draw white text
+            text_x = label_x + padding_x
+            text_y = label_y + text_height + padding_y - 1
             cv2.putText(
                 annotated,
                 label_text,
-                (label_x + 5, label_y),
+                (text_x, text_y),
                 font,
                 font_scale,
                 (255, 255, 255),  # White text
                 font_thickness,
+                cv2.LINE_AA,
             )
 
-            # Draw armed indicator
+            # Draw armed indicator - red flashing border
             if is_armed:
-                # Flashing border effect
                 cv2.rectangle(
-                    annotated, (x1 - 2, y1 - 2), (x2 + 2, y2 + 2), (0, 0, 255), 4
+                    annotated, (x1 - 3, y1 - 3), (x2 + 3, y2 + 3), (0, 0, 255), 4
                 )
 
         return annotated
@@ -480,14 +603,18 @@ class DetectionLoop:
                 logger.info(f"⚠️ ReID limited to {self.max_reid_per_frame} extractions per frame")
 
         # Use BoT-SORT tracker for advanced tracking
-        self.bot_sort = get_bot_sort_tracker() if self.config.use_bot_sort else None
-
-        # CRITICAL: Reset tracker on startup to clear ghost tracks from previous runs
-        if self.bot_sort:
-            self.bot_sort.reset()
-            logger.info("✅ BoT-SORT tracker reset on startup - cleared ghost tracks")
+        # CRITICAL: Use reset_bot_sort_tracker() to create a FRESH tracker instance
+        # This ensures no ghost tracks persist from previous runs (especially with uvicorn --reload)
+        if self.config.use_bot_sort:
+            self.bot_sort = reset_bot_sort_tracker()
+            logger.info("✅ BoT-SORT tracker created fresh - no ghost tracks")
+        else:
+            self.bot_sort = None
 
         self._running = False
+
+        # Event loop reference for WebSocket broadcasting from threads
+        self._event_loop: Optional[asyncio.AbstractEventLoop] = None
 
         # CRITICAL: Latest-frame-only storage (eliminates 2-3 second queue delay!)
         # Instead of FIFO queue that builds up frames, we only keep the LATEST frame per camera
@@ -505,6 +632,16 @@ class DetectionLoop:
         # Latest annotated frames for streaming
         self._annotated_frames: Dict[str, np.ndarray] = {}
         self._frame_lock = threading.Lock()
+
+        # Latest detections for WebRTC overlay (JSON-serializable)
+        self._latest_detections: Dict[str, List[Dict]] = {}
+        self._detections_lock = threading.Lock()
+
+        # AI processing control - explicit enable/disable per camera
+        # Uses dict to track explicit True/False states; cameras not in dict use default
+        self._ai_enabled_cameras: Dict[str, bool] = {}
+        self._ai_enabled_lock = threading.Lock()
+        self._ai_enabled_default = True  # Enable AI for new cameras by default
 
         # Stats
         self._stats = {
@@ -661,6 +798,63 @@ class DetectionLoop:
         with self._frame_lock:
             return self._annotated_frames.get(camera_id)
 
+    def get_latest_detections(self, camera_id: str) -> List[Dict]:
+        """Get latest detections for WebRTC overlay (JSON-serializable)."""
+        with self._detections_lock:
+            return self._latest_detections.get(camera_id, [])
+
+    def _store_detections(self, camera_id: str, detections: List[Dict], frame_width: int = 0, frame_height: int = 0):
+        """Store latest detections for WebRTC overlay and broadcast to WebSocket clients."""
+        with self._detections_lock:
+            self._latest_detections[camera_id] = detections
+
+        # Broadcast to WebSocket clients (non-blocking)
+        # Use the stored event loop reference instead of asyncio.get_event_loop()
+        # to avoid issues when called from a background thread
+        if self._event_loop is not None:
+            ws_manager = get_ws_manager()
+            if ws_manager.has_clients(camera_id):
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        ws_manager.broadcast(camera_id, detections, frame_width, frame_height),
+                        self._event_loop
+                    )
+                except RuntimeError:
+                    # Event loop closed or not available
+                    pass
+
+    def set_ai_enabled(self, camera_id: str, enabled: bool):
+        """Enable or disable AI processing for a specific camera."""
+        with self._ai_enabled_lock:
+            # Explicitly set the state in dict (overrides default)
+            self._ai_enabled_cameras[camera_id] = enabled
+            if enabled:
+                logger.info(f"AI enabled for camera: {camera_id}")
+            else:
+                # Clear detections when AI is disabled
+                with self._detections_lock:
+                    self._latest_detections[camera_id] = []
+                logger.info(f"AI disabled for camera: {camera_id}")
+
+    def is_ai_enabled(self, camera_id: str) -> bool:
+        """Check if AI processing is enabled for a camera."""
+        with self._ai_enabled_lock:
+            # Check if camera has explicit state, otherwise use default
+            if camera_id in self._ai_enabled_cameras:
+                return self._ai_enabled_cameras[camera_id]
+            # New camera without explicit state - use default
+            return self._ai_enabled_default
+
+    def get_ai_status(self) -> Dict[str, bool]:
+        """Get AI enabled status for all cameras."""
+        with self._ai_enabled_lock:
+            rtsp_manager = get_rtsp_manager()
+            all_cameras = rtsp_manager.get_active_cameras() if rtsp_manager else []
+            return {
+                cam: self._ai_enabled_cameras.get(cam, self._ai_enabled_default)
+                for cam in all_cameras
+            }
+
     async def start(self):
         """Start the detection loop."""
         if self._running:
@@ -669,6 +863,26 @@ class DetectionLoop:
         self._running = True
         self._start_time = time.time()
         self._http_client = httpx.AsyncClient(timeout=30.0)
+
+        # Store event loop reference for WebSocket broadcasting from threads
+        self._event_loop = asyncio.get_event_loop()
+
+        # CRITICAL: Clear ALL cached state to prevent ghost tracks from previous runs
+        # This is essential when using uvicorn --reload or hot reloading
+        with self._latest_frames_lock:
+            self._latest_frames.clear()
+        with self._frame_lock:
+            self._annotated_frames.clear()
+        with self._detections_lock:
+            self._latest_detections.clear()
+        self._last_gemini.clear()
+        self._last_alert.clear()
+        self._last_event.clear()
+
+        # Reset tracker again to be absolutely sure
+        if self.bot_sort:
+            self.bot_sort.reset()
+            logger.info("✅ All cached state cleared on start - no ghost tracks")
 
         # Initialize parallel detection if enabled
         if self._use_parallel_detection and self.parallel_integration:
@@ -754,17 +968,29 @@ class DetectionLoop:
 
                     # Rate limit per camera
                     last_time = last_process_time.get(camera_id, 0)
-                    if time.time() - last_time < frame_interval:
-                        # Still store frame for streaming (with minimal annotation)
+                    time_since_last = time.time() - last_time
+                    if time_since_last < frame_interval:
+                        # Store frame for streaming (with minimal annotation) but don't process
                         if self.config.draw_bboxes:
                             annotated = self.drawer.draw_status_overlay(
                                 frame, camera_id, 0, 0, 0
                             )
                             with self._frame_lock:
                                 self._annotated_frames[camera_id] = annotated
+                        # Sleep remaining time to avoid busy-waiting
+                        remaining = frame_interval - time_since_last
+                        if remaining > 0.001:
+                            time.sleep(remaining * 0.5)  # Sleep half the remaining time
                         continue
 
                     last_process_time[camera_id] = time.time()
+
+                    # Check if AI is enabled for this camera
+                    if not self.is_ai_enabled(camera_id):
+                        # AI disabled - just store raw frame without detection
+                        with self._frame_lock:
+                            self._annotated_frames[camera_id] = frame.copy()
+                        continue
 
                     # Use parallel detection if enabled, otherwise standard detection
                     if self._use_parallel_detection and self.parallel_integration:
@@ -1304,6 +1530,27 @@ class DetectionLoop:
             total_elapsed = (time.time() - frame_start) * 1000
             self._update_timing("total_frame_ms", total_elapsed)
             # Note: _timing_samples is now per-key, updated in _update_timing()
+
+            # Store detections for WebRTC overlay (JSON-serializable format)
+            all_detections = []
+            for det in tracked_vehicles:
+                all_detections.append({
+                    "bbox": det.get("bbox", det.get("xyxy", [])),
+                    "class": det.get("class", "vehicle"),
+                    "confidence": det.get("confidence", 0),
+                    "track_id": det.get("track_id", det.get("id", "")),
+                })
+            for det in tracked_persons:
+                all_detections.append({
+                    "bbox": det.get("bbox", det.get("xyxy", [])),
+                    "class": det.get("class", "person"),
+                    "confidence": det.get("confidence", 0),
+                    "track_id": det.get("track_id", det.get("id", "")),
+                    "armed": det.get("armed", False),
+                })
+            # Pass frame dimensions so frontend can scale coordinates correctly
+            h, w = frame.shape[:2]
+            self._store_detections(camera_id, all_detections, frame_width=w, frame_height=h)
 
             return DetectionResult(
                 camera_id=camera_id,
@@ -2161,6 +2408,15 @@ class DetectionLoop:
             if self.analysis_buffer.has_been_analyzed(track_id):
                 continue
 
+            # Ensure buffer exists (handles case where track wasn't in new_vehicles)
+            if not self.analysis_buffer.is_buffering(track_id):
+                self.analysis_buffer.start_buffer(
+                    track_id=track_id,
+                    object_class=v.get("class", "vehicle"),
+                    camera_id=result.camera_id,
+                )
+                logger.debug(f"Created buffer for vehicle {track_id} (was not in new_vehicles)")
+
             # Add frame to buffer (includes quality scoring)
             quality_start = time.time()
             trigger_result = self.analysis_buffer.add_frame(
@@ -2188,6 +2444,15 @@ class DetectionLoop:
             if self.analysis_buffer.has_been_analyzed(track_id):
                 continue
 
+            # Ensure buffer exists (handles case where track wasn't in new_persons)
+            if not self.analysis_buffer.is_buffering(track_id):
+                self.analysis_buffer.start_buffer(
+                    track_id=track_id,
+                    object_class="person",
+                    camera_id=result.camera_id,
+                )
+                logger.debug(f"Created buffer for person {track_id} (was not in new_persons)")
+
             # Add frame to buffer (includes quality scoring)
             quality_start = time.time()
             trigger_result = self.analysis_buffer.add_frame(
@@ -2208,9 +2473,20 @@ class DetectionLoop:
 
         # STEP 3: Run triggered analyses (limit concurrent to avoid overloading Gemini)
         if analysis_tasks:
+            logger.info(f"Running {len(analysis_tasks)} Gemini analysis tasks (max 3)")
             # Limit to 3 concurrent analyses
-            for task in analysis_tasks[:3]:
-                await task
+            for i, task in enumerate(analysis_tasks[:3]):
+                try:
+                    await task
+                except Exception as e:
+                    logger.error(f"Analysis task {i} failed: {e}")
+        else:
+            # Log occasionally when we have tracked objects but no analysis tasks
+            if (result.tracked_vehicles or result.tracked_persons) and self._stats["frames_processed"] % 100 == 0:
+                logger.debug(
+                    f"No analysis tasks: {len(result.tracked_vehicles)} vehicles, "
+                    f"{len(result.tracked_persons)} persons tracked"
+                )
 
     async def _run_vehicle_analysis(
         self,
@@ -2222,10 +2498,13 @@ class DetectionLoop:
     ):
         """Run Gemini analysis on optimal vehicle frame with image enhancement."""
         try:
+            logger.info(f"Starting Gemini vehicle analysis for track {track_id}")
             analysis_start = time.time()
 
             # Cooldown check
-            if time.time() - self._last_gemini.get(track_id, 0) < self.config.gemini_cooldown:
+            last_call = self._last_gemini.get(track_id, 0)
+            if time.time() - last_call < self.config.gemini_cooldown:
+                logger.debug(f"Skipping vehicle {track_id}: cooldown ({time.time() - last_call:.1f}s < {self.config.gemini_cooldown}s)")
                 return
 
             # ENHANCEMENT: Enhance the frame before Gemini analysis
@@ -2330,10 +2609,13 @@ class DetectionLoop:
     ):
         """Run Gemini analysis on optimal person frame with image enhancement."""
         try:
+            logger.info(f"Starting Gemini person analysis for track {track_id}")
             analysis_start = time.time()
 
             # Cooldown check
-            if time.time() - self._last_gemini.get(track_id, 0) < self.config.gemini_cooldown:
+            last_call = self._last_gemini.get(track_id, 0)
+            if time.time() - last_call < self.config.gemini_cooldown:
+                logger.debug(f"Skipping person {track_id}: cooldown ({time.time() - last_call:.1f}s < {self.config.gemini_cooldown}s)")
                 return
 
             # ENHANCEMENT: Enhance the frame before Gemini analysis
@@ -2462,7 +2744,11 @@ class DetectionLoop:
             # Check if already in list or has analysis
             if track_id and track_id not in [x.get("track_id") for x in vehicles_to_analyze]:
                 metadata = v.get("metadata", {})
-                if not metadata.get("analysis"):
+                analysis = metadata.get("analysis", {})
+                # Check for ACTUAL Gemini analysis, not just cutout_image
+                # Gemini vehicle analysis includes: color, manufacturer, vehicleType
+                has_gemini_analysis = analysis.get("color") or analysis.get("manufacturer") or analysis.get("vehicleType")
+                if not has_gemini_analysis:
                     vehicles_to_analyze.append(v)
 
         # Analyze vehicles (limit to 3 per frame to avoid overloading Gemini)
@@ -2522,7 +2808,11 @@ class DetectionLoop:
             # Check if already in list or has analysis
             if track_id and track_id not in [x.get("track_id") for x in persons_to_analyze]:
                 metadata = p.get("metadata", {})
-                if not metadata.get("analysis"):
+                analysis = metadata.get("analysis", {})
+                # Check for ACTUAL Gemini analysis, not just cutout_image
+                # Gemini person analysis includes: shirtColor, pantsColor, gender
+                has_gemini_analysis = analysis.get("shirtColor") or analysis.get("pantsColor") or analysis.get("gender")
+                if not has_gemini_analysis:
                     persons_to_analyze.append(p)
 
         # Analyze persons (limit to 3 per frame)
@@ -2991,6 +3281,65 @@ class DetectionLoop:
             recovery_confidence = max(0.0, min(1.0, recovery_confidence))
             self.config.recovery_confidence = recovery_confidence
             logger.info(f"Recovery confidence changed to: {recovery_confidence}")
+
+    def reset_gemini_state(self, reset_tracker: bool = True):
+        """Reset Gemini analysis state to force re-analysis of all tracks.
+
+        This clears:
+        - Gemini cooldown timers (_last_gemini)
+        - Gemini API call counter
+        - Optionally: all BoT-SORT tracks
+
+        Use this when:
+        - Starting a new session and want fresh analysis
+        - Gemini API calls show 0 but you expect analysis
+        - Tracks from previous session are blocking new analysis
+
+        Args:
+            reset_tracker: If True, also reset BoT-SORT tracker (clears all track IDs)
+        """
+        # Clear Gemini cooldown timers
+        old_count = len(self._last_gemini)
+        self._last_gemini.clear()
+        logger.info(f"Cleared {old_count} Gemini cooldown entries")
+
+        # Reset Gemini call counter
+        if self.gemini:
+            old_calls = self.gemini.get_call_count()
+            self.gemini.reset_call_count()
+            logger.info(f"Reset Gemini call counter (was: {old_calls})")
+
+        # Clear alert cooldowns
+        old_alerts = len(self._last_alert)
+        self._last_alert.clear()
+        logger.info(f"Cleared {old_alerts} alert cooldown entries")
+
+        # Clear event cooldowns
+        old_events = len(self._last_event)
+        self._last_event.clear()
+        logger.info(f"Cleared {old_events} event cooldown entries")
+
+        # Optionally reset BoT-SORT tracker
+        if reset_tracker and self.bot_sort:
+            self.bot_sort.reset()
+            logger.info("Reset BoT-SORT tracker - all track IDs cleared")
+
+        # Clear analysis buffer if exists
+        if hasattr(self, 'analysis_buffer') and self.analysis_buffer:
+            try:
+                self.analysis_buffer.clear_all()
+                logger.info("Cleared analysis buffer")
+            except Exception as e:
+                logger.debug(f"Analysis buffer clear error: {e}")
+
+        logger.info("Gemini analysis state reset complete - new tracks will be analyzed")
+
+        return {
+            "gemini_cooldowns_cleared": old_count,
+            "alerts_cleared": old_alerts,
+            "events_cleared": old_events,
+            "tracker_reset": reset_tracker,
+        }
 
 
 # Global instance

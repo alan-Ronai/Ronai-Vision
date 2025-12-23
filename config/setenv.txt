@@ -1,7 +1,11 @@
 set -a                                            
-source config/dev.env
+source dev.env
 set +a
 
 
 
+
 lsof -i :8000
+
+
+yolo export model=./models/yolo12m.pt format=onnx
