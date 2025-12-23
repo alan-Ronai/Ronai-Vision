@@ -46,6 +46,12 @@ class TranscriptionResult:
     segments: Optional[List[Dict]] = None
 
 
+# Shared model singleton - loaded once, used by all instances
+_shared_model = None
+_shared_model_device = None
+_shared_model_path = None
+
+
 # Hebrew voice commands to detect (same as Gemini transcriber)
 VOICE_COMMANDS = {
     "רחפן": "drone_dispatch",
@@ -179,12 +185,21 @@ class WhisperTranscriber:
         return device
 
     def _load_model(self):
-        """Load Whisper model (called at startup)."""
+        """Load Whisper model (uses shared singleton - loads once across all instances)."""
+        global _shared_model, _shared_model_device, _shared_model_path
+
         if self._initialized:
             return
 
         if not WHISPER_AVAILABLE or WhisperModel is None:
             logger.error("faster-whisper not available, cannot load model")
+            return
+
+        # Check if shared model already exists
+        if _shared_model is not None:
+            logger.info("Using shared faster-whisper model (already loaded)")
+            self.model = _shared_model
+            self._initialized = True
             return
 
         logger.info("Loading faster-whisper model (CTranslate2)...")
@@ -205,6 +220,11 @@ class WhisperTranscriber:
                 download_root=None,
                 local_files_only=True,
             )
+
+            # Store as shared singleton
+            _shared_model = self.model
+            _shared_model_device = self.device
+            _shared_model_path = str(self.model_path)
 
             self._initialized = True
             logger.info(f"faster-whisper model loaded successfully on {self.device}")
