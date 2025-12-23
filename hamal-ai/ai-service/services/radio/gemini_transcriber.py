@@ -727,29 +727,169 @@ class GeminiTranscriber:
             return None
 
     async def transcribe_file(self, filepath: str) -> Optional[TranscriptionResult]:
-        """Transcribe audio file.
+        """Transcribe audio file (WAV format).
 
         Args:
-            filepath: Path to WAV/PCM file
+            filepath: Path to WAV file
 
         Returns:
             TranscriptionResult or None
         """
         if not self.model:
+            logger.warning("Gemini model not configured, cannot transcribe file")
             return None
 
         try:
-            # Read file
-            with open(filepath, "rb") as f:
-                audio_bytes = f.read()
+            # Read WAV file properly using wave module
+            with wave.open(filepath, "rb") as wav_file:
+                # Get WAV file parameters
+                n_channels = wav_file.getnchannels()
+                sample_width = wav_file.getsampwidth()
+                file_sample_rate = wav_file.getframerate()
+                n_frames = wav_file.getnframes()
 
-            # Calculate duration
-            duration = len(audio_bytes) / (2 * self.sample_rate)
+                # Read audio frames
+                audio_bytes = wav_file.readframes(n_frames)
 
-            return await self.transcribe_audio(audio_bytes, duration)
+                # Calculate duration from actual frames
+                duration = n_frames / file_sample_rate
+
+                logger.info(
+                    f"Read WAV file: {filepath}, "
+                    f"channels={n_channels}, sample_width={sample_width}, "
+                    f"sample_rate={file_sample_rate}, duration={duration:.2f}s"
+                )
+
+                # If stereo, convert to mono (take first channel)
+                if n_channels == 2:
+                    samples = np.frombuffer(audio_bytes, dtype=np.int16)
+                    samples = samples[::2]  # Take every other sample (left channel)
+                    audio_bytes = samples.tobytes()
+                    logger.info("Converted stereo to mono")
+
+                # If sample rate differs, we should resample
+                # For now, just warn (Gemini might handle it)
+                if file_sample_rate != self.sample_rate:
+                    logger.warning(
+                        f"WAV sample rate ({file_sample_rate}) differs from expected ({self.sample_rate}). "
+                        f"Gemini will process the file directly."
+                    )
+
+                # For WAV file transcription, upload the file directly to Gemini
+                # rather than converting to raw audio (preserves header info)
+                return await self._transcribe_wav_file_direct(filepath, duration)
+
+        except wave.Error as e:
+            logger.error(f"Invalid WAV file format: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"File transcription error: {e}", exc_info=True)
+            return None
+
+    async def _transcribe_wav_file_direct(
+        self, filepath: str, duration: float
+    ) -> Optional[TranscriptionResult]:
+        """Transcribe WAV file by uploading directly to Gemini.
+
+        Args:
+            filepath: Path to WAV file
+            duration: Duration in seconds
+
+        Returns:
+            TranscriptionResult or None
+        """
+        try:
+            # Upload to Gemini
+            logger.info(f"Uploading WAV file to Gemini: {filepath}")
+            audio_file = genai.upload_file(filepath, mime_type="audio/wav")
+            logger.debug(f"Upload successful, file: {audio_file.name}")
+
+            # Transcribe with Hebrew military/security prompt
+            prompt = """אתה מתמלל שיח קשר צבאי/ביטחוני בעברית.
+
+מילון מונחים חשוב (השתמש במילים אלו כשהן נשמעות):
+- דרגות: ניצב, סגן ניצב, רב פקד, סמל, טוראי, שגריר
+- יחידות: מגב (משמר הגבול), צה"ל, משטרה, כיבוי, פאנטום
+- מקומות: דיר דבואן, ביטין, חווארה, יצהר, נבלוס
+- קריאות: שגריר, פאנטום, נשר, אריה (שמות קוד), ניצב
+- פעולות: אשרו קבלה, עד כאן, ממשיך, מתמשך, שורף
+
+כללי תמלול:
+1. תמלל בדיוק מה שנאמר
+2. אם יש מילה לא ברורה, נחש לפי ההקשר הצבאי/ביטחוני
+3. "עד כאן" = סיום שידור
+4. "אשרו קבלה" = בקשת אישור
+5. אל תוסיף הסברים או הערות
+6. החזר רק את הטקסט המתומלל בעברית
+
+תמלל את האודיו:"""
+
+            logger.debug(f"Sending file to Gemini model: {self.model_name}")
+
+            # Generation config for deterministic transcription
+            generation_config = {
+                "temperature": 0.0,
+                "max_output_tokens": 1000,  # More tokens for longer files
+            }
+
+            response = await asyncio.to_thread(
+                self.model.generate_content,
+                [prompt, audio_file],
+                generation_config=generation_config
+            )
+            logger.debug("Gemini response received")
+
+            # Clean up uploaded file from Gemini
+            try:
+                genai.delete_file(audio_file.name)
+            except Exception as del_err:
+                logger.debug(f"Could not delete uploaded file: {del_err}")
+
+            # Check response
+            if not response.candidates or len(response.candidates) == 0:
+                logger.warning("Gemini returned empty candidates for file transcription")
+                return TranscriptionResult(
+                    text="",
+                    timestamp=datetime.now(),
+                    duration_seconds=duration,
+                    is_command=False,
+                    command_type=None,
+                )
+
+            if not response.candidates[0].content or not response.candidates[0].content.parts:
+                logger.warning("Gemini candidate has no content for file transcription")
+                return TranscriptionResult(
+                    text="",
+                    timestamp=datetime.now(),
+                    duration_seconds=duration,
+                    is_command=False,
+                    command_type=None,
+                )
+
+            text = response.text.strip() if response.text else ""
+            logger.info(f"File transcription result: '{text}'")
+
+            # Check for commands
+            is_command = False
+            command_type = None
+            for keyword, cmd_type in VOICE_COMMANDS.items():
+                if keyword in text:
+                    is_command = True
+                    command_type = cmd_type
+                    logger.info(f"Voice command detected in file: {keyword} -> {cmd_type}")
+                    break
+
+            return TranscriptionResult(
+                text=text,
+                timestamp=datetime.now(),
+                duration_seconds=duration,
+                is_command=is_command,
+                command_type=command_type,
+            )
 
         except Exception as e:
-            logger.error(f"File transcription error: {e}")
+            logger.error(f"Direct file transcription error: {e}", exc_info=True)
+            self._stats["errors"] += 1
             return None
 
     def get_stats(self) -> dict:

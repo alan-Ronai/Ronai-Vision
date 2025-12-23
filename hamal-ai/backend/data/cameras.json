@@ -1,18 +1,1 @@
-[
-  {
-    "_id": "cam-1766479059719-j3f3zk6b9",
-    "cameraId": "test",
-    "name": "test",
-    "location": "",
-    "rtspUrl": "rtsp://admin:ytcom123456@46.210.89.167:554/Streaming/channels/1/",
-    "username": "",
-    "password": "",
-    "type": "rtsp",
-    "aiEnabled": true,
-    "createdAt": "2025-12-23T08:37:39.720Z",
-    "updatedAt": "2025-12-23T16:58:48.571Z",
-    "status": "online",
-    "lastSeen": "2025-12-23T16:58:48.571Z",
-    "errorMessage": "No frames received"
-  }
-]
+[]

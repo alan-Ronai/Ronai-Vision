@@ -2683,6 +2683,87 @@ async def radio_stats():
     return service.get_stats()
 
 
+@app.post("/radio/transcribe-file")
+async def transcribe_audio_file(file: UploadFile = File(...)):
+    """Transcribe an uploaded audio file (WAV format).
+
+    This endpoint accepts a WAV file upload and returns the transcription.
+    The transcription uses the same Gemini-based Hebrew military/security
+    transcription as the live radio feed.
+
+    Args:
+        file: WAV audio file to transcribe
+
+    Returns:
+        JSON with transcription text, duration, and any detected commands
+    """
+    import tempfile
+    import os as os_module
+    from services.radio.gemini_transcriber import GeminiTranscriber
+
+    # Validate file type
+    if not file.filename.lower().endswith('.wav'):
+        raise HTTPException(400, "Only WAV files are supported. Please upload a .wav file.")
+
+    # Check file size (limit to 25MB)
+    MAX_SIZE = 25 * 1024 * 1024  # 25MB
+    contents = await file.read()
+    if len(contents) > MAX_SIZE:
+        raise HTTPException(400, f"File too large. Maximum size is 25MB, got {len(contents) / 1024 / 1024:.1f}MB")
+
+    # Save to temp file
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        tmp.write(contents)
+        tmp_path = tmp.name
+
+    try:
+        # Create transcriber instance
+        transcriber = GeminiTranscriber()
+
+        if not transcriber.is_configured():
+            raise HTTPException(503, "Transcription service not configured. Check GEMINI_API_KEY.")
+
+        # Transcribe the file
+        logger.info(f"Transcribing uploaded file: {file.filename} ({len(contents)} bytes)")
+        result = await transcriber.transcribe_file(tmp_path)
+
+        if result is None:
+            raise HTTPException(500, "Transcription failed. Please try again.")
+
+        if not result.text:
+            return {
+                "success": True,
+                "text": "",
+                "message": "No speech detected in the audio file",
+                "duration_seconds": result.duration_seconds,
+                "filename": file.filename
+            }
+
+        logger.info(f"File transcription successful: '{result.text[:100]}...' ({result.duration_seconds:.1f}s)")
+
+        return {
+            "success": True,
+            "text": result.text,
+            "duration_seconds": result.duration_seconds,
+            "timestamp": result.timestamp.isoformat(),
+            "is_command": result.is_command,
+            "command_type": result.command_type,
+            "filename": file.filename
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"File transcription error: {e}", exc_info=True)
+        raise HTTPException(500, f"Transcription error: {str(e)}")
+    finally:
+        # Clean up temp file
+        try:
+            os_module.unlink(tmp_path)
+        except:
+            pass
+
+
 # ============== FFMPEG STREAMING ENDPOINTS ==============
 
 @app.get("/recordings/{filename}")

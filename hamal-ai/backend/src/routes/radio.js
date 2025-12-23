@@ -1,8 +1,23 @@
 import express from 'express';
 import mongoose from 'mongoose';
 import fetch from 'node-fetch';
+import multer from 'multer';
+import FormData from 'form-data';
 import Event from '../models/Event.js';
 import { getScenarioManager } from '../services/scenarioManager.js';
+
+// Configure multer for file uploads (memory storage for proxying)
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB limit
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype === 'audio/wav' || file.mimetype === 'audio/x-wav' || file.originalname.toLowerCase().endsWith('.wav')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only WAV files are allowed'), false);
+    }
+  }
+});
 
 const router = express.Router();
 
@@ -147,6 +162,71 @@ router.get('/transcriptions', (req, res) => {
   res.json({
     transcriptions: transcriptionBuffer.slice(0, limit)
   });
+});
+
+/**
+ * POST /api/radio/transcribe-file
+ * Upload and transcribe a WAV file
+ * Proxies to AI service and emits result to all clients
+ */
+router.post('/transcribe-file', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    console.log(`[Radio] Transcribing uploaded file: ${req.file.originalname} (${req.file.size} bytes)`);
+
+    // Create form data to proxy to AI service
+    const formData = new FormData();
+    formData.append('file', req.file.buffer, {
+      filename: req.file.originalname,
+      contentType: req.file.mimetype
+    });
+
+    // Proxy to AI service
+    const response = await fetch(`${AI_SERVICE_URL}/radio/transcribe-file`, {
+      method: 'POST',
+      body: formData,
+      headers: formData.getHeaders()
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      console.error('[Radio] AI service transcription error:', data);
+      return res.status(response.status).json(data);
+    }
+
+    // If transcription was successful and has text, emit to all clients
+    if (data.success && data.text) {
+      const transcription = {
+        text: data.text,
+        timestamp: data.timestamp || new Date(),
+        source: 'file-upload',
+        confidence: null,
+        filename: data.filename,
+        duration_seconds: data.duration_seconds
+      };
+
+      // Add to buffer
+      transcriptionBuffer.unshift(transcription);
+      if (transcriptionBuffer.length > MAX_BUFFER_SIZE) {
+        transcriptionBuffer.pop();
+      }
+
+      // Emit to all connected clients
+      const io = req.app.get('io');
+      io.emit('radio:transcription', transcription);
+
+      console.log(`[Radio] File transcription emitted: "${data.text.substring(0, 50)}..."`);
+    }
+
+    res.json(data);
+  } catch (error) {
+    console.error('[Radio] File transcription proxy error:', error);
+    res.status(503).json({ error: 'AI service unavailable', message: error.message });
+  }
 });
 
 /**

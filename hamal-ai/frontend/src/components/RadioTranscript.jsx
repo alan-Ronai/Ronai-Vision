@@ -1,9 +1,14 @@
 import { useApp } from '../context/AppContext';
-import { useRef, useEffect } from 'react';
+import { useRef, useEffect, useState } from 'react';
+
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
 
 export default function RadioTranscript() {
   const { radioTranscript, clearRadioTranscript, isEmergency } = useApp();
   const scrollRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadError, setUploadError] = useState(null);
 
   // Auto-scroll to bottom when new transcription arrives
   useEffect(() => {
@@ -11,6 +16,68 @@ export default function RadioTranscript() {
       scrollRef.current.scrollLeft = scrollRef.current.scrollWidth;
     }
   }, [radioTranscript]);
+
+  // Clear error after 5 seconds
+  useEffect(() => {
+    if (uploadError) {
+      const timer = setTimeout(() => setUploadError(null), 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [uploadError]);
+
+  const handleUploadClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Validate file type
+    if (!file.name.toLowerCase().endsWith('.wav')) {
+      setUploadError('יש להעלות קובץ WAV בלבד');
+      return;
+    }
+
+    // Validate file size (25MB max)
+    if (file.size > 25 * 1024 * 1024) {
+      setUploadError('הקובץ גדול מדי. גודל מקסימלי: 25MB');
+      return;
+    }
+
+    setIsUploading(true);
+    setUploadError(null);
+
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const response = await fetch(`${API_URL}/api/radio/transcribe-file`, {
+        method: 'POST',
+        body: formData
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || data.detail || 'שגיאה בתמלול');
+      }
+
+      if (!data.text) {
+        setUploadError('לא זוהה דיבור בקובץ');
+      }
+      // Success - transcription will be added via socket event
+    } catch (error) {
+      console.error('File transcription error:', error);
+      setUploadError(error.message || 'שגיאה בהעלאת הקובץ');
+    } finally {
+      setIsUploading(false);
+      // Clear the file input so the same file can be selected again
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  };
 
   const formatTime = (timestamp) => {
     return new Date(timestamp).toLocaleTimeString('he-IL', {
@@ -25,6 +92,15 @@ export default function RadioTranscript() {
       h-full bg-gray-800 rounded-lg overflow-hidden flex flex-col
       ${isEmergency ? 'border-2 border-red-500' : 'border border-gray-700'}
     `}>
+      {/* Hidden file input */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".wav,audio/wav,audio/x-wav"
+        onChange={handleFileChange}
+        className="hidden"
+      />
+
       {/* Header */}
       <div className="bg-gray-700 px-4 py-2 flex items-center justify-between flex-shrink-0">
         <div className="flex items-center gap-2">
@@ -34,8 +110,38 @@ export default function RadioTranscript() {
             <div className="w-2 h-2 bg-green-300 rounded-full animate-pulse"></div>
             <span>חי</span>
           </div>
+          {/* Upload file button */}
+          <button
+            onClick={handleUploadClick}
+            disabled={isUploading}
+            className={`
+              flex items-center gap-1 mr-1 px-2 py-0.5 rounded text-xs font-medium transition-colors
+              ${isUploading
+                ? 'bg-gray-600 cursor-wait'
+                : 'bg-blue-600 hover:bg-blue-700 cursor-pointer'}
+            `}
+            title="העלה קובץ WAV לתמלול"
+          >
+            {isUploading ? (
+              <>
+                <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                <span>מתמלל...</span>
+              </>
+            ) : (
+              <>
+                <span>📁</span>
+                <span>העלה קובץ</span>
+              </>
+            )}
+          </button>
         </div>
         <div className="flex items-center gap-3">
+          {/* Error message */}
+          {uploadError && (
+            <span className="text-sm text-red-400 bg-red-900/50 px-2 py-0.5 rounded">
+              {uploadError}
+            </span>
+          )}
           <span className="text-sm text-gray-400">{radioTranscript.length} הודעות</span>
           {radioTranscript.length > 0 && (
             <button
