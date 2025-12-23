@@ -1,0 +1,14 @@
+# Hebrew Whisper Transcription Service
+# Install with: pip install -r requirements.txt
+
+# Core transcription
+faster-whisper>=1.0.0
+numpy>=1.21.0
+
+# Environment variables
+python-dotenv>=1.0.0
+
+# Optional: GPU support (uncomment for CUDA)
+# torch>=2.0.0
+# nvidia-cublas-cu12
+# nvidia-cudnn-cu12
