@@ -163,6 +163,9 @@ class WhisperTranscriber:
         logger.info(f"  Device: {self.device}")
         logger.info(f"  Compute type: {self.compute_type}")
 
+        # Eager load model at startup
+        self._load_model()
+
     def _resolve_device(self, device: str) -> str:
         """Resolve device string to actual device."""
         if device == "auto":
@@ -175,8 +178,8 @@ class WhisperTranscriber:
             return "cpu"
         return device
 
-    def _lazy_load(self):
-        """Lazy load model on first transcription."""
+    def _load_model(self):
+        """Load Whisper model (called at startup)."""
         if self._initialized:
             return
 
@@ -357,8 +360,8 @@ class WhisperTranscriber:
         Returns:
             TranscriptionResult or None if failed
         """
-        # Lazy load model
-        self._lazy_load()
+        # Ensure model is loaded (should already be loaded at startup)
+        self._load_model()
 
         if not self._initialized:
             logger.warning("Whisper model not initialized")
@@ -468,8 +471,8 @@ class WhisperTranscriber:
         Returns:
             TranscriptionResult or None
         """
-        # Lazy load model
-        self._lazy_load()
+        # Ensure model is loaded (should already be loaded at startup)
+        self._load_model()
 
         if not self._initialized:
             logger.warning("Whisper model not initialized, cannot transcribe file")
