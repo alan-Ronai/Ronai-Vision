@@ -12,7 +12,9 @@ export function AppProvider({ children }) {
   const [events, setEvents] = useState([]);
   const [cameras, setCameras] = useState([]);
   const [selectedCamera, setSelectedCamera] = useState(null);
-  const [radioTranscript, setRadioTranscript] = useState([]);
+  const [radioTranscript, setRadioTranscript] = useState([]);  // Legacy/combined
+  const [whisperTranscript, setWhisperTranscript] = useState([]);  // מתמלל 1
+  const [geminiTranscript, setGeminiTranscript] = useState([]);   // מתמלל 2
 
   // Emergency state
   const [isEmergency, setIsEmergency] = useState(false);
@@ -97,9 +99,22 @@ export function AppProvider({ children }) {
       console.log('Emergency acknowledged:', data);
     });
 
+    // Legacy combined transcription (for backwards compatibility)
     newSocket.on('radio:transcription', (data) => {
       console.log('Radio transcription:', data);
       setRadioTranscript(prev => [...prev, data].slice(-50));
+    });
+
+    // Whisper transcriptions (מתמלל 1)
+    newSocket.on('radio:transcription:whisper', (data) => {
+      console.log('Whisper transcription:', data);
+      setWhisperTranscript(prev => [...prev, data].slice(-50));
+    });
+
+    // Gemini transcriptions (מתמלל 2)
+    newSocket.on('radio:transcription:gemini', (data) => {
+      console.log('Gemini transcription:', data);
+      setGeminiTranscript(prev => [...prev, data].slice(-50));
     });
 
     newSocket.on('camera:selected', (cameraId) => {
@@ -248,11 +263,25 @@ export function AppProvider({ children }) {
           }
         }
 
-        // Fetch radio transcriptions
+        // Fetch radio transcriptions (all buffers)
         const radioRes = await fetch(`${API_URL}/api/radio/transcriptions?limit=50`);
         if (radioRes.ok) {
           const radioData = await radioRes.json();
           setRadioTranscript(radioData.transcriptions || []);
+        }
+
+        // Fetch Whisper transcriptions
+        const whisperRes = await fetch(`${API_URL}/api/radio/transcriptions/whisper?limit=50`);
+        if (whisperRes.ok) {
+          const whisperData = await whisperRes.json();
+          setWhisperTranscript(whisperData.transcriptions || []);
+        }
+
+        // Fetch Gemini transcriptions
+        const geminiRes = await fetch(`${API_URL}/api/radio/transcriptions/gemini?limit=50`);
+        if (geminiRes.ok) {
+          const geminiData = await geminiRes.json();
+          setGeminiTranscript(geminiData.transcriptions || []);
         }
       } catch (error) {
         console.error('Error fetching initial data:', error);
@@ -392,9 +421,19 @@ export function AppProvider({ children }) {
     }
   }, [selectedCamera]);
 
-  // Clear radio transcriptions
+  // Clear radio transcriptions (legacy/combined)
   const clearRadioTranscript = () => {
     setRadioTranscript([]);
+  };
+
+  // Clear Whisper transcriptions (מתמלל 1)
+  const clearWhisperTranscript = () => {
+    setWhisperTranscript([]);
+  };
+
+  // Clear Gemini transcriptions (מתמלל 2)
+  const clearGeminiTranscript = () => {
+    setGeminiTranscript([]);
   };
 
   // Clear events (local only)
@@ -412,6 +451,11 @@ export function AppProvider({ children }) {
     selectCamera,
     radioTranscript,
     clearRadioTranscript,
+    // Dual transcriber support
+    whisperTranscript,
+    clearWhisperTranscript,
+    geminiTranscript,
+    clearGeminiTranscript,
     isEmergency,
     emergencyData,
     acknowledgeEmergency,

@@ -1,463 +1,1006 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef } from "react";
 
-const AI_SERVICE_URL = import.meta.env.VITE_AI_SERVICE_URL || 'http://localhost:8000';
+const AI_SERVICE_URL =
+    import.meta.env.VITE_AI_SERVICE_URL || "http://localhost:8000";
 
 // Progress bar component for timing stats
-function TimingBar({ label, value = 0, maxValue = 100, unit = 'ms', color = 'blue' }) {
-  const safeValue = typeof value === 'number' ? value : 0;
-  const percentage = Math.min((safeValue / maxValue) * 100, 100);
-  const colorClasses = {
-    blue: 'bg-blue-500',
-    green: 'bg-green-500',
-    yellow: 'bg-yellow-500',
-    red: 'bg-red-500',
-    purple: 'bg-purple-500',
-    cyan: 'bg-cyan-500',
-  };
+function TimingBar({
+    label,
+    value = 0,
+    maxValue = 100,
+    unit = "ms",
+    color = "blue",
+}) {
+    const safeValue = typeof value === "number" ? value : 0;
+    const percentage = Math.min((safeValue / maxValue) * 100, 100);
+    const colorClasses = {
+        blue: "bg-blue-500",
+        green: "bg-green-500",
+        yellow: "bg-yellow-500",
+        red: "bg-red-500",
+        purple: "bg-purple-500",
+        cyan: "bg-cyan-500",
+    };
 
-  // Determine color based on percentage
-  let barColor = colorClasses[color] || 'bg-blue-500';
-  if (percentage > 80) barColor = 'bg-red-500';
-  else if (percentage > 60) barColor = 'bg-yellow-500';
+    // Determine color based on percentage
+    let barColor = colorClasses[color] || "bg-blue-500";
+    if (percentage > 80) barColor = "bg-red-500";
+    else if (percentage > 60) barColor = "bg-yellow-500";
 
-  return (
-    <div className="mb-2">
-      <div className="flex justify-between text-xs mb-1">
-        <span className="text-gray-300">{label}</span>
-        <span className="text-white font-mono">{safeValue.toFixed(1)} {unit}</span>
-      </div>
-      <div className="h-2 bg-gray-700 rounded-full overflow-hidden">
-        <div
-          className={`h-full ${barColor} transition-all duration-300`}
-          style={{ width: `${percentage}%` }}
-        />
-      </div>
-    </div>
-  );
+    return (
+        <div className="mb-2">
+            <div className="flex justify-between text-xs mb-1">
+                <span className="text-gray-300">{label}</span>
+                <span className="text-white font-mono">
+                    {safeValue.toFixed(1)} {unit}
+                </span>
+            </div>
+            <div className="h-2 bg-gray-700 rounded-full overflow-hidden">
+                <div
+                    className={`h-full ${barColor} transition-all duration-300`}
+                    style={{ width: `${percentage}%` }}
+                />
+            </div>
+        </div>
+    );
 }
 
 // Counter component
 function Counter({ label, value = 0, icon, trend }) {
-  const safeValue = typeof value === 'number' ? value : 0;
-  return (
-    <div className="bg-gray-700 rounded-lg p-3 text-center">
-      <div className="text-2xl mb-1">{icon}</div>
-      <div className="text-xl font-bold text-white">{safeValue.toLocaleString()}</div>
-      <div className="text-xs text-gray-400">{label}</div>
-      {trend !== undefined && trend > 0 && (
-        <div className="text-xs mt-1 text-green-400">
-          +{trend}/s
+    const safeValue = typeof value === "number" ? value : 0;
+    return (
+        <div className="bg-gray-700 rounded-lg p-3 text-center">
+            <div className="text-2xl mb-1">{icon}</div>
+            <div className="text-xl font-bold text-white">
+                {safeValue.toLocaleString()}
+            </div>
+            <div className="text-xs text-gray-400">{label}</div>
+            {trend !== undefined && trend > 0 && (
+                <div className="text-xs mt-1 text-green-400">+{trend}/s</div>
+            )}
         </div>
-      )}
-    </div>
-  );
+    );
 }
 
 // Status indicator
 function StatusIndicator({ label, active, count }) {
-  return (
-    <div className="flex items-center gap-2 bg-gray-700 rounded px-3 py-2">
-      <div className={`w-2 h-2 rounded-full ${active ? 'bg-green-400 animate-pulse' : 'bg-gray-500'}`} />
-      <span className="text-sm text-gray-300">{label}</span>
-      {count !== undefined && (
-        <span className="text-sm font-mono text-white ml-auto">{count}</span>
-      )}
-    </div>
-  );
+    return (
+        <div className="flex items-center gap-2 bg-gray-700 rounded px-3 py-2">
+            <div
+                className={`w-2 h-2 rounded-full ${
+                    active ? "bg-green-400 animate-pulse" : "bg-gray-500"
+                }`}
+            />
+            <span className="text-sm text-gray-300">{label}</span>
+            {count !== undefined && (
+                <span className="text-sm font-mono text-white ml-auto">
+                    {count}
+                </span>
+            )}
+        </div>
+    );
 }
 
 export default function AIStatsPanel({ isOpen, onClose }) {
-  const [stats, setStats] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const [rates, setRates] = useState({ frames: 0, detections: 0, events: 0 });
-  const prevCountersRef = useRef({});
+    const [stats, setStats] = useState(null);
+    const [radioStats, setRadioStats] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(null);
+    const [rates, setRates] = useState({ frames: 0, detections: 0, events: 0 });
+    const prevCountersRef = useRef({});
 
-  const fetchStats = useCallback(async () => {
-    try {
-      console.log('Fetching stats from:', `${AI_SERVICE_URL}/api/stats/realtime`);
-      const res = await fetch(`${AI_SERVICE_URL}/api/stats/realtime`);
-      if (!res.ok) throw new Error('Failed to fetch stats');
-      const data = await res.json();
-      console.log('Stats received:', data);
+    const fetchStats = useCallback(async () => {
+        try {
+            console.log(
+                "Fetching stats from:",
+                `${AI_SERVICE_URL}/api/stats/realtime`
+            );
 
-      // Ensure counters exist
-      const counters = data.counters || {};
+            // Fetch main stats and radio stats in parallel
+            const [mainRes, radioRes] = await Promise.all([
+                fetch(`${AI_SERVICE_URL}/api/stats/realtime`),
+                fetch(`${AI_SERVICE_URL}/radio/stats`).catch(() => null),
+            ]);
 
-      // Calculate rates (per second)
-      const prev = prevCountersRef.current;
-      if (prev.timestamp && data.timestamp) {
-        const elapsed = data.timestamp - prev.timestamp;
-        if (elapsed > 0 && elapsed < 5) { // Sanity check
-          setRates({
-            frames: Math.round(((counters.frames_processed || 0) - (prev.frames_processed || 0)) / elapsed),
-            detections: Math.round(((counters.detections || 0) - (prev.detections || 0)) / elapsed),
-            events: Math.round(((counters.events_sent || 0) - (prev.events_sent || 0)) / elapsed),
-          });
+            if (!mainRes.ok) throw new Error("Failed to fetch stats");
+            const data = await mainRes.json();
+            console.log("Stats received:", data);
+
+            // Fetch radio stats
+            if (radioRes && radioRes.ok) {
+                const radioData = await radioRes.json();
+                setRadioStats(radioData);
+                console.log("Radio stats received:", radioData);
+            }
+
+            // Ensure counters exist
+            const counters = data.counters || {};
+
+            // Calculate rates (per second)
+            const prev = prevCountersRef.current;
+            if (prev.timestamp && data.timestamp) {
+                const elapsed = data.timestamp - prev.timestamp;
+                if (elapsed > 0 && elapsed < 5) {
+                    // Sanity check
+                    setRates({
+                        frames: Math.round(
+                            ((counters.frames_processed || 0) -
+                                (prev.frames_processed || 0)) /
+                                elapsed
+                        ),
+                        detections: Math.round(
+                            ((counters.detections || 0) -
+                                (prev.detections || 0)) /
+                                elapsed
+                        ),
+                        events: Math.round(
+                            ((counters.events_sent || 0) -
+                                (prev.events_sent || 0)) /
+                                elapsed
+                        ),
+                    });
+                }
+            }
+
+            prevCountersRef.current = {
+                timestamp: data.timestamp,
+                frames_processed: counters.frames_processed || 0,
+                detections: counters.detections || 0,
+                events_sent: counters.events_sent || 0,
+            };
+
+            setStats(data);
+            setError(null);
+            setLoading(false);
+        } catch (err) {
+            console.error("Stats fetch error:", err);
+            setError(err.message);
+            setLoading(false);
         }
-      }
+    }, []);
 
-      prevCountersRef.current = {
-        timestamp: data.timestamp,
-        frames_processed: counters.frames_processed || 0,
-        detections: counters.detections || 0,
-        events_sent: counters.events_sent || 0,
-      };
+    useEffect(() => {
+        console.log("AIStatsPanel isOpen:", isOpen);
+        if (!isOpen) return;
 
-      setStats(data);
-      setError(null);
-      setLoading(false);
-    } catch (err) {
-      console.error('Stats fetch error:', err);
-      setError(err.message);
-      setLoading(false);
+        // Reset state when opening
+        setLoading(true);
+        setError(null);
+        prevCountersRef.current = {};
+
+        fetchStats();
+        const interval = setInterval(fetchStats, 1000);
+
+        return () => clearInterval(interval);
+    }, [isOpen, fetchStats]);
+
+    console.log(
+        "AIStatsPanel rendering, isOpen:",
+        isOpen,
+        "loading:",
+        loading,
+        "stats:",
+        stats,
+        "error:",
+        error
+    );
+    if (!isOpen) return null;
+
+    // Debug: Show raw data if something seems off
+    if (stats && !stats.performance) {
+        console.warn("Stats received but no performance data:", stats);
     }
-  }, []);
 
-  useEffect(() => {
-    console.log('AIStatsPanel isOpen:', isOpen);
-    if (!isOpen) return;
+    // Safe extraction with defaults
+    const perf = stats?.performance || {};
+    const counters = stats?.counters || {};
+    const tracker = stats?.tracker || {};
+    const pressure = stats?.pressure || {};
+    const config = stats?.config || {};
 
-    // Reset state when opening
-    setLoading(true);
-    setError(null);
-    prevCountersRef.current = {};
+    // Calculate FPS efficiency
+    const targetFps = perf.target_fps || 15;
+    const actualFps = perf.actual_fps || 0;
+    const fpsEfficiency =
+        targetFps > 0 ? Math.round((actualFps / targetFps) * 100) : 0;
 
-    fetchStats();
-    const interval = setInterval(fetchStats, 1000);
+    // Format uptime
+    const uptimeSeconds = stats?.uptime_seconds || 0;
+    const uptimeMin = Math.floor(uptimeSeconds / 60);
+    const uptimeSec = Math.floor(uptimeSeconds % 60);
 
-    return () => clearInterval(interval);
-  }, [isOpen, fetchStats]);
-
-  console.log('AIStatsPanel rendering, isOpen:', isOpen, 'loading:', loading, 'stats:', stats, 'error:', error);
-  if (!isOpen) return null;
-
-  // Debug: Show raw data if something seems off
-  if (stats && !stats.performance) {
-    console.warn('Stats received but no performance data:', stats);
-  }
-
-  // Safe extraction with defaults
-  const perf = stats?.performance || {};
-  const counters = stats?.counters || {};
-  const tracker = stats?.tracker || {};
-  const pressure = stats?.pressure || {};
-  const config = stats?.config || {};
-
-  // Calculate FPS efficiency
-  const targetFps = perf.target_fps || 15;
-  const actualFps = perf.actual_fps || 0;
-  const fpsEfficiency = targetFps > 0 ? Math.round((actualFps / targetFps) * 100) : 0;
-
-  // Format uptime
-  const uptimeSeconds = stats?.uptime_seconds || 0;
-  const uptimeMin = Math.floor(uptimeSeconds / 60);
-  const uptimeSec = Math.floor(uptimeSeconds % 60);
-
-  return (
-    <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50" dir="rtl">
-      <div className="bg-gray-800 rounded-xl w-full max-w-5xl max-h-[90vh] overflow-hidden flex flex-col">
-        {/* Header */}
-        <div className="bg-gray-700 px-6 py-4 flex items-center justify-between">
-          <h2 className="text-xl font-bold flex items-center gap-2">
-            <span>📊</span>
-            <span>סטטיסטיקות AI בזמן אמת</span>
-            {stats && (
-              <span className="text-sm font-normal text-gray-400 mr-4">
-                זמן פעילות: {uptimeMin}:{String(uptimeSec).padStart(2, '0')}
-              </span>
-            )}
-          </h2>
-          <button onClick={onClose} className="text-gray-400 hover:text-white text-2xl">
-            ×
-          </button>
-        </div>
-
-        {/* Content */}
-        <div className="flex-1 overflow-y-auto p-6">
-          {loading && !stats ? (
-            <div className="text-center py-8 text-gray-400">
-              <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500 mx-auto mb-4"></div>
-              טוען...
-            </div>
-          ) : error ? (
-            <div className="text-center py-8">
-              <div className="text-red-400 mb-4">{error}</div>
-              <button
-                onClick={fetchStats}
-                className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded"
-              >
-                נסה שוב
-              </button>
-            </div>
-          ) : (
-            <div className="space-y-6">
-              {/* Performance Timing Section - Detection Pipeline */}
-              <div className="bg-gray-700 rounded-lg p-4">
-                <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
-                  <span>⏱️</span>
-                  <span>זמני עיבוד - Detection Pipeline</span>
-                  <span className="text-sm font-normal text-gray-400 mr-auto">
-                    סה"כ: {(perf.total_frame_ms || 0).toFixed(1)} ms/frame
-                  </span>
-                </h3>
-
-                <div className="grid grid-cols-2 gap-x-8 gap-y-2">
-                  <TimingBar label="YOLO Detection" value={perf.yolo_ms} maxValue={50} color="yellow" />
-                  <TimingBar label="YOLO Postprocess" value={perf.yolo_postprocess_ms} maxValue={10} color="yellow" />
-                  <TimingBar label="ReID Extraction" value={perf.reid_extract_ms} maxValue={50} color="purple" />
-                  <TimingBar label="ReID Per Detection" value={perf.reid_per_detection_ms} maxValue={20} color="purple" />
-                  <TimingBar label="BoT-SORT Tracker" value={perf.tracker_ms} maxValue={20} color="cyan" />
-                  <TimingBar label="Recovery Pass" value={perf.recovery_ms} maxValue={30} color="green" />
-                  <TimingBar label="Weapon Detection" value={perf.weapon_ms} maxValue={30} color="red" />
-                  <TimingBar label="Drawing" value={perf.drawing_ms} maxValue={15} color="blue" />
+    return (
+        <div
+            className="fixed inset-0 bg-black/80 flex items-center justify-center z-50"
+            dir="rtl"
+        >
+            <div className="bg-gray-800 rounded-xl w-full max-w-5xl max-h-[90vh] overflow-hidden flex flex-col">
+                {/* Header */}
+                <div className="bg-gray-700 px-6 py-4 flex items-center justify-between">
+                    <h2 className="text-xl font-bold flex items-center gap-2">
+                        <span>📊</span>
+                        <span>סטטיסטיקות AI בזמן אמת</span>
+                        {stats && (
+                            <span className="text-sm font-normal text-gray-400 mr-4">
+                                זמן פעילות: {uptimeMin}:
+                                {String(uptimeSec).padStart(2, "0")}
+                            </span>
+                        )}
+                    </h2>
+                    <button
+                        onClick={onClose}
+                        className="text-gray-400 hover:text-white text-2xl"
+                    >
+                        ×
+                    </button>
                 </div>
 
-                {/* FPS Display */}
-                <div className="flex items-center gap-4 mt-4 pt-4 border-t border-gray-600">
-                  <div className={`text-2xl font-bold ${fpsEfficiency >= 90 ? 'text-green-400' : fpsEfficiency >= 70 ? 'text-yellow-400' : 'text-red-400'}`}>
-                    {actualFps} FPS
-                  </div>
-                  <div className="text-sm text-gray-400">
-                    יעד: {targetFps} FPS ({fpsEfficiency}%)
-                  </div>
-                  <div className="text-sm text-gray-400 mr-auto">
-                    תיאורטי: {(perf.theoretical_fps || 0).toFixed(1)} FPS
-                  </div>
-                </div>
-              </div>
-
-              {/* Gemini Analysis Timing */}
-              <div className="bg-gray-700 rounded-lg p-4">
-                <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
-                  <span>🤖</span>
-                  <span>זמני ניתוח Gemini</span>
-                </h3>
-
-                <div className="grid grid-cols-2 gap-x-8 gap-y-2">
-                  <TimingBar label="Frame Quality Score" value={perf.frame_quality_ms} maxValue={20} color="cyan" />
-                  <TimingBar label="Image Enhancement" value={perf.image_enhance_ms} maxValue={50} color="green" />
-                  <TimingBar label="Gemini Vehicle API" value={perf.gemini_vehicle_ms} maxValue={3000} color="yellow" />
-                  <TimingBar label="Gemini Person API" value={perf.gemini_person_ms} maxValue={3000} color="yellow" />
-                  <TimingBar label="Cutout Generation" value={perf.cutout_gen_ms} maxValue={20} color="blue" />
-                  <TimingBar label="Backend Sync" value={perf.backend_sync_ms} maxValue={100} color="purple" />
-                </div>
-              </div>
-
-              {/* Pipeline Breakdown & Bottlenecks */}
-              {stats?.pipeline_breakdown && Object.keys(stats.pipeline_breakdown).length > 0 && (
-                <div className="bg-gray-700 rounded-lg p-4">
-                  <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
-                    <span>📊</span>
-                    <span>פירוט Pipeline (% מזמן כולל)</span>
-                  </h3>
-
-                  <div className="grid grid-cols-4 gap-4 mb-4">
-                    {Object.entries(stats.pipeline_breakdown).map(([stage, data]) => (
-                      <div key={stage} className="text-center">
-                        <div className={`text-lg font-bold ${data.pct > 30 ? 'text-red-400' : data.pct > 20 ? 'text-yellow-400' : 'text-green-400'}`}>
-                          {data.pct}%
+                {/* Content */}
+                <div className="flex-1 overflow-y-auto p-6">
+                    {loading && !stats ? (
+                        <div className="text-center py-8 text-gray-400">
+                            <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500 mx-auto mb-4"></div>
+                            טוען...
                         </div>
-                        <div className="text-xs text-gray-400">{stage}</div>
-                        <div className="text-xs text-gray-500">{data.ms}ms</div>
-                      </div>
-                    ))}
-                  </div>
+                    ) : error ? (
+                        <div className="text-center py-8">
+                            <div className="text-red-400 mb-4">{error}</div>
+                            <button
+                                onClick={fetchStats}
+                                className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded"
+                            >
+                                נסה שוב
+                            </button>
+                        </div>
+                    ) : (
+                        <div className="space-y-6">
+                            {/* Performance Timing Section - Detection Pipeline */}
+                            <div className="bg-gray-700 rounded-lg p-4">
+                                <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
+                                    <span>⏱️</span>
+                                    <span>זמני עיבוד - Detection Pipeline</span>
+                                    <span className="text-sm font-normal text-gray-400 mr-auto">
+                                        סה"כ:{" "}
+                                        {(perf.total_frame_ms || 0).toFixed(1)}{" "}
+                                        ms/frame
+                                    </span>
+                                </h3>
 
-                  {/* Bottlenecks Warning */}
-                  {stats?.bottlenecks && stats.bottlenecks.length > 0 && stats.bottlenecks[0] !== "None detected" && (
-                    <div className="bg-red-900/30 border border-red-700 rounded p-3">
-                      <div className="text-red-400 font-bold mb-1">⚠️ Bottlenecks Detected:</div>
-                      <div className="text-sm text-red-300">
-                        {stats.bottlenecks.join(' | ')}
-                      </div>
-                    </div>
-                  )}
+                                <div className="grid grid-cols-2 gap-x-8 gap-y-2">
+                                    <TimingBar
+                                        label="YOLO Detection"
+                                        value={perf.yolo_ms}
+                                        maxValue={50}
+                                        color="yellow"
+                                    />
+                                    <TimingBar
+                                        label="YOLO Postprocess"
+                                        value={perf.yolo_postprocess_ms}
+                                        maxValue={10}
+                                        color="yellow"
+                                    />
+                                    <TimingBar
+                                        label="ReID Extraction"
+                                        value={perf.reid_extract_ms}
+                                        maxValue={50}
+                                        color="purple"
+                                    />
+                                    <TimingBar
+                                        label="ReID Per Detection"
+                                        value={perf.reid_per_detection_ms}
+                                        maxValue={20}
+                                        color="purple"
+                                    />
+                                    <TimingBar
+                                        label="BoT-SORT Tracker"
+                                        value={perf.tracker_ms}
+                                        maxValue={20}
+                                        color="cyan"
+                                    />
+                                    <TimingBar
+                                        label="Recovery Pass"
+                                        value={perf.recovery_ms}
+                                        maxValue={30}
+                                        color="green"
+                                    />
+                                    <TimingBar
+                                        label="Weapon Detection"
+                                        value={perf.weapon_ms}
+                                        maxValue={30}
+                                        color="red"
+                                    />
+                                    <TimingBar
+                                        label="Drawing"
+                                        value={perf.drawing_ms}
+                                        maxValue={15}
+                                        color="blue"
+                                    />
+                                </div>
+
+                                {/* FPS Display */}
+                                <div className="flex items-center gap-4 mt-4 pt-4 border-t border-gray-600">
+                                    <div
+                                        className={`text-2xl font-bold ${
+                                            fpsEfficiency >= 90
+                                                ? "text-green-400"
+                                                : fpsEfficiency >= 70
+                                                ? "text-yellow-400"
+                                                : "text-red-400"
+                                        }`}
+                                    >
+                                        {actualFps} FPS
+                                    </div>
+                                    <div className="text-sm text-gray-400">
+                                        יעד: {targetFps} FPS ({fpsEfficiency}%)
+                                    </div>
+                                    <div className="text-sm text-gray-400 mr-auto">
+                                        תיאורטי:{" "}
+                                        {(perf.theoretical_fps || 0).toFixed(1)}{" "}
+                                        FPS
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Gemini Analysis Timing */}
+                            <div className="bg-gray-700 rounded-lg p-4">
+                                <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
+                                    <span>🤖</span>
+                                    <span>זמני ניתוח Gemini</span>
+                                </h3>
+
+                                <div className="grid grid-cols-2 gap-x-8 gap-y-2">
+                                    <TimingBar
+                                        label="Frame Quality Score"
+                                        value={perf.frame_quality_ms}
+                                        maxValue={20}
+                                        color="cyan"
+                                    />
+                                    <TimingBar
+                                        label="Image Enhancement"
+                                        value={perf.image_enhance_ms}
+                                        maxValue={50}
+                                        color="green"
+                                    />
+                                    <TimingBar
+                                        label="Gemini Vehicle API"
+                                        value={perf.gemini_vehicle_ms}
+                                        maxValue={3000}
+                                        color="yellow"
+                                    />
+                                    <TimingBar
+                                        label="Gemini Person API"
+                                        value={perf.gemini_person_ms}
+                                        maxValue={3000}
+                                        color="yellow"
+                                    />
+                                    <TimingBar
+                                        label="Cutout Generation"
+                                        value={perf.cutout_gen_ms}
+                                        maxValue={20}
+                                        color="blue"
+                                    />
+                                    <TimingBar
+                                        label="Backend Sync"
+                                        value={perf.backend_sync_ms}
+                                        maxValue={100}
+                                        color="purple"
+                                    />
+                                </div>
+                            </div>
+
+                            {/* Pipeline Breakdown & Bottlenecks */}
+                            {stats?.pipeline_breakdown &&
+                                Object.keys(stats.pipeline_breakdown).length >
+                                    0 && (
+                                    <div className="bg-gray-700 rounded-lg p-4">
+                                        <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
+                                            <span>📊</span>
+                                            <span>
+                                                פירוט Pipeline (% מזמן כולל)
+                                            </span>
+                                        </h3>
+
+                                        <div className="grid grid-cols-4 gap-4 mb-4">
+                                            {Object.entries(
+                                                stats.pipeline_breakdown
+                                            ).map(([stage, data]) => (
+                                                <div
+                                                    key={stage}
+                                                    className="text-center"
+                                                >
+                                                    <div
+                                                        className={`text-lg font-bold ${
+                                                            data.pct > 30
+                                                                ? "text-red-400"
+                                                                : data.pct > 20
+                                                                ? "text-yellow-400"
+                                                                : "text-green-400"
+                                                        }`}
+                                                    >
+                                                        {data.pct}%
+                                                    </div>
+                                                    <div className="text-xs text-gray-400">
+                                                        {stage}
+                                                    </div>
+                                                    <div className="text-xs text-gray-500">
+                                                        {data.ms}ms
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+
+                                        {/* Bottlenecks Warning */}
+                                        {stats?.bottlenecks &&
+                                            stats.bottlenecks.length > 0 &&
+                                            stats.bottlenecks[0] !==
+                                                "None detected" && (
+                                                <div className="bg-red-900/30 border border-red-700 rounded p-3">
+                                                    <div className="text-red-400 font-bold mb-1">
+                                                        ⚠️ Bottlenecks Detected:
+                                                    </div>
+                                                    <div className="text-sm text-red-300">
+                                                        {stats.bottlenecks.join(
+                                                            " | "
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            )}
+                                    </div>
+                                )}
+
+                            {/* Counters Grid */}
+                            <div className="grid grid-cols-4 gap-4">
+                                <Counter
+                                    label="פריימים מעובדים"
+                                    value={counters.frames_processed}
+                                    icon="🎬"
+                                    trend={rates.frames}
+                                />
+                                <Counter
+                                    label="זיהויים"
+                                    value={counters.detections}
+                                    icon="👁️"
+                                    trend={rates.detections}
+                                />
+                                <Counter
+                                    label="ReID Extractions"
+                                    value={counters.reid_extractions}
+                                    icon="🔍"
+                                />
+                                <Counter
+                                    label="ReID Recoveries"
+                                    value={counters.reid_recoveries}
+                                    icon="🔄"
+                                />
+                                <Counter
+                                    label="אירועים נשלחו"
+                                    value={counters.events_sent}
+                                    icon="📤"
+                                    trend={rates.events}
+                                />
+                                <Counter
+                                    label="AI Calls"
+                                    value={counters.gemini_calls}
+                                    icon="🤖"
+                                />
+                                <Counter
+                                    label="פריימים נזרקו"
+                                    value={counters.frames_dropped}
+                                    icon="🗑️"
+                                />
+                                <Counter
+                                    label="מצלמות פעילות"
+                                    value={pressure.active_cameras?.length}
+                                    icon="📹"
+                                />
+                            </div>
+
+                            {/* Tracker Stats */}
+                            <div className="grid grid-cols-2 gap-4">
+                                {/* BoT-SORT */}
+                                <div className="bg-gray-700 rounded-lg p-4">
+                                    <h3 className="text-lg font-bold mb-3 flex items-center gap-2">
+                                        <span>🎯</span>
+                                        <span>BoT-SORT Tracker</span>
+                                    </h3>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <StatusIndicator
+                                            label="אנשים"
+                                            active={
+                                                (tracker.bot_sort?.persons ||
+                                                    0) > 0
+                                            }
+                                            count={
+                                                tracker.bot_sort?.persons || 0
+                                            }
+                                        />
+                                        <StatusIndicator
+                                            label="רכבים"
+                                            active={
+                                                (tracker.bot_sort?.vehicles ||
+                                                    0) > 0
+                                            }
+                                            count={
+                                                tracker.bot_sort?.vehicles || 0
+                                            }
+                                        />
+                                        <StatusIndicator
+                                            label="סה״כ Tracks"
+                                            active={
+                                                (tracker.bot_sort
+                                                    ?.total_tracks || 0) > 0
+                                            }
+                                            count={
+                                                tracker.bot_sort
+                                                    ?.total_tracks || 0
+                                            }
+                                        />
+                                        <StatusIndicator
+                                            label="Tracks נמחקו"
+                                            active={false}
+                                            count={
+                                                tracker.bot_sort
+                                                    ?.deleted_tracks || 0
+                                            }
+                                        />
+                                    </div>
+                                </div>
+
+                                {/* ReID Tracker */}
+                                <div className="bg-gray-700 rounded-lg p-4">
+                                    <h3 className="text-lg font-bold mb-3 flex items-center gap-2">
+                                        <span>🔍</span>
+                                        <span>ReID Tracker</span>
+                                    </h3>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <StatusIndicator
+                                            label="סה״כ Tracked"
+                                            active={
+                                                (tracker.reid?.total_tracked ||
+                                                    0) > 0
+                                            }
+                                            count={
+                                                tracker.reid?.total_tracked || 0
+                                            }
+                                        />
+                                        <StatusIndicator
+                                            label="אנשים חמושים"
+                                            active={
+                                                (tracker.reid?.armed_persons ||
+                                                    0) > 0
+                                            }
+                                            count={
+                                                tracker.reid?.armed_persons || 0
+                                            }
+                                        />
+                                        <StatusIndicator
+                                            label="BoT-SORT"
+                                            active={
+                                                tracker.bot_sort?.active !==
+                                                false
+                                            }
+                                        />
+                                        <StatusIndicator
+                                            label="Stable Tracker"
+                                            active={
+                                                (tracker.stable
+                                                    ?.total_objects || 0) > 0
+                                            }
+                                            count={
+                                                tracker.stable?.total_objects ||
+                                                0
+                                            }
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Pressure / Queue Stats */}
+                            <div className="bg-gray-700 rounded-lg p-4">
+                                <h3 className="text-lg font-bold mb-3 flex items-center gap-2">
+                                    <span>📊</span>
+                                    <span>עומס מערכת</span>
+                                </h3>
+                                <div className="grid grid-cols-4 gap-4">
+                                    <div className="text-center">
+                                        <div
+                                            className={`text-2xl font-bold ${
+                                                (pressure.pending_frames || 0) >
+                                                5
+                                                    ? "text-red-400"
+                                                    : "text-green-400"
+                                            }`}
+                                        >
+                                            {pressure.pending_frames || 0}
+                                        </div>
+                                        <div className="text-xs text-gray-400">
+                                            פריימים בהמתנה
+                                        </div>
+                                    </div>
+                                    <div className="text-center">
+                                        <div
+                                            className={`text-2xl font-bold ${
+                                                (pressure.result_queue_size ||
+                                                    0) > 10
+                                                    ? "text-red-400"
+                                                    : "text-green-400"
+                                            }`}
+                                        >
+                                            {pressure.result_queue_size || 0}
+                                        </div>
+                                        <div className="text-xs text-gray-400">
+                                            Result Queue
+                                        </div>
+                                    </div>
+                                    <div className="text-center">
+                                        <div className="text-2xl font-bold text-blue-400">
+                                            {typeof stats?.recording
+                                                ?.active_recordings === "object"
+                                                ? Object.keys(
+                                                      stats?.recording
+                                                          ?.active_recordings ||
+                                                          {}
+                                                  ).length
+                                                : stats?.recording
+                                                      ?.active_recordings || 0}
+                                        </div>
+                                        <div className="text-xs text-gray-400">
+                                            הקלטות פעילות
+                                        </div>
+                                    </div>
+                                    <div className="text-center">
+                                        <div className="text-2xl font-bold text-purple-400">
+                                            {stats?.recording
+                                                ?.completed_recordings || 0}
+                                        </div>
+                                        <div className="text-xs text-gray-400">
+                                            הקלטות הושלמו
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Configuration Display */}
+                            <div className="bg-gray-700 rounded-lg p-4">
+                                <h3 className="text-lg font-bold mb-3 flex items-center gap-2">
+                                    <span>⚙️</span>
+                                    <span>תצורה נוכחית</span>
+                                </h3>
+                                <div className="grid grid-cols-4 gap-4 text-sm">
+                                    <div>
+                                        <span className="text-gray-400">
+                                            Detection FPS:
+                                        </span>
+                                        <span className="text-white mr-2">
+                                            {config.detection_fps || "-"}
+                                        </span>
+                                    </div>
+                                    <div>
+                                        <span className="text-gray-400">
+                                            Stream FPS:
+                                        </span>
+                                        <span className="text-white mr-2">
+                                            {config.stream_fps || "-"}
+                                        </span>
+                                    </div>
+                                    <div>
+                                        <span className="text-gray-400">
+                                            YOLO Confidence:
+                                        </span>
+                                        <span className="text-white mr-2">
+                                            {config.yolo_confidence
+                                                ? `${(
+                                                      config.yolo_confidence *
+                                                      100
+                                                  ).toFixed(0)}%`
+                                                : "-"}
+                                        </span>
+                                    </div>
+                                    <div>
+                                        <span className="text-gray-400">
+                                            ReID Recovery:
+                                        </span>
+                                        <span
+                                            className={`mr-2 ${
+                                                config.use_reid_recovery
+                                                    ? "text-green-400"
+                                                    : "text-gray-500"
+                                            }`}
+                                        >
+                                            {config.use_reid_recovery
+                                                ? "פעיל"
+                                                : "כבוי"}
+                                        </span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Audio/Radio Transcription Stats */}
+                            {radioStats && (
+                                <div className="bg-gray-700 rounded-lg p-4">
+                                    <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
+                                        <span>📻</span>
+                                        <span>סטטיסטיקות תמלול אודיו</span>
+                                    </h3>
+
+                                    {/* Audio Reception Stats */}
+                                    {radioStats.audio && (
+                                        <div className="mb-4 pb-4 border-b border-gray-600">
+                                            <h4 className="text-sm font-semibold text-gray-300 mb-2">
+                                                קליטת אודיו
+                                            </h4>
+                                            <div className="grid grid-cols-3 gap-4">
+                                                <div className="text-center bg-gray-600 rounded p-2">
+                                                    <div className="text-xl font-bold text-blue-400">
+                                                        {(
+                                                            radioStats.audio
+                                                                .chunks_received ||
+                                                            0
+                                                        ).toLocaleString()}
+                                                    </div>
+                                                    <div className="text-xs text-gray-400">
+                                                        Chunks התקבלו
+                                                    </div>
+                                                </div>
+                                                <div className="text-center bg-gray-600 rounded p-2">
+                                                    <div className="text-xl font-bold text-green-400">
+                                                        {(
+                                                            (radioStats.audio
+                                                                .bytes_received ||
+                                                                0) /
+                                                            1024 /
+                                                            1024
+                                                        ).toFixed(2)}{" "}
+                                                        MB
+                                                    </div>
+                                                    <div className="text-xs text-gray-400">
+                                                        נתונים התקבלו
+                                                    </div>
+                                                </div>
+                                                <div className="text-center bg-gray-600 rounded p-2">
+                                                    <div
+                                                        className={`text-xl font-bold ${
+                                                            radioStats.audio
+                                                                .connected
+                                                                ? "text-green-400"
+                                                                : "text-red-400"
+                                                        }`}
+                                                    >
+                                                        {radioStats.audio
+                                                            .connected
+                                                            ? "מחובר"
+                                                            : "מנותק"}
+                                                    </div>
+                                                    <div className="text-xs text-gray-400">
+                                                        סטטוס חיבור
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* Transcribers Stats */}
+                                    <div className="grid grid-cols-2 gap-4">
+                                        {/* Whisper Stats (מתמלל 1) */}
+                                        <div className="bg-gray-600 rounded-lg p-3">
+                                            <h4 className="text-sm font-semibold text-blue-400 mb-3 flex items-center gap-2">
+                                                <span>🎙️</span>
+                                                <span>מתמלל 1</span>
+                                                {radioStats.whisper_transcriber
+                                                    ?.configured && (
+                                                    <span className="text-xs bg-green-600 px-1 rounded mr-auto">
+                                                        פעיל
+                                                    </span>
+                                                )}
+                                            </h4>
+                                            <div className="space-y-2">
+                                                <div className="flex justify-between text-sm">
+                                                    <span className="text-gray-400">
+                                                        Chunks עובדו:
+                                                    </span>
+                                                    <span className="text-white font-mono">
+                                                        {radioStats
+                                                            .whisper_transcriber
+                                                            ?.chunks_processed ||
+                                                            0}
+                                                    </span>
+                                                </div>
+                                                <div className="flex justify-between text-sm">
+                                                    <span className="text-gray-400">
+                                                        תמלולים:
+                                                    </span>
+                                                    <span className="text-white font-mono">
+                                                        {radioStats
+                                                            .whisper_transcriber
+                                                            ?.transcriptions ||
+                                                            0}
+                                                    </span>
+                                                </div>
+                                                <div className="flex justify-between text-sm">
+                                                    <span className="text-gray-400">
+                                                        שגיאות:
+                                                    </span>
+                                                    <span
+                                                        className={`font-mono ${
+                                                            (radioStats
+                                                                .whisper_transcriber
+                                                                ?.errors || 0) >
+                                                            0
+                                                                ? "text-red-400"
+                                                                : "text-white"
+                                                        }`}
+                                                    >
+                                                        {radioStats
+                                                            .whisper_transcriber
+                                                            ?.errors || 0}
+                                                    </span>
+                                                </div>
+                                                {radioStats.whisper_transcriber
+                                                    ?.avg_process_time && (
+                                                    <div className="flex justify-between text-sm">
+                                                        <span className="text-gray-400">
+                                                            זמן עיבוד ממוצע:
+                                                        </span>
+                                                        <span className="text-white font-mono">
+                                                            {radioStats.whisper_transcriber.avg_process_time.toFixed(
+                                                                0
+                                                            )}{" "}
+                                                            ms
+                                                        </span>
+                                                    </div>
+                                                )}
+                                                {radioStats.whisper_transcriber
+                                                    ?.model_path && (
+                                                    <div className="text-xs text-gray-500 mt-2 pt-2 border-t border-gray-500">
+                                                        Model:{" "}
+                                                        {radioStats.whisper_transcriber.model_path
+                                                            .split("/")
+                                                            .pop()}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+
+                                        {/* Gemini Stats (מתמלל 2) */}
+                                        <div className="bg-gray-600 rounded-lg p-3">
+                                            <h4 className="text-sm font-semibold text-purple-400 mb-3 flex items-center gap-2">
+                                                <span>☁️</span>
+                                                <span>מתמלל 2 (Gemini)</span>
+                                                {radioStats.gemini_transcriber
+                                                    ?.configured && (
+                                                    <span className="text-xs bg-green-600 px-1 rounded mr-auto">
+                                                        פעיל
+                                                    </span>
+                                                )}
+                                            </h4>
+                                            <div className="space-y-2">
+                                                <div className="flex justify-between text-sm">
+                                                    <span className="text-gray-400">
+                                                        Chunks עובדו:
+                                                    </span>
+                                                    <span className="text-white font-mono">
+                                                        {radioStats
+                                                            .gemini_transcriber
+                                                            ?.chunks_processed ||
+                                                            0}
+                                                    </span>
+                                                </div>
+                                                <div className="flex justify-between text-sm">
+                                                    <span className="text-gray-400">
+                                                        תמלולים:
+                                                    </span>
+                                                    <span className="text-white font-mono">
+                                                        {radioStats
+                                                            .gemini_transcriber
+                                                            ?.transcriptions ||
+                                                            0}
+                                                    </span>
+                                                </div>
+                                                <div className="flex justify-between text-sm">
+                                                    <span className="text-gray-400">
+                                                        שגיאות:
+                                                    </span>
+                                                    <span
+                                                        className={`font-mono ${
+                                                            (radioStats
+                                                                .gemini_transcriber
+                                                                ?.errors || 0) >
+                                                            0
+                                                                ? "text-red-400"
+                                                                : "text-white"
+                                                        }`}
+                                                    >
+                                                        {radioStats
+                                                            .gemini_transcriber
+                                                            ?.errors || 0}
+                                                    </span>
+                                                </div>
+                                                {radioStats.gemini_transcriber
+                                                    ?.avg_process_time && (
+                                                    <div className="flex justify-between text-sm">
+                                                        <span className="text-gray-400">
+                                                            זמן עיבוד ממוצע:
+                                                        </span>
+                                                        <span className="text-white font-mono">
+                                                            {radioStats.gemini_transcriber.avg_process_time.toFixed(
+                                                                0
+                                                            )}{" "}
+                                                            ms
+                                                        </span>
+                                                    </div>
+                                                )}
+                                                {radioStats.gemini_transcriber
+                                                    ?.api_calls && (
+                                                    <div className="flex justify-between text-sm">
+                                                        <span className="text-gray-400">
+                                                            קריאות API:
+                                                        </span>
+                                                        <span className="text-white font-mono">
+                                                            {
+                                                                radioStats
+                                                                    .gemini_transcriber
+                                                                    .api_calls
+                                                            }
+                                                        </span>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* Buffer Stats */}
+                                    {(radioStats.gemini_transcriber
+                                        ?.buffer_size !== undefined ||
+                                        radioStats.whisper_transcriber
+                                            ?.buffer_size !== undefined) && (
+                                        <div className="mt-4 pt-4 border-t border-gray-600">
+                                            <h4 className="text-sm font-semibold text-gray-300 mb-2">
+                                                מאגרי אודיו
+                                            </h4>
+                                            <div className="grid grid-cols-2 gap-4">
+                                                <div className="text-center">
+                                                    <div className="text-lg font-bold text-blue-400">
+                                                        {(
+                                                            (radioStats
+                                                                .whisper_transcriber
+                                                                ?.buffer_size ||
+                                                                0) / 1024
+                                                        ).toFixed(1)}{" "}
+                                                        KB
+                                                    </div>
+                                                    <div className="text-xs text-gray-400">
+                                                        Buffer Whisper
+                                                    </div>
+                                                </div>
+                                                <div className="text-center">
+                                                    <div className="text-lg font-bold text-purple-400">
+                                                        {(
+                                                            (radioStats
+                                                                .gemini_transcriber
+                                                                ?.buffer_size ||
+                                                                0) / 1024
+                                                        ).toFixed(1)}{" "}
+                                                        KB
+                                                    </div>
+                                                    <div className="text-xs text-gray-400">
+                                                        Buffer Gemini
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                    )}
                 </div>
-              )}
 
-              {/* Counters Grid */}
-              <div className="grid grid-cols-4 gap-4">
-                <Counter
-                  label="פריימים מעובדים"
-                  value={counters.frames_processed}
-                  icon="🎬"
-                  trend={rates.frames}
-                />
-                <Counter
-                  label="זיהויים"
-                  value={counters.detections}
-                  icon="👁️"
-                  trend={rates.detections}
-                />
-                <Counter
-                  label="ReID Extractions"
-                  value={counters.reid_extractions}
-                  icon="🔍"
-                />
-                <Counter
-                  label="ReID Recoveries"
-                  value={counters.reid_recoveries}
-                  icon="🔄"
-                />
-                <Counter
-                  label="אירועים נשלחו"
-                  value={counters.events_sent}
-                  icon="📤"
-                  trend={rates.events}
-                />
-                <Counter
-                  label="AI Calls"
-                  value={counters.gemini_calls}
-                  icon="🤖"
-                />
-                <Counter
-                  label="פריימים נזרקו"
-                  value={counters.frames_dropped}
-                  icon="🗑️"
-                />
-                <Counter
-                  label="מצלמות פעילות"
-                  value={pressure.active_cameras?.length}
-                  icon="📹"
-                />
-              </div>
-
-              {/* Tracker Stats */}
-              <div className="grid grid-cols-2 gap-4">
-                {/* BoT-SORT */}
-                <div className="bg-gray-700 rounded-lg p-4">
-                  <h3 className="text-lg font-bold mb-3 flex items-center gap-2">
-                    <span>🎯</span>
-                    <span>BoT-SORT Tracker</span>
-                  </h3>
-                  <div className="grid grid-cols-2 gap-2">
-                    <StatusIndicator
-                      label="אנשים"
-                      active={(tracker.bot_sort?.persons || 0) > 0}
-                      count={tracker.bot_sort?.persons || 0}
-                    />
-                    <StatusIndicator
-                      label="רכבים"
-                      active={(tracker.bot_sort?.vehicles || 0) > 0}
-                      count={tracker.bot_sort?.vehicles || 0}
-                    />
-                    <StatusIndicator
-                      label="סה״כ Tracks"
-                      active={(tracker.bot_sort?.total_tracks || 0) > 0}
-                      count={tracker.bot_sort?.total_tracks || 0}
-                    />
-                    <StatusIndicator
-                      label="Tracks נמחקו"
-                      active={false}
-                      count={tracker.bot_sort?.deleted_tracks || 0}
-                    />
-                  </div>
+                {/* Footer */}
+                <div className="bg-gray-700 px-6 py-3 text-sm text-gray-400 flex justify-between">
+                    <span>🔄 מתעדכן בזמן אמת (כל שנייה)</span>
+                    <span>Endpoint: /api/stats/realtime</span>
                 </div>
-
-                {/* ReID Tracker */}
-                <div className="bg-gray-700 rounded-lg p-4">
-                  <h3 className="text-lg font-bold mb-3 flex items-center gap-2">
-                    <span>🔍</span>
-                    <span>ReID Tracker</span>
-                  </h3>
-                  <div className="grid grid-cols-2 gap-2">
-                    <StatusIndicator
-                      label="סה״כ Tracked"
-                      active={(tracker.reid?.total_tracked || 0) > 0}
-                      count={tracker.reid?.total_tracked || 0}
-                    />
-                    <StatusIndicator
-                      label="אנשים חמושים"
-                      active={(tracker.reid?.armed_persons || 0) > 0}
-                      count={tracker.reid?.armed_persons || 0}
-                    />
-                    <StatusIndicator
-                      label="BoT-SORT"
-                      active={tracker.bot_sort?.active !== false}
-                    />
-                    <StatusIndicator
-                      label="Stable Tracker"
-                      active={(tracker.stable?.total_objects || 0) > 0}
-                      count={tracker.stable?.total_objects || 0}
-                    />
-                  </div>
-                </div>
-              </div>
-
-              {/* Pressure / Queue Stats */}
-              <div className="bg-gray-700 rounded-lg p-4">
-                <h3 className="text-lg font-bold mb-3 flex items-center gap-2">
-                  <span>📊</span>
-                  <span>עומס מערכת</span>
-                </h3>
-                <div className="grid grid-cols-4 gap-4">
-                  <div className="text-center">
-                    <div className={`text-2xl font-bold ${(pressure.pending_frames || 0) > 5 ? 'text-red-400' : 'text-green-400'}`}>
-                      {pressure.pending_frames || 0}
-                    </div>
-                    <div className="text-xs text-gray-400">פריימים בהמתנה</div>
-                  </div>
-                  <div className="text-center">
-                    <div className={`text-2xl font-bold ${(pressure.result_queue_size || 0) > 10 ? 'text-red-400' : 'text-green-400'}`}>
-                      {pressure.result_queue_size || 0}
-                    </div>
-                    <div className="text-xs text-gray-400">Result Queue</div>
-                  </div>
-                  <div className="text-center">
-                    <div className="text-2xl font-bold text-blue-400">
-                      {typeof stats?.recording?.active_recordings === 'object'
-                        ? Object.keys(stats?.recording?.active_recordings || {}).length
-                        : (stats?.recording?.active_recordings || 0)}
-                    </div>
-                    <div className="text-xs text-gray-400">הקלטות פעילות</div>
-                  </div>
-                  <div className="text-center">
-                    <div className="text-2xl font-bold text-purple-400">
-                      {stats?.recording?.completed_recordings || 0}
-                    </div>
-                    <div className="text-xs text-gray-400">הקלטות הושלמו</div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Configuration Display */}
-              <div className="bg-gray-700 rounded-lg p-4">
-                <h3 className="text-lg font-bold mb-3 flex items-center gap-2">
-                  <span>⚙️</span>
-                  <span>תצורה נוכחית</span>
-                </h3>
-                <div className="grid grid-cols-4 gap-4 text-sm">
-                  <div>
-                    <span className="text-gray-400">Detection FPS:</span>
-                    <span className="text-white mr-2">{config.detection_fps || '-'}</span>
-                  </div>
-                  <div>
-                    <span className="text-gray-400">Stream FPS:</span>
-                    <span className="text-white mr-2">{config.stream_fps || '-'}</span>
-                  </div>
-                  <div>
-                    <span className="text-gray-400">YOLO Confidence:</span>
-                    <span className="text-white mr-2">{config.yolo_confidence ? `${(config.yolo_confidence * 100).toFixed(0)}%` : '-'}</span>
-                  </div>
-                  <div>
-                    <span className="text-gray-400">ReID Recovery:</span>
-                    <span className={`mr-2 ${config.use_reid_recovery ? 'text-green-400' : 'text-gray-500'}`}>
-                      {config.use_reid_recovery ? 'פעיל' : 'כבוי'}
-                    </span>
-                  </div>
-                </div>
-              </div>
             </div>
-          )}
         </div>
-
-        {/* Footer */}
-        <div className="bg-gray-700 px-6 py-3 text-sm text-gray-400 flex justify-between">
-          <span>🔄 מתעדכן בזמן אמת (כל שנייה)</span>
-          <span>Endpoint: /api/stats/realtime</span>
-        </div>
-      </div>
-    </div>
-  );
+    );
 }

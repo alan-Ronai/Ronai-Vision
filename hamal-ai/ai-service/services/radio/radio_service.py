@@ -1,13 +1,14 @@
 """Radio Service - Receives RTP audio via EC2 relay and transcribes to Hebrew.
 
-Integrates RTPTCPClient with GeminiTranscriber and sends
-transcriptions to the backend for display in UI.
+Integrates RTPTCPClient with both GeminiTranscriber and WhisperTranscriber,
+sending transcriptions to the backend for display in UI.
 
 Also processes transcription events through the Rule Engine for
 transcription_keyword conditions.
 
 Architecture:
-    Radio → RTP/UDP → EC2 Relay → TCP → This Service → Gemini → Backend → UI
+    Radio → RTP/UDP → EC2 Relay → TCP → This Service → Gemini  → Backend → UI (Tab 2)
+                                                     → Whisper → Backend → UI (Tab 1)
                                                       ↓
                                                 Rule Engine → Actions
 """
@@ -22,6 +23,7 @@ import httpx
 
 from .rtp_tcp_client import RTPTCPClient
 from .gemini_transcriber import StreamingGeminiTranscriber, TranscriptionResult
+from .whisper_transcriber import WhisperTranscriber
 from ..rules import get_rule_engine, RuleContext
 
 logger = logging.getLogger(__name__)
@@ -43,6 +45,7 @@ class RadioService:
         idle_timeout: float = 2.0,
         save_audio: bool = True,
         use_vad: bool = False,
+        whisper_model_path: str = "models/whisper-large-v3-hebrew-ct2",
         on_transcription: Optional[Callable[[TranscriptionResult], None]] = None
     ):
         """Initialize radio service.
@@ -59,6 +62,7 @@ class RadioService:
             idle_timeout: Seconds of no audio before processing buffer (handles PTT release)
             save_audio: Whether to save audio files for debugging
             use_vad: Whether to use Voice Activity Detection for speaker segmentation
+            whisper_model_path: Path to Whisper CT2 model directory
             on_transcription: Optional callback for transcriptions
         """
         # Get EC2 relay config from environment or parameters
@@ -78,8 +82,8 @@ class RadioService:
             "last_chunk_time": None,
         }
 
-        # Initialize transcriber with silence detection and optional VAD
-        self.transcriber = StreamingGeminiTranscriber(
+        # Initialize Gemini transcriber (Tab 2 - מתמלל 2)
+        self.gemini_transcriber = StreamingGeminiTranscriber(
             sample_rate=sample_rate,
             chunk_duration=chunk_duration,
             silence_threshold=silence_threshold,
@@ -88,8 +92,26 @@ class RadioService:
             idle_timeout=idle_timeout,
             save_audio=save_audio,
             use_vad=use_vad,
-            on_transcription=self._handle_transcription
+            on_transcription=self._handle_gemini_transcription
         )
+
+        # Initialize Whisper transcriber (Tab 1 - מתמלל 1)
+        self.whisper_transcriber = WhisperTranscriber(
+            model_path=whisper_model_path,
+            device="auto",
+            compute_type="int8",
+            sample_rate=sample_rate,
+            chunk_duration=chunk_duration,
+            silence_threshold=silence_threshold,
+            silence_duration=silence_duration,
+            min_duration=min_duration,
+            idle_timeout=idle_timeout,
+            save_audio=save_audio,
+            on_transcription=self._handle_whisper_transcription
+        )
+
+        # Keep reference to main transcriber for backwards compatibility
+        self.transcriber = self.gemini_transcriber
 
         # Initialize TCP client for EC2 relay
         self.tcp_client = RTPTCPClient(
@@ -103,7 +125,7 @@ class RadioService:
 
         # Diagnostic logging
         logger.info("=" * 60)
-        logger.info("RadioService Configuration:")
+        logger.info("RadioService Configuration (Dual Transcriber):")
         logger.info(f"  EC2 Relay: {self.ec2_host}:{self.ec2_port}")
         logger.info(f"  Sample Rate: {sample_rate} Hz")
         logger.info(f"  Chunk Duration: {chunk_duration}s (max)")
@@ -113,7 +135,9 @@ class RadioService:
         logger.info(f"  Save Audio Files: {save_audio}")
         logger.info(f"  VAD Enabled: {use_vad}")
         logger.info(f"  Backend URL: {backend_url}")
-        logger.info(f"  Transcriber Configured: {self.transcriber.is_configured()}")
+        logger.info(f"  Gemini Transcriber: {'configured' if self.gemini_transcriber.is_configured() else 'NOT configured'}")
+        logger.info(f"  Whisper Transcriber: {'configured' if self.whisper_transcriber.is_configured() else 'NOT configured'}")
+        logger.info(f"  Whisper Model Path: {whisper_model_path}")
         logger.info("=" * 60)
 
     async def start(self):
@@ -124,17 +148,18 @@ class RadioService:
         self._running = True
         self._http_client = httpx.AsyncClient(timeout=10.0)
 
-        # Set event loop for transcriber (for cross-thread async calls)
+        # Set event loop for both transcribers (for cross-thread async calls)
         try:
             loop = asyncio.get_running_loop()
-            self.transcriber.set_event_loop(loop)
+            self.gemini_transcriber.set_event_loop(loop)
+            self.whisper_transcriber.set_event_loop(loop)
         except RuntimeError:
-            logger.warning("Could not get running loop for transcriber")
+            logger.warning("Could not get running loop for transcribers")
 
         # Start TCP client
         self.tcp_client.start()
 
-        logger.info("Radio service started")
+        logger.info("Radio service started (dual transcriber mode)")
 
     async def stop(self):
         """Stop radio service."""
@@ -155,6 +180,8 @@ class RadioService:
     def _on_audio_received(self, audio_data: bytes, sample_rate: int):
         """Callback when audio is received from TCP client.
 
+        Feeds audio to BOTH transcribers.
+
         Args:
             audio_data: Raw PCM audio bytes
             sample_rate: Sample rate
@@ -173,14 +200,19 @@ class RadioService:
                 f"(chunk #{self._audio_stats['chunks_received']})"
             )
 
-        # Feed to transcriber with error handling
+        # Feed to BOTH transcribers
         try:
-            self.transcriber.add_audio(audio_data)
+            self.gemini_transcriber.add_audio(audio_data)
         except Exception as e:
-            logger.error(f"Failed to add audio to transcriber: {e}", exc_info=True)
+            logger.error(f"Failed to add audio to Gemini transcriber: {e}", exc_info=True)
 
-    def _handle_transcription(self, result: TranscriptionResult):
-        """Handle transcription result.
+        try:
+            self.whisper_transcriber.add_audio(audio_data)
+        except Exception as e:
+            logger.error(f"Failed to add audio to Whisper transcriber: {e}", exc_info=True)
+
+    def _handle_gemini_transcription(self, result: TranscriptionResult):
+        """Handle Gemini transcription result.
 
         Args:
             result: Transcription result
@@ -188,10 +220,31 @@ class RadioService:
         if not result.text:
             return
 
-        logger.info(f"Transcription: {result.text}")
+        logger.info(f"[Gemini] Transcription: {result.text}")
 
-        # Send to backend
-        asyncio.create_task(self._send_to_backend(result))
+        # Send to backend with gemini source
+        asyncio.create_task(self._send_to_backend(result, transcriber="gemini"))
+
+        # Process through rule engine for transcription_keyword rules
+        asyncio.create_task(self._process_transcription_rules(result))
+
+        # Call external callback
+        if self.on_transcription:
+            self.on_transcription(result)
+
+    def _handle_whisper_transcription(self, result: TranscriptionResult):
+        """Handle Whisper transcription result.
+
+        Args:
+            result: Transcription result
+        """
+        if not result.text:
+            return
+
+        logger.info(f"[Whisper] Transcription: {result.text}")
+
+        # Send to backend with whisper source
+        asyncio.create_task(self._send_to_backend(result, transcriber="whisper"))
 
         # Process through rule engine for transcription_keyword rules
         asyncio.create_task(self._process_transcription_rules(result))
@@ -235,11 +288,12 @@ class RadioService:
         except Exception as e:
             logger.error(f"Error processing transcription rules: {e}")
 
-    async def _send_to_backend(self, result: TranscriptionResult):
+    async def _send_to_backend(self, result: TranscriptionResult, transcriber: str = "gemini"):
         """Send transcription to backend API.
 
         Args:
             result: Transcription result
+            transcriber: Which transcriber produced this ("gemini" or "whisper")
         """
         if not self._http_client:
             return
@@ -249,22 +303,24 @@ class RadioService:
                 "text": result.text,
                 "timestamp": result.timestamp.isoformat(),
                 "source": "radio",
-                "confidence": result.confidence
+                "confidence": result.confidence,
+                "transcriber": transcriber
             }
 
-            # Send to backend
+            # Send to backend - different endpoints for different transcribers
+            endpoint = f"/api/radio/transcription:{transcriber}"
             response = await self._http_client.post(
-                f"{self.backend_url}/api/radio/transcription",
+                f"{self.backend_url}{endpoint}",
                 json=payload
             )
 
             if response.status_code in (200, 201):
-                logger.debug(f"Transcription sent to backend")
+                logger.debug(f"[{transcriber}] Transcription sent to backend")
             else:
-                logger.warning(f"Backend response: {response.status_code}")
+                logger.warning(f"[{transcriber}] Backend response: {response.status_code}")
 
         except Exception as e:
-            logger.error(f"Failed to send transcription: {e}")
+            logger.error(f"[{transcriber}] Failed to send transcription: {e}")
 
     def get_stats(self) -> dict:
         """Get service statistics."""
@@ -274,7 +330,10 @@ class RadioService:
             "ec2_port": self.ec2_port,
             "audio": self._audio_stats,
             "tcp_client": self.tcp_client.get_stats(),
-            "transcriber": self.transcriber.get_stats()
+            "gemini_transcriber": self.gemini_transcriber.get_stats(),
+            "whisper_transcriber": self.whisper_transcriber.get_stats(),
+            # Keep for backwards compatibility
+            "transcriber": self.gemini_transcriber.get_stats()
         }
 
 
@@ -298,7 +357,8 @@ async def init_radio_service(
     min_duration: float = 1.5,
     idle_timeout: float = 2.0,
     save_audio: bool = True,
-    use_vad: bool = False
+    use_vad: bool = False,
+    whisper_model_path: str = "models/whisper-large-v3-hebrew-ct2"
 ) -> RadioService:
     """Initialize and start the global radio service.
 
@@ -314,6 +374,7 @@ async def init_radio_service(
         idle_timeout: Seconds of no audio before processing buffer
         save_audio: Whether to save audio files for debugging
         use_vad: Whether to use Voice Activity Detection for speaker segmentation
+        whisper_model_path: Path to Whisper CT2 model directory
 
     Returns:
         RadioService instance
@@ -335,7 +396,8 @@ async def init_radio_service(
         min_duration=min_duration,
         idle_timeout=idle_timeout,
         save_audio=save_audio,
-        use_vad=use_vad
+        use_vad=use_vad,
+        whisper_model_path=whisper_model_path
     )
 
     await _service.start()

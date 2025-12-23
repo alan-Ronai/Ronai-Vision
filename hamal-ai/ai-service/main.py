@@ -71,7 +71,12 @@ from services.streaming import get_rtsp_manager, RTSPConfig, get_ffmpeg_manager,
 from services.streaming import get_gstreamer_manager, GStreamerConfig, is_gstreamer_available
 from services.detection_loop import init_detection_loop, get_detection_loop, LoopConfig
 from services.detection import get_frame_buffer_manager, get_stable_tracker
-from services.radio import init_radio_service, get_radio_service, stop_radio_service
+from services.radio import (
+    init_radio_service, get_radio_service, stop_radio_service,
+    init_transcribers, get_gemini_transcriber, get_whisper_transcriber,
+    get_whisper_semaphore, get_transcriber_stats, record_transcription_stats,
+    record_whisper_queue_wait
+)
 from services.radio.radio_transmit import router as radio_transmit_router
 from services.recording import init_recording_manager, get_recording_manager
 
@@ -1780,6 +1785,15 @@ async def startup_event():
     await init_recording_manager(recordings_dir=recordings_dir, default_fps=TARGET_FPS)
     logger.info(f"📹 Recording manager initialized, output: {recordings_dir}")
 
+    # Initialize global transcribers BEFORE radio service (so model is pre-loaded)
+    whisper_model_path = os.getenv("WHISPER_MODEL_PATH", "models/whisper-large-v3-hebrew-ct2")
+    save_transcription_audio = os.getenv("SAVE_TRANSCRIPTION_AUDIO", "false").lower() == "true"
+    init_transcribers(
+        whisper_model_path=whisper_model_path,
+        save_audio=save_transcription_audio,
+        preload_whisper=True  # Pre-load model at startup
+    )
+
     # Start radio service for RTP audio transcription via EC2 relay
     ec2_host = os.getenv("EC2_RTP_HOST")
     ec2_port = int(os.getenv("EC2_RTP_PORT", "5005"))
@@ -2676,30 +2690,44 @@ async def reload_event_rules():
 
 @app.get("/radio/stats")
 async def radio_stats():
-    """Get radio service statistics."""
+    """Get radio service and transcriber statistics."""
     service = get_radio_service()
-    if not service:
-        return {"error": "Radio service not running", "running": False}
-    return service.get_stats()
+    service_stats = service.get_stats() if service else {"error": "Radio service not running", "running": False}
+
+    # Add global transcriber stats
+    transcriber_stats = get_transcriber_stats()
+
+    return {
+        **service_stats,
+        "transcriber_manager": transcriber_stats
+    }
 
 
 @app.post("/radio/transcribe-file")
 async def transcribe_audio_file(file: UploadFile = File(...)):
-    """Transcribe an uploaded audio file (WAV format).
+    """Transcribe an uploaded audio file (WAV format) using BOTH transcribers.
 
-    This endpoint accepts a WAV file upload and returns the transcription.
-    The transcription uses the same Gemini-based Hebrew military/security
-    transcription as the live radio feed.
+    This endpoint accepts a WAV file upload and returns transcriptions from
+    both Gemini (cloud) and Whisper (local) transcribers.
+    Both transcribers run in PARALLEL and emit socket events INDEPENDENTLY
+    as each finishes (so UI updates immediately without waiting for both).
+
+    Uses GLOBAL transcriber instances (shared with live radio service).
+    Whisper uses a semaphore to prevent concurrent CPU-intensive processing.
 
     Args:
         file: WAV audio file to transcribe
 
     Returns:
-        JSON with transcription text, duration, and any detected commands
+        JSON with transcriptions from both transcribers
     """
     import tempfile
     import os as os_module
-    from services.radio.gemini_transcriber import GeminiTranscriber
+    import httpx
+    import time
+
+    # Backend URL for sending transcription events
+    backend_url = os.getenv("BACKEND_URL", "http://localhost:3000")
 
     # Validate file type
     if not file.filename.lower().endswith('.wav'):
@@ -2711,45 +2739,159 @@ async def transcribe_audio_file(file: UploadFile = File(...)):
     if len(contents) > MAX_SIZE:
         raise HTTPException(400, f"File too large. Maximum size is 25MB, got {len(contents) / 1024 / 1024:.1f}MB")
 
-    # Save to temp file
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        tmp.write(contents)
-        tmp_path = tmp.name
+    # Save to temp file using async I/O to avoid blocking the event loop
+    def write_temp_file():
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp.write(contents)
+            return tmp.name
+
+    tmp_path = await asyncio.to_thread(write_temp_file)
 
     try:
-        # Create transcriber instance
-        transcriber = GeminiTranscriber()
-
-        if not transcriber.is_configured():
-            raise HTTPException(503, "Transcription service not configured. Check GEMINI_API_KEY.")
-
-        # Transcribe the file
         logger.info(f"Transcribing uploaded file: {file.filename} ({len(contents)} bytes)")
-        result = await transcriber.transcribe_file(tmp_path)
 
-        if result is None:
-            raise HTTPException(500, "Transcription failed. Please try again.")
+        # Get GLOBAL transcribers (shared with live radio service)
+        gemini_transcriber = get_gemini_transcriber()
+        whisper_transcriber = get_whisper_transcriber()
+        whisper_semaphore = get_whisper_semaphore()
 
-        if not result.text:
-            return {
-                "success": True,
-                "text": "",
-                "message": "No speech detected in the audio file",
-                "duration_seconds": result.duration_seconds,
-                "filename": file.filename
-            }
+        if not gemini_transcriber or not whisper_transcriber:
+            raise HTTPException(500, "Transcribers not initialized. Server may still be starting up.")
 
-        logger.info(f"File transcription successful: '{result.text[:100]}...' ({result.duration_seconds:.1f}s)")
-
-        return {
+        results = {
             "success": True,
-            "text": result.text,
-            "duration_seconds": result.duration_seconds,
-            "timestamp": result.timestamp.isoformat(),
-            "is_command": result.is_command,
-            "command_type": result.command_type,
-            "filename": file.filename
+            "filename": file.filename,
+            "gemini": None,
+            "whisper": None
         }
+
+        # Helper to send transcription to backend (emits socket event immediately)
+        async def send_to_backend(transcriber_type: str, data: dict):
+            """Send transcription result to backend to emit socket event."""
+            try:
+                endpoint = f"{backend_url}/api/radio/transcription/{transcriber_type}"
+                logger.info(f"[{transcriber_type.upper()}] Sending to endpoint: {endpoint}")
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.post(endpoint, json=data)
+                    if response.status_code == 200:
+                        logger.info(f"[{transcriber_type.upper()}] SUCCESS - sent to {endpoint}")
+                    else:
+                        logger.warning(f"[{transcriber_type.upper()}] Backend response: {response.status_code} - {response.text}")
+            except httpx.TimeoutException:
+                logger.error(f"[{transcriber_type.capitalize()}] Backend request timed out")
+            except httpx.ConnectError as e:
+                logger.error(f"[{transcriber_type.capitalize()}] Failed to connect to backend: {e}")
+            except Exception as e:
+                logger.error(f"[{transcriber_type.capitalize()}] Failed to send to backend: {type(e).__name__}: {e}")
+
+        # Define async tasks for parallel execution
+        async def transcribe_gemini():
+            if not gemini_transcriber.is_configured():
+                return {"error": "Gemini not configured (missing GEMINI_API_KEY)"}
+            try:
+                start_time = time.time()
+                result = await gemini_transcriber.transcribe_file(tmp_path)
+                processing_time_ms = (time.time() - start_time) * 1000
+
+                if result and result.text:
+                    result_data = {
+                        "text": result.text,
+                        "duration_seconds": result.duration_seconds,
+                        "timestamp": result.timestamp.isoformat(),
+                        "is_command": result.is_command,
+                        "command_type": result.command_type,
+                        "source": f"file:{file.filename}",
+                        "processing_time_ms": processing_time_ms
+                    }
+                    logger.info(f"[Gemini] File transcription complete in {processing_time_ms:.0f}ms: '{result.text[:100] if result.text else '(empty)'}...'")
+
+                    # Record statistics
+                    record_transcription_stats("gemini", "file", processing_time_ms, success=True)
+
+                    # Send to backend IMMEDIATELY (emits socket event)
+                    await send_to_backend("gemini", result_data)
+
+                    return result_data
+                return {"error": "No transcription result"}
+            except Exception as e:
+                record_transcription_stats("gemini", "file", 0, success=False)
+                logger.error(f"[Gemini] File transcription error: {type(e).__name__}: {e}")
+                return {"error": str(e)}
+
+        async def transcribe_whisper():
+            if not whisper_transcriber.is_configured():
+                return {"error": "Whisper not configured (model not found)"}
+
+            # Use semaphore to prevent concurrent CPU-intensive processing
+            if whisper_semaphore:
+                if whisper_semaphore.locked():
+                    logger.info("[Whisper] Waiting for semaphore (another transcription in progress)...")
+                    record_whisper_queue_wait()
+
+                async with whisper_semaphore:
+                    return await _do_whisper_transcription()
+            else:
+                return await _do_whisper_transcription()
+
+        async def _do_whisper_transcription():
+            try:
+                start_time = time.time()
+                result = await whisper_transcriber.transcribe_file(tmp_path)
+                processing_time_ms = (time.time() - start_time) * 1000
+
+                if result and result.text:
+                    result_data = {
+                        "text": result.text,
+                        "duration_seconds": result.duration_seconds,
+                        "timestamp": result.timestamp.isoformat(),
+                        "is_command": result.is_command,
+                        "command_type": result.command_type,
+                        "segments": result.segments,
+                        "source": f"file:{file.filename}",
+                        "processing_time_ms": processing_time_ms
+                    }
+                    logger.info(f"[Whisper] File transcription complete in {processing_time_ms:.0f}ms: '{result.text[:100] if result.text else '(empty)'}...'")
+
+                    # Record statistics
+                    record_transcription_stats("whisper", "file", processing_time_ms, success=True)
+
+                    # Send to backend IMMEDIATELY (emits socket event)
+                    await send_to_backend("whisper", result_data)
+
+                    return result_data
+                return {"error": "No transcription result"}
+            except Exception as e:
+                record_transcription_stats("whisper", "file", 0, success=False)
+                logger.error(f"[Whisper] File transcription error: {type(e).__name__}: {e}")
+                return {"error": str(e)}
+
+        # Run BOTH transcribers in PARALLEL - each emits socket event when done
+        logger.info("Running Gemini and Whisper transcription in parallel (independent socket events)...")
+        gemini_result, whisper_result = await asyncio.gather(
+            transcribe_gemini(),
+            transcribe_whisper(),
+            return_exceptions=True
+        )
+
+        # Handle results (could be exceptions if something went wrong)
+        if isinstance(gemini_result, Exception):
+            results["gemini"] = {"error": str(gemini_result)}
+        else:
+            results["gemini"] = gemini_result
+
+        if isinstance(whisper_result, Exception):
+            results["whisper"] = {"error": str(whisper_result)}
+        else:
+            results["whisper"] = whisper_result
+
+        # Check if at least one transcriber worked
+        gemini_ok = results["gemini"] and "text" in results["gemini"]
+        whisper_ok = results["whisper"] and "text" in results["whisper"]
+
+        if not gemini_ok and not whisper_ok:
+            raise HTTPException(500, "Both transcribers failed. Check logs for details.")
+
+        return results
 
     except HTTPException:
         raise
@@ -2757,11 +2899,13 @@ async def transcribe_audio_file(file: UploadFile = File(...)):
         logger.error(f"File transcription error: {e}", exc_info=True)
         raise HTTPException(500, f"Transcription error: {str(e)}")
     finally:
-        # Clean up temp file
-        try:
-            os_module.unlink(tmp_path)
-        except:
-            pass
+        # Clean up temp file in background thread to avoid blocking
+        def cleanup():
+            try:
+                os_module.unlink(tmp_path)
+            except:
+                pass
+        asyncio.get_event_loop().run_in_executor(None, cleanup)
 
 
 # ============== FFMPEG STREAMING ENDPOINTS ==============

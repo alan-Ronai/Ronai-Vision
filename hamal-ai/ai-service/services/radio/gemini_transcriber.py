@@ -585,10 +585,13 @@ class GeminiTranscriber:
             wav_data = wav_buffer.read()
             logger.debug(f"WAV file created: {len(wav_data)} bytes")
 
-            # Create temp file for Gemini (it needs a file path)
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                tmp.write(wav_data)
-                tmp_path = tmp.name
+            # Create temp file for Gemini (it needs a file path) - run in thread to avoid blocking
+            def create_temp_file():
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                    tmp.write(wav_data)
+                    return tmp.name
+
+            tmp_path = await asyncio.to_thread(create_temp_file)
 
             try:
                 # Save to audio_output directory for debugging (if enabled)
@@ -596,12 +599,15 @@ class GeminiTranscriber:
                 if self.audio_output_dir:
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
                     saved_path = self.audio_output_dir / f"audio_{timestamp}.wav"
-                    shutil.copy2(tmp_path, saved_path)
+                    # Copy in background thread
+                    await asyncio.to_thread(shutil.copy2, tmp_path, saved_path)
                     logger.info(f"💾 Saved audio to: {saved_path}")
 
-                # Upload to Gemini
+                # Upload to Gemini (use asyncio.to_thread to avoid blocking)
                 logger.debug(f"Uploading audio to Gemini: {tmp_path}")
-                audio_file = genai.upload_file(tmp_path, mime_type="audio/wav")
+                audio_file = await asyncio.to_thread(
+                    genai.upload_file, tmp_path, mime_type="audio/wav"
+                )
                 logger.debug(f"Upload successful, file: {audio_file.name}")
 
                 # Transcribe with Hebrew military/security prompt
@@ -639,9 +645,11 @@ class GeminiTranscriber:
                 )
                 logger.debug(f"Gemini response received")
 
-                # Clean up uploaded file from Gemini
+                # Clean up uploaded file from Gemini (in background, don't block)
                 try:
-                    genai.delete_file(audio_file.name)
+                    asyncio.get_event_loop().run_in_executor(
+                        None, lambda: genai.delete_file(audio_file.name)
+                    )
                 except Exception as del_err:
                     logger.debug(f"Could not delete uploaded file: {del_err}")
 
@@ -715,11 +723,13 @@ class GeminiTranscriber:
                 )
 
             finally:
-                # Clean up temp file
-                try:
-                    os.unlink(tmp_path)
-                except:
-                    pass
+                # Clean up temp file (in background, don't block)
+                def cleanup():
+                    try:
+                        os.unlink(tmp_path)
+                    except:
+                        pass
+                asyncio.get_event_loop().run_in_executor(None, cleanup)
 
         except Exception as e:
             logger.error(f"Transcription error: {e}")
@@ -740,44 +750,34 @@ class GeminiTranscriber:
             return None
 
         try:
-            # Read WAV file properly using wave module
-            with wave.open(filepath, "rb") as wav_file:
-                # Get WAV file parameters
-                n_channels = wav_file.getnchannels()
-                sample_width = wav_file.getsampwidth()
-                file_sample_rate = wav_file.getframerate()
-                n_frames = wav_file.getnframes()
+            # Read WAV file info in a thread to avoid blocking
+            def read_wav_info():
+                with wave.open(filepath, "rb") as wav_file:
+                    n_channels = wav_file.getnchannels()
+                    sample_width = wav_file.getsampwidth()
+                    file_sample_rate = wav_file.getframerate()
+                    n_frames = wav_file.getnframes()
+                    duration = n_frames / file_sample_rate
+                    return n_channels, sample_width, file_sample_rate, duration
 
-                # Read audio frames
-                audio_bytes = wav_file.readframes(n_frames)
+            n_channels, sample_width, file_sample_rate, duration = await asyncio.to_thread(read_wav_info)
 
-                # Calculate duration from actual frames
-                duration = n_frames / file_sample_rate
+            logger.info(
+                f"Read WAV file: {filepath}, "
+                f"channels={n_channels}, sample_width={sample_width}, "
+                f"sample_rate={file_sample_rate}, duration={duration:.2f}s"
+            )
 
-                logger.info(
-                    f"Read WAV file: {filepath}, "
-                    f"channels={n_channels}, sample_width={sample_width}, "
-                    f"sample_rate={file_sample_rate}, duration={duration:.2f}s"
+            # If sample rate differs, just warn (Gemini handles it directly)
+            if file_sample_rate != self.sample_rate:
+                logger.warning(
+                    f"WAV sample rate ({file_sample_rate}) differs from expected ({self.sample_rate}). "
+                    f"Gemini will process the file directly."
                 )
 
-                # If stereo, convert to mono (take first channel)
-                if n_channels == 2:
-                    samples = np.frombuffer(audio_bytes, dtype=np.int16)
-                    samples = samples[::2]  # Take every other sample (left channel)
-                    audio_bytes = samples.tobytes()
-                    logger.info("Converted stereo to mono")
-
-                # If sample rate differs, we should resample
-                # For now, just warn (Gemini might handle it)
-                if file_sample_rate != self.sample_rate:
-                    logger.warning(
-                        f"WAV sample rate ({file_sample_rate}) differs from expected ({self.sample_rate}). "
-                        f"Gemini will process the file directly."
-                    )
-
-                # For WAV file transcription, upload the file directly to Gemini
-                # rather than converting to raw audio (preserves header info)
-                return await self._transcribe_wav_file_direct(filepath, duration)
+            # For WAV file transcription, upload the file directly to Gemini
+            # rather than converting to raw audio (preserves header info)
+            return await self._transcribe_wav_file_direct(filepath, duration)
 
         except wave.Error as e:
             logger.error(f"Invalid WAV file format: {e}")
@@ -799,9 +799,11 @@ class GeminiTranscriber:
             TranscriptionResult or None
         """
         try:
-            # Upload to Gemini
+            # Upload to Gemini (use asyncio.to_thread to avoid blocking)
             logger.info(f"Uploading WAV file to Gemini: {filepath}")
-            audio_file = genai.upload_file(filepath, mime_type="audio/wav")
+            audio_file = await asyncio.to_thread(
+                genai.upload_file, filepath, mime_type="audio/wav"
+            )
             logger.debug(f"Upload successful, file: {audio_file.name}")
 
             # Transcribe with Hebrew military/security prompt
@@ -839,9 +841,11 @@ class GeminiTranscriber:
             )
             logger.debug("Gemini response received")
 
-            # Clean up uploaded file from Gemini
+            # Clean up uploaded file from Gemini (in background, don't block)
             try:
-                genai.delete_file(audio_file.name)
+                asyncio.get_event_loop().run_in_executor(
+                    None, lambda: genai.delete_file(audio_file.name)
+                )
             except Exception as del_err:
                 logger.debug(f"Could not delete uploaded file: {del_err}")
 

@@ -31,8 +31,10 @@ function isMongoConnected() {
   return mongoose.connection.readyState === 1;
 }
 
-// Store recent transcriptions in memory for quick access
-const transcriptionBuffer = [];
+// Store recent transcriptions in memory for quick access (separate buffers for each transcriber)
+const transcriptionBuffer = [];  // Legacy/combined
+const geminiTranscriptionBuffer = [];
+const whisperTranscriptionBuffer = [];
 const MAX_BUFFER_SIZE = 100;
 
 /**
@@ -165,9 +167,165 @@ router.get('/transcriptions', (req, res) => {
 });
 
 /**
+ * POST /api/radio/transcription/gemini
+ * Receive transcription from Gemini transcriber (מתמלל 2)
+ */
+router.post('/transcription/gemini', async (req, res) => {
+  console.log('[Radio] >>> GEMINI ENDPOINT HIT <<<');
+  try {
+    const { text, timestamp, source, confidence, transcriber } = req.body;
+
+    if (!text || text.trim().length === 0) {
+      return res.status(400).json({ error: 'No transcription text provided' });
+    }
+
+    const transcription = {
+      text: text.trim(),
+      timestamp: timestamp || new Date(),
+      source: source || 'radio',
+      confidence: confidence || null,
+      transcriber: 'gemini'
+    };
+
+    // Add to Gemini buffer
+    geminiTranscriptionBuffer.unshift(transcription);
+    if (geminiTranscriptionBuffer.length > MAX_BUFFER_SIZE) {
+      geminiTranscriptionBuffer.pop();
+    }
+
+    // Also add to combined buffer
+    transcriptionBuffer.unshift(transcription);
+    if (transcriptionBuffer.length > MAX_BUFFER_SIZE) {
+      transcriptionBuffer.pop();
+    }
+
+    // Emit to all connected clients with Gemini-specific event
+    const io = req.app.get('io');
+    io.emit('radio:transcription:gemini', transcription);
+
+    // Process through scenario manager
+    try {
+      const scenarioManager = getScenarioManager();
+      if (scenarioManager && scenarioManager.isActive()) {
+        await scenarioManager.handleTranscription(text);
+      }
+    } catch (scenarioError) {
+      console.debug('[Radio/Gemini] Scenario error:', scenarioError.message);
+    }
+
+    // Check for commands
+    const commands = checkForCommands(text);
+    if (commands.length > 0) {
+      for (const command of commands) {
+        io.emit('command:detected', {
+          command: command.type,
+          transcription: text,
+          transcriber: 'gemini'
+        });
+      }
+    }
+
+    res.json({ message: 'Gemini transcription received', transcription, commands });
+  } catch (error) {
+    console.error('[Radio/Gemini] Transcription error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/radio/transcription/whisper
+ * Receive transcription from Whisper transcriber (מתמלל 1)
+ */
+router.post('/transcription/whisper', async (req, res) => {
+  console.log('[Radio] >>> WHISPER ENDPOINT HIT <<<');
+  try {
+    const { text, timestamp, source, confidence, transcriber } = req.body;
+
+    if (!text || text.trim().length === 0) {
+      return res.status(400).json({ error: 'No transcription text provided' });
+    }
+
+    const transcription = {
+      text: text.trim(),
+      timestamp: timestamp || new Date(),
+      source: source || 'radio',
+      confidence: confidence || null,
+      transcriber: 'whisper'
+    };
+
+    console.log('[Radio/Whisper] Emitting radio:transcription:whisper event');
+
+    // Add to Whisper buffer
+    whisperTranscriptionBuffer.unshift(transcription);
+    if (whisperTranscriptionBuffer.length > MAX_BUFFER_SIZE) {
+      whisperTranscriptionBuffer.pop();
+    }
+
+    // Also add to combined buffer
+    transcriptionBuffer.unshift(transcription);
+    if (transcriptionBuffer.length > MAX_BUFFER_SIZE) {
+      transcriptionBuffer.pop();
+    }
+
+    // Emit to all connected clients with Whisper-specific event
+    const io = req.app.get('io');
+    io.emit('radio:transcription:whisper', transcription);
+
+    // Process through scenario manager
+    try {
+      const scenarioManager = getScenarioManager();
+      if (scenarioManager && scenarioManager.isActive()) {
+        await scenarioManager.handleTranscription(text);
+      }
+    } catch (scenarioError) {
+      console.debug('[Radio/Whisper] Scenario error:', scenarioError.message);
+    }
+
+    // Check for commands
+    const commands = checkForCommands(text);
+    if (commands.length > 0) {
+      for (const command of commands) {
+        io.emit('command:detected', {
+          command: command.type,
+          transcription: text,
+          transcriber: 'whisper'
+        });
+      }
+    }
+
+    res.json({ message: 'Whisper transcription received', transcription, commands });
+  } catch (error) {
+    console.error('[Radio/Whisper] Transcription error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/radio/transcriptions/gemini
+ * Get recent Gemini transcriptions
+ */
+router.get('/transcriptions/gemini', (req, res) => {
+  const limit = parseInt(req.query.limit) || 50;
+  res.json({
+    transcriptions: geminiTranscriptionBuffer.slice(0, limit)
+  });
+});
+
+/**
+ * GET /api/radio/transcriptions/whisper
+ * Get recent Whisper transcriptions
+ */
+router.get('/transcriptions/whisper', (req, res) => {
+  const limit = parseInt(req.query.limit) || 50;
+  res.json({
+    transcriptions: whisperTranscriptionBuffer.slice(0, limit)
+  });
+});
+
+/**
  * POST /api/radio/transcribe-file
  * Upload and transcribe a WAV file
- * Proxies to AI service and emits result to all clients
+ * Proxies to AI service and emits result to all clients (both transcribers)
  */
 router.post('/transcribe-file', upload.single('file'), async (req, res) => {
   try {
@@ -191,6 +349,17 @@ router.post('/transcribe-file', upload.single('file'), async (req, res) => {
       headers: formData.getHeaders()
     });
 
+    // Check if response is JSON before parsing
+    const contentType = response.headers.get('content-type');
+    if (!contentType || !contentType.includes('application/json')) {
+      const text = await response.text();
+      console.error('[Radio] AI service returned non-JSON response:', text.substring(0, 200));
+      return res.status(response.status || 500).json({
+        error: 'AI service error',
+        message: text.substring(0, 200)
+      });
+    }
+
     const data = await response.json();
 
     if (!response.ok) {
@@ -198,28 +367,16 @@ router.post('/transcribe-file', upload.single('file'), async (req, res) => {
       return res.status(response.status).json(data);
     }
 
-    // If transcription was successful and has text, emit to all clients
-    if (data.success && data.text) {
-      const transcription = {
-        text: data.text,
-        timestamp: data.timestamp || new Date(),
-        source: 'file-upload',
-        confidence: null,
-        filename: data.filename,
-        duration_seconds: data.duration_seconds
-      };
+    // NOTE: AI service sends transcriptions directly to /transcription:gemini and /transcription:whisper
+    // endpoints, which emit socket events. We do NOT emit events here to avoid duplicates.
+    // Just log success and return the results.
 
-      // Add to buffer
-      transcriptionBuffer.unshift(transcription);
-      if (transcriptionBuffer.length > MAX_BUFFER_SIZE) {
-        transcriptionBuffer.pop();
-      }
+    if (data.gemini && data.gemini.text) {
+      console.log(`[Radio/Gemini] File transcription complete: "${data.gemini.text.substring(0, 50)}..."`);
+    }
 
-      // Emit to all connected clients
-      const io = req.app.get('io');
-      io.emit('radio:transcription', transcription);
-
-      console.log(`[Radio] File transcription emitted: "${data.text.substring(0, 50)}..."`);
+    if (data.whisper && data.whisper.text) {
+      console.log(`[Radio/Whisper] File transcription complete: "${data.whisper.text.substring(0, 50)}..."`);
     }
 
     res.json(data);
