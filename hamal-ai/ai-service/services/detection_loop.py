@@ -901,14 +901,18 @@ class DetectionLoop:
             self._timing_counts["detections_this_frame"] = num_detections
 
             # STEP 1.5: Pre-tracking ReID extraction for appearance-based matching
-            # CRITICAL FIX FOR TRACK FRAGMENTATION:
-            # When objects move quickly, IoU can be low, causing tracks to fragment.
-            # By extracting ReID features BEFORE tracking, we enable appearance-based
-            # matching as a fallback when motion-based matching (IoU) fails.
+            # CRITICAL OPTIMIZATION: Only extract ReID every N frames (not every frame!)
+            # ReID is the BIGGEST bottleneck (~2-3 seconds per frame on CPU)
+            # - IoU-based matching works well for most frames
+            # - ReID is only needed when tracks are lost or ambiguous
+            REID_EVERY_N_FRAMES = int(os.environ.get("REID_EVERY_N_FRAMES", "3"))  # Default: every 3 frames
+            self._reid_frame_counter = getattr(self, '_reid_frame_counter', 0) + 1
+            should_run_reid = (self._reid_frame_counter % REID_EVERY_N_FRAMES == 0)
+
             reid_extract_start = time.time()
             reid_extract_count = 0
 
-            if self.use_reid_features and self.bot_sort:
+            if self.use_reid_features and self.bot_sort and should_run_reid:
                 # Get all active tracks with ReID features (not just lost ones)
                 active_persons = [t for t in self.bot_sort.get_active_tracks("person", camera_id)
                                  if t.feature is not None]
@@ -918,13 +922,16 @@ class DetectionLoop:
                 # If there are tracked objects with ReID, extract features for detections
                 # This is the key fix for track fragmentation - we need features to match against
                 # OPTIMIZATION: Use BATCH extraction instead of one-by-one (6x faster!)
+                # OPTIMIZATION 2: Limit to 5 detections max (not 10) - most scenes don't need more
+                MAX_REID_BATCH = int(os.environ.get("MAX_REID_BATCH", "5"))
+
                 if active_persons or active_vehicles:
                     reid_pre_count = 0
 
                     # BATCH extract ReID for person detections (single forward pass)
                     if active_persons and person_detections:
                         # Get detections that need features (up to limit)
-                        dets_needing_features = [d for d in person_detections if d.feature is None][:10]
+                        dets_needing_features = [d for d in person_detections if d.feature is None][:MAX_REID_BATCH]
                         if dets_needing_features:
                             person_features = self._extract_reid_features_batch(
                                 frame, dets_needing_features, class_type="person"
@@ -939,7 +946,7 @@ class DetectionLoop:
                     # BATCH extract ReID for vehicle detections (single forward pass)
                     if active_vehicles and vehicle_detections:
                         # Get detections that need features (up to limit)
-                        dets_needing_features = [d for d in vehicle_detections if d.feature is None][:10]
+                        dets_needing_features = [d for d in vehicle_detections if d.feature is None][:MAX_REID_BATCH]
                         if dets_needing_features:
                             vehicle_features = self._extract_reid_features_batch(
                                 frame, dets_needing_features, class_type="vehicle"
@@ -953,7 +960,7 @@ class DetectionLoop:
 
                     reid_extract_count += reid_pre_count
                     if reid_pre_count > 0:
-                        logger.debug(f"Pre-tracking ReID (BATCHED): extracted {reid_pre_count} features in 2 forward passes")
+                        logger.debug(f"Pre-tracking ReID (BATCHED): extracted {reid_pre_count} features")
 
             reid_extract_elapsed = (time.time() - reid_extract_start) * 1000
             self._update_timing("reid_extract_ms", reid_extract_elapsed)
@@ -1095,11 +1102,13 @@ class DetectionLoop:
             self._update_timing("tracker_ms", tracker_elapsed)
 
             # STEP 3.5: Post-tracking ReID extraction (only for NEW tracks)
-            # OPTIMIZATION: Use BATCH extraction for new tracks (6x faster!)
+            # OPTIMIZATION: Only extract for new tracks every N frames (sync with pre-tracking)
+            # New tracks need features, but not urgently - can wait a few frames
             reid_post_start = time.time()
-            if self.use_reid_features and self.bot_sort:
+            if self.use_reid_features and self.bot_sort and should_run_reid:
                 reid_count = 0
-                max_reid = self.max_reid_per_frame if self.max_reid_per_frame > 0 else 10  # Default limit
+                # OPTIMIZATION: Reduced limit - 3 tracks per type is usually enough
+                max_reid = self.max_reid_per_frame if self.max_reid_per_frame > 0 else 3  # Reduced from 10
 
                 # Separate new tracks by type for batch processing
                 new_person_tracks_needing_features = [
