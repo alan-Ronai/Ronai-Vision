@@ -49,7 +49,7 @@ _stats = {
 
 
 def init_transcribers(
-    whisper_model_path: str = "models/whisper-large-v3-hebrew-ct2",
+    whisper_model_path: str = "models/whisper-large-v3-turbo-ct2",
     save_audio: bool = False,
     preload_whisper: bool = True,
 ) -> bool:
@@ -65,7 +65,12 @@ def init_transcribers(
     Returns:
         True if initialization successful
     """
-    global _gemini_transcriber, _whisper_transcriber, _initialized, _whisper_semaphore, _stats
+    global \
+        _gemini_transcriber, \
+        _whisper_transcriber, \
+        _initialized, \
+        _whisper_semaphore, \
+        _stats
 
     if _initialized:
         logger.warning("Transcribers already initialized, skipping")
@@ -81,7 +86,11 @@ def init_transcribers(
 
         # Initialize Gemini transcriber (fast, cloud-based)
         _gemini_transcriber = GeminiTranscriber(save_audio=save_audio)
-        gemini_status = "✅ configured" if _gemini_transcriber.is_configured() else "❌ not configured (missing GEMINI_API_KEY)"
+        gemini_status = (
+            "✅ configured"
+            if _gemini_transcriber.is_configured()
+            else "❌ not configured (missing GEMINI_API_KEY)"
+        )
         logger.info(f"  Gemini Transcriber: {gemini_status}")
 
         # Initialize Whisper transcriber (slow, local)
@@ -91,7 +100,11 @@ def init_transcribers(
             compute_type="int8",
             save_audio=save_audio,
         )
-        whisper_status = "✅ configured" if _whisper_transcriber.is_configured() else "❌ not configured (model not found)"
+        whisper_status = (
+            "✅ configured"
+            if _whisper_transcriber.is_configured()
+            else "❌ not configured (model not found)"
+        )
         logger.info(f"  Whisper Transcriber: {whisper_status}")
         logger.info(f"    Model path: {whisper_model_path}")
         logger.info(f"    Device: {_whisper_transcriber.device}")
@@ -148,7 +161,7 @@ def record_transcription_stats(
     transcriber_type: str,
     source: str,  # "file" or "live"
     processing_time_ms: float,
-    success: bool = True
+    success: bool = True,
 ):
     """Record statistics for a transcription operation.
 
@@ -176,7 +189,9 @@ def record_transcription_stats(
 
         total_count = stats["file_transcriptions"] + stats["live_transcriptions"]
         if total_count > 0:
-            stats["avg_processing_time_ms"] = stats["total_processing_time_ms"] / total_count
+            stats["avg_processing_time_ms"] = (
+                stats["total_processing_time_ms"] / total_count
+            )
     else:
         stats["errors"] += 1
 

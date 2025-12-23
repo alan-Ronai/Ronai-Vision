@@ -27,16 +27,20 @@ logger = logging.getLogger(__name__)
 # Try to import faster-whisper
 try:
     from faster_whisper import WhisperModel
+
     WHISPER_AVAILABLE = True
 except ImportError:
     WhisperModel = None  # type: ignore
     WHISPER_AVAILABLE = False
-    logger.warning("faster-whisper not installed. Whisper transcription will be disabled.")
+    logger.warning(
+        "faster-whisper not installed. Whisper transcription will be disabled."
+    )
 
 
 @dataclass
 class TranscriptionResult:
     """Result of transcription."""
+
     text: str
     timestamp: datetime
     duration_seconds: float
@@ -78,7 +82,7 @@ class WhisperTranscriber:
 
     def __init__(
         self,
-        model_path: str = "models/whisper-large-v3-hebrew-ct2",
+        model_path: str = "models/whisper-large-v3-turbo-ct2",
         device: str = "auto",
         compute_type: str = "int8",
         cpu_threads: int = 0,
@@ -130,7 +134,9 @@ class WhisperTranscriber:
         if self.save_audio:
             self.audio_output_dir = Path("audio_output_whisper")
             self.audio_output_dir.mkdir(exist_ok=True)
-            logger.info(f"Whisper audio files will be saved to: {self.audio_output_dir.absolute()}")
+            logger.info(
+                f"Whisper audio files will be saved to: {self.audio_output_dir.absolute()}"
+            )
         else:
             self.audio_output_dir = None
 
@@ -177,6 +183,7 @@ class WhisperTranscriber:
         if device == "auto":
             try:
                 import torch
+
                 if torch.cuda.is_available():
                     return "cuda"
             except ImportError:
@@ -264,8 +271,10 @@ class WhisperTranscriber:
                 if self._last_audio_time > 0:
                     idle_duration = current_time - self._last_audio_time
 
-                    if (idle_duration >= self.idle_timeout and
-                        self._buffer_samples >= self._min_samples):
+                    if (
+                        idle_duration >= self.idle_timeout
+                        and self._buffer_samples >= self._min_samples
+                    ):
                         buffer_duration = self._buffer_samples / self.sample_rate
                         logger.info(
                             f"[Whisper] Triggering transcription (idle timeout): "
@@ -310,15 +319,19 @@ class WhisperTranscriber:
         if self._buffer_samples >= self._samples_per_chunk:
             should_process = True
             reason = "buffer full"
-        elif (self._has_speech and
-              self._buffer_samples >= self._min_samples and
-              self._silence_samples >= self._samples_per_silence):
+        elif (
+            self._has_speech
+            and self._buffer_samples >= self._min_samples
+            and self._silence_samples >= self._samples_per_silence
+        ):
             should_process = True
             reason = "silence detected"
 
         if should_process:
             buffer_duration = self._buffer_samples / self.sample_rate
-            logger.info(f"[Whisper] Triggering transcription ({reason}): {buffer_duration:.1f}s audio")
+            logger.info(
+                f"[Whisper] Triggering transcription ({reason}): {buffer_duration:.1f}s audio"
+            )
 
             if self._event_loop and self._event_loop.is_running():
                 asyncio.run_coroutine_threadsafe(
@@ -344,7 +357,9 @@ class WhisperTranscriber:
         try:
             audio_bytes = b"".join(self._audio_buffer)
             duration = len(audio_bytes) / (2 * self.sample_rate)
-            logger.info(f"[Whisper] Processing audio buffer: {len(audio_bytes)} bytes, {duration:.2f}s")
+            logger.info(
+                f"[Whisper] Processing audio buffer: {len(audio_bytes)} bytes, {duration:.2f}s"
+            )
 
             # Clear buffer
             self._audio_buffer = []
@@ -452,11 +467,13 @@ class WhisperTranscriber:
                 segments = []
                 full_text = []
                 for segment in segments_iter:
-                    segments.append({
-                        "start": segment.start,
-                        "end": segment.end,
-                        "text": segment.text.strip(),
-                    })
+                    segments.append(
+                        {
+                            "start": segment.start,
+                            "end": segment.end,
+                            "text": segment.text.strip(),
+                        }
+                    )
                     full_text.append(segment.text.strip())
                 return segments, full_text
 
@@ -472,7 +489,9 @@ class WhisperTranscriber:
                 if keyword in text:
                     is_command = True
                     command_type = cmd_type
-                    logger.info(f"[Whisper] Voice command detected: {keyword} -> {cmd_type}")
+                    logger.info(
+                        f"[Whisper] Voice command detected: {keyword} -> {cmd_type}"
+                    )
                     break
 
             return TranscriptionResult(
@@ -540,11 +559,13 @@ class WhisperTranscriber:
                 segments = []
                 full_text = []
                 for segment in segments_iter:
-                    segments.append({
-                        "start": segment.start,
-                        "end": segment.end,
-                        "text": segment.text.strip(),
-                    })
+                    segments.append(
+                        {
+                            "start": segment.start,
+                            "end": segment.end,
+                            "text": segment.text.strip(),
+                        }
+                    )
                     full_text.append(segment.text.strip())
                 duration = info.duration if hasattr(info, "duration") else 0.0
                 return segments, full_text, duration
@@ -562,7 +583,9 @@ class WhisperTranscriber:
                 if keyword in text:
                     is_command = True
                     command_type = cmd_type
-                    logger.info(f"[Whisper] Voice command detected in file: {keyword} -> {cmd_type}")
+                    logger.info(
+                        f"[Whisper] Voice command detected in file: {keyword} -> {cmd_type}"
+                    )
                     break
 
             return TranscriptionResult(
@@ -589,7 +612,9 @@ class WhisperTranscriber:
             "compute_type": self.compute_type,
             "model_path": str(self.model_path),
             "buffer_samples": self._buffer_samples,
-            "buffer_duration": self._buffer_samples / self.sample_rate if self._buffer_samples else 0,
+            "buffer_duration": self._buffer_samples / self.sample_rate
+            if self._buffer_samples
+            else 0,
         }
 
     def unload(self):
