@@ -17,15 +17,7 @@ import os
 # when using subprocess (FFmpeg) alongside gRPC (Gemini API)
 os.environ["GRPC_ENABLE_FORK_SUPPORT"] = "0"
 
-from fastapi import (
-    FastAPI,
-    File,
-    UploadFile,
-    HTTPException,
-    Query,
-    WebSocket,
-    WebSocketDisconnect,
-)
+from fastapi import FastAPI, File, UploadFile, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from pydantic import BaseModel
@@ -47,28 +39,26 @@ load_dotenv()
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
-
 
 # Filter to suppress noisy polling endpoint logs
 class PollingEndpointFilter(logging.Filter):
     """Filter out frequent polling endpoint logs to reduce noise."""
-
     SUPPRESSED_PATHS = [
         "/api/detections/",  # WebRTC overlay polling
         "/detection/stats",  # Stats polling
-        "/health",  # Health checks
+        "/health",           # Health checks
     ]
 
     def filter(self, record: logging.LogRecord) -> bool:
         message = record.getMessage()
         for path in self.SUPPRESSED_PATHS:
-            if path in message and 'HTTP/1.1" 200' in message:
+            if path in message and "HTTP/1.1\" 200" in message:
                 return False  # Suppress successful polling requests
         return True
-
 
 # Apply filter to uvicorn access logger
 logging.getLogger("uvicorn.access").addFilter(PollingEndpointFilter())
@@ -77,30 +67,15 @@ logging.getLogger("uvicorn.access").addFilter(PollingEndpointFilter())
 from services.reid import ReIDTracker
 from services.gemini import GeminiAnalyzer
 from services.tts_service import TTSService
-from services.streaming import (
-    get_rtsp_manager,
-    RTSPConfig,
-    get_ffmpeg_manager,
-    FFmpegConfig,
-)
-from services.streaming import (
-    get_gstreamer_manager,
-    GStreamerConfig,
-    is_gstreamer_available,
-)
+from services.streaming import get_rtsp_manager, RTSPConfig, get_ffmpeg_manager, FFmpegConfig
+from services.streaming import get_gstreamer_manager, GStreamerConfig, is_gstreamer_available
 from services.detection_loop import init_detection_loop, get_detection_loop, LoopConfig
 from services.detection import get_frame_buffer_manager, get_stable_tracker
 from services.radio import (
-    init_radio_service,
-    get_radio_service,
-    stop_radio_service,
-    init_transcribers,
-    get_gemini_transcriber,
-    get_whisper_transcriber,
-    get_whisper_semaphore,
-    get_transcriber_stats,
-    record_transcription_stats,
-    record_whisper_queue_wait,
+    init_radio_service, get_radio_service, stop_radio_service,
+    init_transcribers, get_gemini_transcriber, get_whisper_transcriber,
+    get_whisper_semaphore, get_transcriber_stats, record_transcription_stats,
+    record_whisper_queue_wait
 )
 from services.radio.radio_transmit import router as radio_transmit_router
 from services.recording import init_recording_manager, get_recording_manager
@@ -116,7 +91,7 @@ logger.info(f"RTSP Backend: {RTSP_BACKEND}")
 app = FastAPI(
     title="HAMAL-AI Detection Service - Unified",
     description="AI-powered security detection with ReID tracking and Gemini analysis",
-    version="2.0.0",
+    version="2.0.0"
 )
 
 # CORS middleware
@@ -130,7 +105,6 @@ app.add_middleware(
 
 # Include routers
 app.include_router(radio_transmit_router, prefix="/api")
-
 
 # Device detection
 def get_device():
@@ -148,13 +122,10 @@ def get_device():
         logger.info("💻 Using CPU")
         return "cpu"
 
-
 DEVICE = get_device()
 
 # Model paths
-MODEL_PATH = os.getenv(
-    "YOLO_MODEL", "yolo12m.pt"
-)  # Upgraded from yolo12n for better accuracy
+MODEL_PATH = os.getenv("YOLO_MODEL", "yolo12m.pt")  # Upgraded from yolo12n for better accuracy
 CONFIDENCE = float(os.getenv("YOLO_CONFIDENCE", "0.35"))
 
 logger.info("=" * 60)
@@ -170,11 +141,9 @@ TARGET_FPS = int(os.getenv("TARGET_FPS", "15"))
 DETECTION_FPS = int(os.getenv("DETECTION_FPS", str(TARGET_FPS)))
 STREAM_FPS = int(os.getenv("STREAM_FPS", str(TARGET_FPS)))
 
-
 def get_target_fps() -> int:
     """Get the target FPS for RTSP readers and cameras."""
     return TARGET_FPS
-
 
 def validate_fps(camera_fps: int, target_fps: int) -> int:
     """Ensure target FPS doesn't exceed camera FPS."""
@@ -185,7 +154,6 @@ def validate_fps(camera_fps: int, target_fps: int) -> int:
         )
         return camera_fps
     return target_fps
-
 
 logger.info("=" * 60)
 logger.info("FPS Configuration")
@@ -227,49 +195,41 @@ def load_yolo_model_optimized(model_name: str, device: str = "cpu") -> Optional[
         model_name = model_name[7:]
 
     # Get base name without extension
-    base_name = model_name.rsplit(".", 1)[0] if "." in model_name else model_name
+    base_name = model_name.rsplit('.', 1)[0] if '.' in model_name else model_name
 
     # Build search paths based on device - prioritize optimized formats
     search_paths = []
 
     if device == "cuda":
         # CUDA: TensorRT > ONNX > PyTorch
-        search_paths.extend(
-            [
-                os.path.join(MODELS_DIR, f"{base_name}.engine"),
-                f"{base_name}.engine",
-                os.path.join(MODELS_DIR, f"{base_name}.onnx"),
-                f"{base_name}.onnx",
-            ]
-        )
+        search_paths.extend([
+            os.path.join(MODELS_DIR, f"{base_name}.engine"),
+            f"{base_name}.engine",
+            os.path.join(MODELS_DIR, f"{base_name}.onnx"),
+            f"{base_name}.onnx",
+        ])
     else:
         # CPU/MPS: ONNX > PyTorch (TensorRT doesn't work on CPU)
-        search_paths.extend(
-            [
-                os.path.join(MODELS_DIR, f"{base_name}.onnx"),
-                f"{base_name}.onnx",
-            ]
-        )
+        search_paths.extend([
+            os.path.join(MODELS_DIR, f"{base_name}.onnx"),
+            f"{base_name}.onnx",
+        ])
 
     # Always add PyTorch paths as fallback
-    search_paths.extend(
-        [
-            os.path.join(MODELS_DIR, model_name),
-            model_name,
-            f"models/{model_name}",
-        ]
-    )
+    search_paths.extend([
+        os.path.join(MODELS_DIR, model_name),
+        model_name,
+        f"models/{model_name}",
+    ])
 
     # Try each path
     for model_path in search_paths:
         if os.path.exists(model_path):
             try:
-                is_tensorrt = model_path.endswith(".engine")
-                is_onnx = model_path.endswith(".onnx")
+                is_tensorrt = model_path.endswith('.engine')
+                is_onnx = model_path.endswith('.onnx')
 
-                format_name = (
-                    "TensorRT" if is_tensorrt else ("ONNX" if is_onnx else "PyTorch")
-                )
+                format_name = "TensorRT" if is_tensorrt else ("ONNX" if is_onnx else "PyTorch")
                 logger.info(f"Loading YOLO model from: {model_path} ({format_name})")
 
                 model = YOLO(model_path)
@@ -279,26 +239,18 @@ def load_yolo_model_optimized(model_name: str, device: str = "cpu") -> Optional[
                     model.to(device)
 
                 if is_tensorrt:
-                    logger.info(
-                        f"✅ YOLO {model_name} loaded with TensorRT (2-5x faster on GPU)"
-                    )
+                    logger.info(f"✅ YOLO {model_name} loaded with TensorRT (2-5x faster on GPU)")
                 elif is_onnx:
-                    logger.info(
-                        f"✅ YOLO {model_name} loaded with ONNX Runtime (20-40% faster on CPU)"
-                    )
+                    logger.info(f"✅ YOLO {model_name} loaded with ONNX Runtime (20-40% faster on CPU)")
                 else:
                     logger.info(f"✅ YOLO {model_name} loaded on {device}")
                     # Suggest optimization based on device
                     if device == "cuda":
-                        logger.info(
-                            f"💡 TIP: Export to TensorRT for 2-5x speedup: "
-                            f"yolo export model={model_path} format=engine device=0"
-                        )
+                        logger.info(f"💡 TIP: Export to TensorRT for 2-5x speedup: "
+                                  f"yolo export model={model_path} format=engine device=0")
                     else:
-                        logger.info(
-                            f"💡 TIP: Export to ONNX for 20-40% speedup on CPU: "
-                            f"yolo export model={model_path} format=onnx"
-                        )
+                        logger.info(f"💡 TIP: Export to ONNX for 20-40% speedup on CPU: "
+                                  f"yolo export model={model_path} format=onnx")
 
                 return model
             except Exception as e:
@@ -330,22 +282,18 @@ tts = TTSService()
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:3000")
 
 # Vehicle classes for YOLO
-VEHICLE_CLASSES = ["car", "truck", "bus", "motorcycle", "bicycle"]
-PERSON_CLASS = "person"
-
+VEHICLE_CLASSES = ['car', 'truck', 'bus', 'motorcycle', 'bicycle']
+PERSON_CLASS = 'person'
 
 # RTSP Stream Manager - stores active streams
 class RTSPStreamManager:
     def __init__(self):
-        self.streams: Dict[
-            str, Dict
-        ] = {}  # cameraId -> {cap, thread, frame, running, url}
+        self.streams: Dict[str, Dict] = {}  # cameraId -> {cap, thread, frame, running, url}
         self.lock = threading.Lock()
 
     def get_camera_config(self, camera_id: str) -> Optional[Dict]:
         """Fetch camera config from backend"""
         import httpx
-
         try:
             response = httpx.get(f"{BACKEND_URL}/api/cameras/{camera_id}", timeout=5.0)
             if response.status_code == 200:
@@ -354,9 +302,7 @@ class RTSPStreamManager:
             logger.error(f"Failed to get camera config: {e}")
         return None
 
-    def start_stream(
-        self, camera_id: str, rtsp_url: str, username: str = None, password: str = None
-    ) -> bool:
+    def start_stream(self, camera_id: str, rtsp_url: str, username: str = None, password: str = None) -> bool:
         """Start capturing from RTSP stream.
 
         NOTE: This is the legacy OpenCV-based reader. The FFmpeg-based rtsp_manager
@@ -369,16 +315,14 @@ class RTSPStreamManager:
                 return True  # Already running
 
         # Check if this is a local file path (not a network URL)
-        is_local_file = not rtsp_url.startswith(
-            ("rtsp://", "http://", "https://", "rtmp://", "udp://")
-        )
+        is_local_file = not rtsp_url.startswith(('rtsp://', 'http://', 'https://', 'rtmp://', 'udp://'))
         if is_local_file:
             # Local file path - resolve relative to Ronai-Vision root
             # Path: .../Ronai-Vision/hamal-ai/ai-service/main.py
             # We need to go up 2 levels to reach Ronai-Vision
             script_dir = Path(__file__).parent  # .../hamal-ai/ai-service
             project_root = script_dir.parent.parent  # Ronai-Vision root
-            clean_path = rtsp_url.lstrip("/")
+            clean_path = rtsp_url.lstrip('/')
             video_path = project_root / clean_path
 
             if not video_path.exists() and Path(rtsp_url).is_absolute():
@@ -444,13 +388,11 @@ class RTSPStreamManager:
                 "last_update": time.time(),
                 "error": None,
                 "reconnect_count": 0,
-                "is_local_file": is_local_file,  # Track if this is a local video file
+                "is_local_file": is_local_file  # Track if this is a local video file
             }
             self.streams[camera_id] = stream_data
 
-        thread = threading.Thread(
-            target=self._capture_loop, args=(camera_id,), daemon=True
-        )
+        thread = threading.Thread(target=self._capture_loop, args=(camera_id,), daemon=True)
         with self.lock:
             self.streams[camera_id]["thread"] = thread
         thread.start()
@@ -516,30 +458,22 @@ class RTSPStreamManager:
                 if consecutive_errors == 1:
                     logger.debug(f"Frame read failed for {camera_id}")
                 elif consecutive_errors % 25 == 0:
-                    logger.warning(
-                        f"Frame read failures for {camera_id}: {consecutive_errors}/{max_consecutive_errors}"
-                    )
+                    logger.warning(f"Frame read failures for {camera_id}: {consecutive_errors}/{max_consecutive_errors}")
 
                 if consecutive_errors >= max_consecutive_errors:
                     if reconnect_attempts >= max_reconnect_attempts:
-                        logger.error(
-                            f"Max reconnect attempts reached for {camera_id}, giving up"
-                        )
+                        logger.error(f"Max reconnect attempts reached for {camera_id}, giving up")
                         with self.lock:
                             if camera_id in self.streams:
-                                self.streams[camera_id]["error"] = (
-                                    "Max reconnects exceeded"
-                                )
+                                self.streams[camera_id]["error"] = "Max reconnects exceeded"
                                 self.streams[camera_id]["running"] = False
                         break
 
                     # Exponential backoff
-                    delay = min(base_reconnect_delay * (2**reconnect_attempts), 30)
+                    delay = min(base_reconnect_delay * (2 ** reconnect_attempts), 30)
                     reconnect_attempts += 1
 
-                    logger.warning(
-                        f"Reconnecting {camera_id} (attempt {reconnect_attempts}/{max_reconnect_attempts}, delay {delay:.1f}s)"
-                    )
+                    logger.warning(f"Reconnecting {camera_id} (attempt {reconnect_attempts}/{max_reconnect_attempts}, delay {delay:.1f}s)")
                     cap.release()
                     time.sleep(delay)
 
@@ -562,12 +496,8 @@ class RTSPStreamManager:
                                 if camera_id in self.streams:
                                     self.streams[camera_id]["cap"] = new_cap
                                     self.streams[camera_id]["frame"] = test_frame
-                                    self.streams[camera_id]["reconnect_count"] = (
-                                        self.streams[camera_id].get(
-                                            "reconnect_count", 0
-                                        )
-                                        + 1
-                                    )
+                                    self.streams[camera_id]["reconnect_count"] = \
+                                        self.streams[camera_id].get("reconnect_count", 0) + 1
                             cap = new_cap
                             consecutive_errors = 0
                             logger.info(f"✅ Reconnected to {camera_id}")
@@ -619,10 +549,9 @@ class RTSPStreamManager:
                     "last_update": stream.get("last_update"),
                     "error": stream.get("error"),
                     "reconnect_count": stream.get("reconnect_count", 0),
-                    "has_frame": stream.get("frame") is not None,
+                    "has_frame": stream.get("frame") is not None
                 }
         return None
-
 
 # Global stream manager
 stream_manager = RTSPStreamManager()
@@ -639,7 +568,7 @@ async def health():
         "tts_engine": tts.get_engine_info() if tts.is_configured() else None,
         "weapon_detector": weapon_detector is not None,
         "tracker_stats": tracker.get_stats(),
-        "active_streams": stream_manager.get_active_streams(),
+        "active_streams": stream_manager.get_active_streams()
     }
 
 
@@ -677,15 +606,13 @@ async def generate_mjpeg_frames(camera_id: str, fps: int = 15):
         frame = rtsp_manager.get_frame(camera_id)
         if frame is not None:
             # Encode frame as JPEG (lower quality for reduced latency)
-            ret, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
+            ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
             if ret:
                 frame_count += 1
                 if frame_count % 100 == 0:
                     logger.debug(f"Streamed {frame_count} frames for {camera_id}")
-                yield (
-                    b"--frame\r\n"
-                    b"Content-Type: image/jpeg\r\n\r\n" + jpeg.tobytes() + b"\r\n"
-                )
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
         else:
             await asyncio.sleep(0.01)  # Reduced from 0.1 for lower latency
 
@@ -720,26 +647,19 @@ async def generate_ffmpeg_mjpeg_frames(camera_id: str, rtsp_url: str, fps: int =
         frame, frame_time = stream.get_frame()
         if frame is not None:
             # Encode frame as JPEG (lower quality for reduced latency)
-            ret, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
+            ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
             if ret:
                 frame_count += 1
                 if frame_count % 100 == 0:
                     logger.debug(f"FFmpeg stream: {frame_count} frames for {camera_id}")
-                yield (
-                    b"--frame\r\n"
-                    b"Content-Type: image/jpeg\r\n\r\n" + jpeg.tobytes() + b"\r\n"
-                )
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
         else:
             await asyncio.sleep(0.01)  # Reduced from 0.1 for lower latency
 
 
-async def generate_mjpeg_frames_buffered(
-    camera_id: str,
-    rtsp_url: str,
-    fps: int = 15,
-    username: str = None,
-    password: str = None,
-):
+async def generate_mjpeg_frames_buffered(camera_id: str, rtsp_url: str, fps: int = 15,
+                                         username: str = None, password: str = None):
     """MJPEG frames using FrameBuffer for smoother streaming."""
     logger.info(f"Starting buffered MJPEG stream for {camera_id} at {fps} FPS")
 
@@ -750,7 +670,7 @@ async def generate_mjpeg_frames_buffered(
         rtsp_url=rtsp_url,
         username=username,
         password=password,
-        target_fps=fps,
+        target_fps=fps
     )
 
     frame_count = 0
@@ -771,17 +691,13 @@ async def generate_mjpeg_frames_buffered(
         frame = buffer.get_frame()
         if frame is not None:
             # Encode frame as JPEG (lower quality for reduced latency)
-            ret, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
+            ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
             if ret:
                 frame_count += 1
                 if frame_count % 100 == 0:
-                    logger.debug(
-                        f"Buffered stream: {frame_count} frames for {camera_id}"
-                    )
-                yield (
-                    b"--frame\r\n"
-                    b"Content-Type: image/jpeg\r\n\r\n" + jpeg.tobytes() + b"\r\n"
-                )
+                    logger.debug(f"Buffered stream: {frame_count} frames for {camera_id}")
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
         else:
             await asyncio.sleep(0.01)  # Reduced from 0.1 for lower latency
 
@@ -808,12 +724,9 @@ async def stream_mjpeg(camera_id: str, fps: int = 15):
     if camera_id not in rtsp_manager.get_active_cameras():
         # Camera not loaded - try to start it
         import httpx
-
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{BACKEND_URL}/api/cameras/{camera_id}", timeout=5.0
-                )
+                response = await client.get(f"{BACKEND_URL}/api/cameras/{camera_id}", timeout=5.0)
                 if response.status_code != 200:
                     raise HTTPException(404, f"Camera {camera_id} not found")
 
@@ -823,9 +736,7 @@ async def stream_mjpeg(camera_id: str, fps: int = 15):
                     raise HTTPException(400, f"Camera {camera_id} has no RTSP URL")
 
                 # Start the FFmpeg reader
-                config = RTSPConfig(
-                    width=1280, height=720, fps=TARGET_FPS, tcp_transport=True
-                )
+                config = RTSPConfig(width=1280, height=720, fps=TARGET_FPS, tcp_transport=True)
                 rtsp_manager.add_camera(camera_id, rtsp_url, config)
 
                 # Wait for connection
@@ -846,7 +757,7 @@ async def stream_mjpeg(camera_id: str, fps: int = 15):
     logger.info(f"Starting MJPEG response for {camera_id}")
     return StreamingResponse(
         generate_mjpeg_frames(camera_id, fps),
-        media_type="multipart/x-mixed-replace; boundary=frame",
+        media_type="multipart/x-mixed-replace; boundary=frame"
     )
 
 
@@ -877,9 +788,9 @@ async def stream_mjpeg_buffered(camera_id: str, fps: int = 15):
             rtsp_url=rtsp_url,
             fps=fps,
             username=camera_config.get("username"),
-            password=camera_config.get("password"),
+            password=camera_config.get("password")
         ),
-        media_type="multipart/x-mixed-replace; boundary=frame",
+        media_type="multipart/x-mixed-replace; boundary=frame"
     )
 
 
@@ -917,18 +828,16 @@ async def stream_ffmpeg_mjpeg(camera_id: str, fps: int = 15):
 
     return StreamingResponse(
         generate_ffmpeg_mjpeg_frames(camera_id, rtsp_url, fps),
-        media_type="multipart/x-mixed-replace; boundary=frame",
+        media_type="multipart/x-mixed-replace; boundary=frame"
     )
 
 
 @app.post("/api/stream/start/{camera_id}")
 async def start_stream(
     camera_id: str,
-    rtsp_url: str = Query(
-        None, description="RTSP URL (optional, fetches from DB if not provided)"
-    ),
+    rtsp_url: str = Query(None, description="RTSP URL (optional, fetches from DB if not provided)"),
     username: str = Query(None),
-    password: str = Query(None),
+    password: str = Query(None)
 ):
     """Manually start an RTSP stream"""
     if not rtsp_url:
@@ -961,7 +870,7 @@ async def stream_status():
     """Get status of all active streams"""
     return {
         "active_streams": stream_manager.get_active_streams(),
-        "count": len(stream_manager.get_active_streams()),
+        "count": len(stream_manager.get_active_streams())
     }
 
 
@@ -977,7 +886,7 @@ async def get_snapshot(camera_id: str):
                 camera_id,
                 camera_config["rtspUrl"],
                 camera_config.get("username"),
-                camera_config.get("password"),
+                camera_config.get("password")
             )
             await asyncio.sleep(1)  # Wait for first frame
             frame = stream_manager.get_frame(camera_id)
@@ -985,11 +894,14 @@ async def get_snapshot(camera_id: str):
     if frame is None:
         raise HTTPException(503, f"No frame available for {camera_id}")
 
-    ret, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
+    ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
     if not ret:
         raise HTTPException(500, "Failed to encode frame")
 
-    return StreamingResponse(iter([jpeg.tobytes()]), media_type="image/jpeg")
+    return StreamingResponse(
+        iter([jpeg.tobytes()]),
+        media_type="image/jpeg"
+    )
 
 
 @app.get("/api/stream/sse/{camera_id}")
@@ -1025,7 +937,7 @@ async def stream_sse(camera_id: str, fps: Optional[int] = None):
             camera_id,
             rtsp_url,
             camera_config.get("username"),
-            camera_config.get("password"),
+            camera_config.get("password")
         )
         if not success:
             raise HTTPException(503, f"Failed to connect to camera {camera_id}")
@@ -1044,35 +956,31 @@ async def stream_sse(camera_id: str, fps: Optional[int] = None):
 
                 # Rate limit
                 if current_time - last_frame_time < frame_interval:
-                    await asyncio.sleep(
-                        frame_interval - (current_time - last_frame_time)
-                    )
+                    await asyncio.sleep(frame_interval - (current_time - last_frame_time))
                     continue
 
                 frame = stream_manager.get_frame(camera_id)
 
                 if frame is not None:
                     # Encode as JPEG (lower quality for reduced latency)
-                    ret, jpeg = cv2.imencode(
-                        ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 65]
-                    )
+                    ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
                     if ret:
                         # Convert to base64
-                        frame_b64 = base64.b64encode(jpeg.tobytes()).decode("utf-8")
+                        frame_b64 = base64.b64encode(jpeg.tobytes()).decode('utf-8')
                         # Send as SSE event
-                        yield f'data: {{"frame": "{frame_b64}"}}\n\n'
+                        yield f"data: {{\"frame\": \"{frame_b64}\"}}\n\n"
                         last_frame_time = time.time()
                         error_count = 0
                 else:
                     error_count += 1
                     if error_count >= max_errors:
-                        yield f'data: {{"error": "No frames available"}}\n\n'
+                        yield f"data: {{\"error\": \"No frames available\"}}\n\n"
                         break
                     await asyncio.sleep(0.1)  # Reduced from 0.5 for lower latency
 
             except Exception as e:
                 logger.error(f"SSE error for {camera_id}: {e}")
-                yield f'data: {{"error": "{str(e)}"}}\n\n'
+                yield f"data: {{\"error\": \"{str(e)}\"}}\n\n"
                 break
 
     return StreamingResponse(
@@ -1081,8 +989,8 @@ async def stream_sse(camera_id: str, fps: Optional[int] = None):
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+            "X-Accel-Buffering": "no"
+        }
     )
 
 
@@ -1090,7 +998,7 @@ async def stream_sse(camera_id: str, fps: Optional[int] = None):
 async def detect_frame(
     file: UploadFile = File(...),
     camera_id: str = Query("unknown", description="Camera identifier"),
-    analyze_new: bool = Query(True, description="Analyze new objects with Gemini"),
+    analyze_new: bool = Query(True, description="Analyze new objects with Gemini")
 ):
     """
     Main detection pipeline:
@@ -1131,13 +1039,11 @@ async def detect_frame(
     if weapon_detector:
         weapon_results = weapon_detector(frame, verbose=False, conf=0.5)[0]
         for box in weapon_results.boxes:
-            weapons.append(
-                {
-                    "type": weapon_results.names[int(box.cls[0])],
-                    "bbox": box.xyxy[0].tolist(),
-                    "confidence": float(box.conf[0]),
-                }
-            )
+            weapons.append({
+                "type": weapon_results.names[int(box.cls[0])],
+                "bbox": box.xyxy[0].tolist(),
+                "confidence": float(box.conf[0])
+            })
 
     # Track vehicles with ReID
     tracked_vehicles = tracker.update_vehicles(vehicle_dets, frame)
@@ -1154,52 +1060,58 @@ async def detect_frame(
             track_id = vehicle["track_id"]
             if not tracker.has_been_analyzed(track_id):
                 analysis = await gemini.analyze_vehicle(frame, vehicle["bbox"])
-                tracker.save_metadata(
-                    track_id,
-                    {"type": "vehicle", "analysis": analysis, "camera_id": camera_id},
-                )
+                tracker.save_metadata(track_id, {
+                    "type": "vehicle",
+                    "analysis": analysis,
+                    "camera_id": camera_id
+                })
                 tracker.add_appearance(track_id, camera_id, vehicle["bbox"])
 
-                new_analyses.append(
-                    {"track_id": track_id, "type": "vehicle", "analysis": analysis}
-                )
+                new_analyses.append({
+                    "track_id": track_id,
+                    "type": "vehicle",
+                    "analysis": analysis
+                })
 
                 # Send event to backend
-                await send_event(
-                    {
-                        "type": "detection",
-                        "severity": "info",
-                        "title": f"רכב זוהה - {analysis.get('color', '')} {analysis.get('manufacturer', '')}",
-                        "source": camera_id,
-                        "cameraId": camera_id,
-                        "details": {"vehicle": analysis, "track_id": track_id},
+                await send_event({
+                    "type": "detection",
+                    "severity": "info",
+                    "title": f"רכב זוהה - {analysis.get('color', '')} {analysis.get('manufacturer', '')}",
+                    "source": camera_id,
+                    "cameraId": camera_id,
+                    "details": {
+                        "vehicle": analysis,
+                        "track_id": track_id
                     }
-                )
+                })
 
         # Analyze new persons
         for person in tracked_persons:
             track_id = person["track_id"]
             if not tracker.has_been_analyzed(track_id):
                 analysis = await gemini.analyze_person(frame, person["bbox"])
-                tracker.save_metadata(
-                    track_id,
-                    {"type": "person", "analysis": analysis, "camera_id": camera_id},
-                )
+                tracker.save_metadata(track_id, {
+                    "type": "person",
+                    "analysis": analysis,
+                    "camera_id": camera_id
+                })
                 tracker.add_appearance(track_id, camera_id, person["bbox"])
 
-                new_analyses.append(
-                    {"track_id": track_id, "type": "person", "analysis": analysis}
-                )
+                new_analyses.append({
+                    "track_id": track_id,
+                    "type": "person",
+                    "analysis": analysis
+                })
 
                 # Check if armed - trigger emergency (only if legacy mode enabled)
                 # NOTE: Modern detection uses rule engine which controls when/if to trigger
-                if (
-                    analysis.get("armed")
-                    and os.environ.get("LEGACY_ALERTS_ENABLED", "false").lower()
-                    == "true"
-                ):
+                if analysis.get("armed") and os.environ.get("LEGACY_ALERTS_ENABLED", "false").lower() == "true":
                     await trigger_emergency(
-                        camera_id, analysis, tracked_persons, tracked_vehicles
+                        camera_id,
+                        analysis,
+                        tracked_persons,
+                        tracked_vehicles
                     )
 
     # Check if weapons detected near people (even if person already analyzed)
@@ -1212,16 +1124,14 @@ async def detect_frame(
                     # Re-analyze - might be armed now
                     analysis = await gemini.analyze_person(frame, person["bbox"])
                     if analysis.get("armed"):
-                        tracker.save_metadata(
-                            person["track_id"], {"analysis": analysis}
-                        )
+                        tracker.save_metadata(person["track_id"], {"analysis": analysis})
                         # Only trigger if legacy mode enabled
-                        if (
-                            os.environ.get("LEGACY_ALERTS_ENABLED", "false").lower()
-                            == "true"
-                        ):
+                        if os.environ.get("LEGACY_ALERTS_ENABLED", "false").lower() == "true":
                             await trigger_emergency(
-                                camera_id, analysis, tracked_persons, tracked_vehicles
+                                camera_id,
+                                analysis,
+                                tracked_persons,
+                                tracked_vehicles
                             )
 
     return {
@@ -1235,7 +1145,7 @@ async def detect_frame(
             {
                 "track_id": v["track_id"],
                 "bbox": v["bbox"],
-                "metadata": tracker.get_metadata(v["track_id"]),
+                "metadata": tracker.get_metadata(v["track_id"])
             }
             for v in tracked_vehicles
         ],
@@ -1243,18 +1153,18 @@ async def detect_frame(
             {
                 "track_id": p["track_id"],
                 "bbox": p["bbox"],
-                "metadata": tracker.get_metadata(p["track_id"]),
+                "metadata": tracker.get_metadata(p["track_id"])
             }
             for p in tracked_persons
         ],
-        "weapons": weapons,
+        "weapons": weapons
     }
 
 
 @app.post("/analyze-body-cam")
 async def analyze_body_camera(
     file: UploadFile = File(...),
-    camera_id: str = Query("bodycam", description="Body camera identifier"),
+    camera_id: str = Query("bodycam", description="Body camera identifier")
 ):
     """
     Analyze body camera frame to check if threat is neutralized.
@@ -1271,15 +1181,16 @@ async def analyze_body_camera(
 
     if analysis.get("threatNeutralized"):
         # End emergency - send event
-        await send_event(
-            {
-                "type": "simulation",
-                "severity": "info",
-                "title": "חדל - סוף אירוע",
-                "source": camera_id,
-                "details": {"simulation": "threat_neutralized", "analysis": analysis},
+        await send_event({
+            "type": "simulation",
+            "severity": "info",
+            "title": "חדל - סוף אירוע",
+            "source": camera_id,
+            "details": {
+                "simulation": "threat_neutralized",
+                "analysis": analysis
             }
-        )
+        })
 
         # Generate TTS announcement
         if tts.is_configured():
@@ -1302,7 +1213,7 @@ async def analyze_body_camera(
 @app.post("/analyze-scene")
 async def analyze_scene(
     file: UploadFile = File(...),
-    prompt: str = Query(None, description="Custom analysis prompt"),
+    prompt: str = Query(None, description="Custom analysis prompt")
 ):
     """General scene analysis with Gemini"""
     contents = await file.read()
@@ -1338,15 +1249,13 @@ async def verify_vehicle(files: List[UploadFile] = File(...)):
 
     # For now, analyze first frame fully
     # TODO: Implement cross-frame verification
-    result = await gemini.analyze_vehicle(
-        frames[0], [0, 0, frames[0].shape[1], frames[0].shape[0]]
-    )
+    result = await gemini.analyze_vehicle(frames[0], [0, 0, frames[0].shape[1], frames[0].shape[0]])
     return result
 
 
 @app.post("/tts")
 async def text_to_speech(
-    text: str = Query(..., description="Text to convert to speech"),
+    text: str = Query(..., description="Text to convert to speech")
 ):
     """Generate Hebrew TTS audio"""
     if not tts.is_configured():
@@ -1361,7 +1270,6 @@ async def text_to_speech(
 
 class TTSGenerateRequest(BaseModel):
     """Request body for TTS generation"""
-
     text: str
     language: str = "he"
     transmit_radio: bool = True  # Whether to transmit via radio
@@ -1391,36 +1299,32 @@ async def tts_generate(request: TTSGenerateRequest):
             raise HTTPException(500, "Generated audio file not found")
 
         # Read the audio file
-        with open(audio_file, "rb") as f:
+        with open(audio_file, 'rb') as f:
             audio_data = f.read()
 
         # Get sample rate from WAV header if possible
         sample_rate = 24000  # Default for Gemini TTS
-        if audio_file.suffix.lower() == ".wav" and len(audio_data) > 44:
+        if audio_file.suffix.lower() == '.wav' and len(audio_data) > 44:
             import struct
-
             # WAV sample rate is at bytes 24-28
             try:
-                sample_rate = struct.unpack("<I", audio_data[24:28])[0]
+                sample_rate = struct.unpack('<I', audio_data[24:28])[0]
             except:
                 pass
 
-        audio_base64 = base64.b64encode(audio_data).decode("utf-8")
+        audio_base64 = base64.b64encode(audio_data).decode('utf-8')
 
         # Transmit via radio if requested and audio is valid
         radio_transmitted = False
         if request.transmit_radio and len(audio_data) > 100:
             try:
                 from services.radio.radio_transmit import transmit_audio_internal
-
                 radio_result = await transmit_audio_internal(audio_data, "wav", "high")
                 radio_transmitted = radio_result.get("success", False)
                 if radio_transmitted:
                     logger.info(f"TTS transmitted via radio: {request.text[:50]}...")
                 else:
-                    logger.warning(
-                        f"Radio transmission failed: {radio_result.get('error', 'unknown')}"
-                    )
+                    logger.warning(f"Radio transmission failed: {radio_result.get('error', 'unknown')}")
             except ImportError:
                 logger.warning("Radio transmit module not available")
             except Exception as radio_err:
@@ -1432,7 +1336,7 @@ async def tts_generate(request: TTSGenerateRequest):
             "format": "wav",
             "text": request.text,
             "file_path": str(audio_path),
-            "radio_transmitted": radio_transmitted,
+            "radio_transmitted": radio_transmitted
         }
 
     except Exception as e:
@@ -1458,7 +1362,7 @@ async def get_tracker_stats():
 @app.post("/tracker/refresh-analysis/{track_id}")
 async def refresh_analysis(
     track_id: str,
-    camera_id: str = Query(None, description="Camera ID to get current frame from"),
+    camera_id: str = Query(None, description="Camera ID to get current frame from")
 ):
     """
     Refresh Gemini analysis for a tracked object.
@@ -1501,19 +1405,11 @@ async def refresh_analysis(
     if bot_sort:
         obj = bot_sort.get_track(track_id)
         if obj:
-            obj_type = getattr(
-                obj,
-                "object_type",
-                "person"
-                if track_id.startswith("t_") or track_id.startswith("p_")
-                else "vehicle",
-            )
+            obj_type = getattr(obj, 'object_type', 'person' if track_id.startswith('t_') or track_id.startswith('p_') else 'vehicle')
             bbox = obj.bbox
             if not camera_id:
                 camera_id = obj.last_seen_camera
-            logger.info(
-                f"Found track {track_id} in BoT-SORT: type={obj_type}, camera={camera_id}"
-            )
+            logger.info(f"Found track {track_id} in BoT-SORT: type={obj_type}, camera={camera_id}")
 
     # STEP 2: Try StableTracker's get_track method
     if not obj:
@@ -1522,15 +1418,15 @@ async def refresh_analysis(
             obj_type = obj.object_type
             bbox = obj.bbox
             if not camera_id:
-                camera_id = getattr(obj, "camera_id", None)
+                camera_id = getattr(obj, 'camera_id', None)
             logger.info(f"Found track {track_id} in StableTracker: type={obj_type}")
 
     # STEP 3: Try by string track_id matching in vehicle tracks (handles v_12 format)
-    if not obj and track_id.startswith("v_"):
-        obj_type = "vehicle"
+    if not obj and track_id.startswith('v_'):
+        obj_type = 'vehicle'
         # Check BoT-SORT vehicles
         if bot_sort:
-            for track in bot_sort.get_active_tracks("vehicle"):
+            for track in bot_sort.get_active_tracks('vehicle'):
                 if track.track_id == track_id or str(track.track_id) == track_id:
                     obj = track
                     bbox = track.bbox
@@ -1545,18 +1441,16 @@ async def refresh_analysis(
                     obj = vehicle
                     bbox = vehicle.bbox
                     if not camera_id:
-                        camera_id = getattr(vehicle, "camera_id", None)
-                    logger.info(
-                        f"Found vehicle track {track_id} in StableTracker by iteration"
-                    )
+                        camera_id = getattr(vehicle, 'camera_id', None)
+                    logger.info(f"Found vehicle track {track_id} in StableTracker by iteration")
                     break
 
     # STEP 4: Try by string track_id matching in person tracks
-    if not obj and (track_id.startswith("t_") or track_id.startswith("p_")):
-        obj_type = "person"
+    if not obj and (track_id.startswith('t_') or track_id.startswith('p_')):
+        obj_type = 'person'
         # Check BoT-SORT persons
         if bot_sort:
-            for track in bot_sort.get_active_tracks("person"):
+            for track in bot_sort.get_active_tracks('person'):
                 if track.track_id == track_id or str(track.track_id) == track_id:
                     obj = track
                     bbox = track.bbox
@@ -1571,10 +1465,8 @@ async def refresh_analysis(
                     obj = person
                     bbox = person.bbox
                     if not camera_id:
-                        camera_id = getattr(person, "camera_id", None)
-                    logger.info(
-                        f"Found person track {track_id} in StableTracker by iteration"
-                    )
+                        camera_id = getattr(person, 'camera_id', None)
+                    logger.info(f"Found person track {track_id} in StableTracker by iteration")
                     break
 
     # STEP 5: Try numeric GID matching (handles both old and new ID formats)
@@ -1583,41 +1475,41 @@ async def refresh_analysis(
     if not obj:
         # Try persons
         if bot_sort:
-            for track in bot_sort.get_active_tracks("person"):
+            for track in bot_sort.get_active_tracks('person'):
                 # Check old format (t_gid, p_gid)
                 if track.track_id == f"t_{gid}" or track.track_id == f"p_{gid}":
                     obj = track
-                    obj_type = "person"
+                    obj_type = 'person'
                     bbox = track.bbox
                     if not camera_id:
                         camera_id = track.last_seen_camera
                     break
                 # Check new format (p_session_gid) - extract gid from end
-                if isinstance(track.track_id, str) and track.track_id.startswith("p_"):
-                    parts = track.track_id.split("_")
+                if isinstance(track.track_id, str) and track.track_id.startswith('p_'):
+                    parts = track.track_id.split('_')
                     if len(parts) >= 3 and parts[-1] == str(gid):
                         obj = track
-                        obj_type = "person"
+                        obj_type = 'person'
                         bbox = track.bbox
                         if not camera_id:
                             camera_id = track.last_seen_camera
                         break
         if not obj and bot_sort:
-            for track in bot_sort.get_active_tracks("vehicle"):
+            for track in bot_sort.get_active_tracks('vehicle'):
                 # Check old format (v_gid)
                 if track.track_id == f"v_{gid}":
                     obj = track
-                    obj_type = "vehicle"
+                    obj_type = 'vehicle'
                     bbox = track.bbox
                     if not camera_id:
                         camera_id = track.last_seen_camera
                     break
                 # Check new format (v_session_gid) - extract gid from end
-                if isinstance(track.track_id, str) and track.track_id.startswith("v_"):
-                    parts = track.track_id.split("_")
+                if isinstance(track.track_id, str) and track.track_id.startswith('v_'):
+                    parts = track.track_id.split('_')
                     if len(parts) >= 3 and parts[-1] == str(gid):
                         obj = track
-                        obj_type = "vehicle"
+                        obj_type = 'vehicle'
                         bbox = track.bbox
                         if not camera_id:
                             camera_id = track.last_seen_camera
@@ -1625,10 +1517,7 @@ async def refresh_analysis(
 
     if not obj:
         logger.warning(f"Track {track_id} not found in any tracker")
-        raise HTTPException(
-            404,
-            "האובייקט כבר לא נמצא בסצנה. ניתן לרענן ניתוח רק עבור אובייקטים פעילים.",
-        )
+        raise HTTPException(404, "האובייקט כבר לא נמצא בסצנה. ניתן לרענן ניתוח רק עבור אובייקטים פעילים.")
 
     if not camera_id:
         raise HTTPException(400, "Camera ID not provided and object has no camera")
@@ -1655,67 +1544,56 @@ async def refresh_analysis(
         # Get existing analysis to compare cutout quality
         existing_cutout = None
         existing_cutout_quality = 0
-        if hasattr(obj, "metadata") and obj.metadata:
-            existing_analysis = obj.metadata.get("analysis", {})
-            existing_cutout = existing_analysis.get("cutout_image")
+        if hasattr(obj, 'metadata') and obj.metadata:
+            existing_analysis = obj.metadata.get('analysis', {})
+            existing_cutout = existing_analysis.get('cutout_image')
             if existing_cutout:
                 # Calculate quality score for existing cutout (sharpness via Laplacian variance)
                 try:
                     import base64
-
                     existing_bytes = base64.b64decode(existing_cutout)
                     existing_arr = np.frombuffer(existing_bytes, dtype=np.uint8)
                     existing_img = cv2.imdecode(existing_arr, cv2.IMREAD_COLOR)
                     if existing_img is not None:
                         gray = cv2.cvtColor(existing_img, cv2.COLOR_BGR2GRAY)
                         existing_cutout_quality = cv2.Laplacian(gray, cv2.CV_64F).var()
-                        logger.debug(
-                            f"Existing cutout quality: {existing_cutout_quality:.2f}"
-                        )
+                        logger.debug(f"Existing cutout quality: {existing_cutout_quality:.2f}")
                 except Exception as e:
                     logger.debug(f"Could not calculate existing cutout quality: {e}")
 
-        if obj_type == "vehicle":
+        if obj_type == 'vehicle':
             analysis = await gemini.analyze_vehicle(frame, bbox)
         else:
             analysis = await gemini.analyze_person(frame, bbox)
 
         # Compare cutout quality - keep the better one
-        new_cutout = analysis.get("cutout_image")
+        new_cutout = analysis.get('cutout_image')
         if new_cutout and existing_cutout:
             try:
                 import base64
-
                 new_bytes = base64.b64decode(new_cutout)
                 new_arr = np.frombuffer(new_bytes, dtype=np.uint8)
                 new_img = cv2.imdecode(new_arr, cv2.IMREAD_COLOR)
                 if new_img is not None:
                     gray = cv2.cvtColor(new_img, cv2.COLOR_BGR2GRAY)
                     new_cutout_quality = cv2.Laplacian(gray, cv2.CV_64F).var()
-                    logger.info(
-                        f"Cutout quality comparison - Old: {existing_cutout_quality:.2f}, New: {new_cutout_quality:.2f}"
-                    )
+                    logger.info(f"Cutout quality comparison - Old: {existing_cutout_quality:.2f}, New: {new_cutout_quality:.2f}")
 
                     # Keep old cutout if it's sharper (higher Laplacian variance = sharper)
                     if existing_cutout_quality > new_cutout_quality:
-                        logger.info(
-                            f"Keeping original cutout (better quality: {existing_cutout_quality:.2f} > {new_cutout_quality:.2f})"
-                        )
-                        analysis["cutout_image"] = existing_cutout
+                        logger.info(f"Keeping original cutout (better quality: {existing_cutout_quality:.2f} > {new_cutout_quality:.2f})")
+                        analysis['cutout_image'] = existing_cutout
                     else:
-                        logger.info(
-                            f"Using new cutout (better quality: {new_cutout_quality:.2f} > {existing_cutout_quality:.2f})"
-                        )
+                        logger.info(f"Using new cutout (better quality: {new_cutout_quality:.2f} > {existing_cutout_quality:.2f})")
             except Exception as e:
                 logger.debug(f"Could not compare cutout quality: {e}")
 
         # Update tracker metadata
-        if hasattr(obj, "metadata"):
-            obj.metadata["analysis"] = analysis
+        if hasattr(obj, 'metadata'):
+            obj.metadata['analysis'] = analysis
 
         # Sync to backend
         from services import backend_sync
-
         await backend_sync.update_analysis(gid=gid, analysis=analysis)
 
         logger.info(f"Refreshed analysis for {track_id}: {analysis}")
@@ -1725,7 +1603,7 @@ async def refresh_analysis(
             "gid": gid,
             "type": obj_type,
             "analysis": analysis,
-            "camera_id": camera_id,
+            "camera_id": camera_id
         }
 
     except Exception as e:
@@ -1735,7 +1613,7 @@ async def refresh_analysis(
 
 @app.get("/tracker/objects")
 async def get_tracked_objects(
-    obj_type: Optional[str] = Query(None, description="Filter by type: vehicle/person"),
+    obj_type: Optional[str] = Query(None, description="Filter by type: vehicle/person")
 ):
     """Get all tracked objects with their metadata"""
     return tracker.get_all_tracked(obj_type)
@@ -1748,9 +1626,12 @@ async def get_armed_persons():
     return {
         "count": len(armed_ids),
         "persons": [
-            {"track_id": tid, "metadata": tracker.get_metadata(tid)}
+            {
+                "track_id": tid,
+                "metadata": tracker.get_metadata(tid)
+            }
             for tid in armed_ids
-        ],
+        ]
     }
 
 
@@ -1763,7 +1644,7 @@ async def reset_tracker():
 
 @app.delete("/tracker/cleanup")
 async def cleanup_old_tracks(
-    max_age_seconds: int = Query(3600, description="Max age in seconds"),
+    max_age_seconds: int = Query(3600, description="Max age in seconds")
 ):
     """Remove old tracks that haven't been seen"""
     removed = tracker.cleanup_old_tracks(max_age_seconds)
@@ -1774,7 +1655,7 @@ async def trigger_emergency(
     camera_id: str,
     person_analysis: Dict[str, Any],
     all_persons: List[Dict],
-    all_vehicles: List[Dict],
+    all_vehicles: List[Dict]
 ):
     """Trigger full emergency alert"""
     logger.warning(f"🚨 EMERGENCY TRIGGERED from camera {camera_id}")
@@ -1799,20 +1680,18 @@ async def trigger_emergency(
         "armed": True,
         "weapon_type": person_analysis.get("weaponType"),
         "vehicle": vehicle_info,
-        "persons": person_analyses,
+        "persons": person_analyses
     }
 
     # Send critical event to backend
-    await send_event(
-        {
-            "type": "alert",
-            "severity": "critical",
-            "title": "חדירה ודאית - אנשים חמושים",
-            "source": camera_id,
-            "cameraId": camera_id,
-            "details": details,
-        }
-    )
+    await send_event({
+        "type": "alert",
+        "severity": "critical",
+        "title": "חדירה ודאית - אנשים חמושים",
+        "source": camera_id,
+        "cameraId": camera_id,
+        "details": details
+    })
 
     # Generate and store TTS announcement
     if tts.is_configured():
@@ -1831,7 +1710,9 @@ async def send_event(event: Dict[str, Any]):
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                f"{BACKEND_URL}/api/events", json=event, timeout=5.0
+                f"{BACKEND_URL}/api/events",
+                json=event,
+                timeout=5.0
             )
             if response.status_code in (200, 201):
                 logger.info(f"Event sent: {event.get('title', 'Unknown')}")
@@ -1852,9 +1733,9 @@ async def startup_event():
 ║                                                        ║
 ║   Device: {DEVICE.ljust(10)}                                ║
 ║   Model: {MODEL_PATH.ljust(12)}                            ║
-║   Gemini: {"✅" if gemini.is_configured() else "❌"}                                        ║
-║   TTS: {"✅ Gemini (" + tts.voice + ")" if tts.is_configured() else "❌"}                    ║
-║   Weapon Det: {"✅" if weapon_detector else "❌"}                                   ║
+║   Gemini: {'✅' if gemini.is_configured() else '❌'}                                        ║
+║   TTS: {'✅ Gemini (' + tts.voice + ')' if tts.is_configured() else '❌'}                    ║
+║   Weapon Det: {'✅' if weapon_detector else '❌'}                                   ║
 ║   Backend: {BACKEND_URL}                 ║
 ║                                                        ║
 ╚════════════════════════════════════════════════════════╝
@@ -1880,15 +1761,11 @@ async def startup_event():
         weapon_detector=weapon_detector,
         yolo_confidence=yolo_confidence,
         weapon_confidence=weapon_confidence,
-        recovery_confidence=recovery_confidence,
+        recovery_confidence=recovery_confidence
     )
 
-    logger.info(
-        f"Detection loop config: detection_fps={detection_fps}, stream_fps={stream_fps}, reid_recovery={use_reid_recovery}"
-    )
-    logger.info(
-        f"Confidence thresholds: yolo={yolo_confidence}, weapon={weapon_confidence}, recovery={recovery_confidence}"
-    )
+    logger.info(f"Detection loop config: detection_fps={detection_fps}, stream_fps={stream_fps}, reid_recovery={use_reid_recovery}")
+    logger.info(f"Confidence thresholds: yolo={yolo_confidence}, weapon={weapon_confidence}, recovery={recovery_confidence}")
     detection_loop = init_detection_loop(yolo, tracker, gemini, loop_config)
 
     # Start detection loop
@@ -1909,35 +1786,23 @@ async def startup_event():
     logger.info(f"📹 Recording manager initialized, output: {recordings_dir}")
 
     # Initialize global transcribers BEFORE radio service (so model is pre-loaded)
-    whisper_model_path = os.getenv(
-        "WHISPER_MODEL_PATH", "models/whisper-large-v3-turbo-ct2"
-    )
-    save_transcription_audio = (
-        os.getenv("SAVE_TRANSCRIPTION_AUDIO", "false").lower() == "true"
-    )
+    whisper_model_path = os.getenv("WHISPER_MODEL_PATH", "models/whisper-large-v3-hebrew-ct2")
+    save_transcription_audio = os.getenv("SAVE_TRANSCRIPTION_AUDIO", "false").lower() == "true"
     init_transcribers(
         whisper_model_path=whisper_model_path,
         save_audio=save_transcription_audio,
-        preload_whisper=True,  # Pre-load model at startup
+        preload_whisper=True  # Pre-load model at startup
     )
 
     # Start radio service for RTP audio transcription via EC2 relay
     ec2_host = os.getenv("EC2_RTP_HOST")
     ec2_port = int(os.getenv("EC2_RTP_PORT", "5005"))
-    transcription_chunk_duration = float(
-        os.getenv("TRANSCRIPTION_CHUNK_DURATION", "8.0")
-    )
-    transcription_silence_threshold = float(
-        os.getenv("TRANSCRIPTION_SILENCE_THRESHOLD", "500.0")
-    )
-    transcription_silence_duration = float(
-        os.getenv("TRANSCRIPTION_SILENCE_DURATION", "1.5")
-    )
+    transcription_chunk_duration = float(os.getenv("TRANSCRIPTION_CHUNK_DURATION", "8.0"))
+    transcription_silence_threshold = float(os.getenv("TRANSCRIPTION_SILENCE_THRESHOLD", "500.0"))
+    transcription_silence_duration = float(os.getenv("TRANSCRIPTION_SILENCE_DURATION", "1.5"))
     transcription_min_duration = float(os.getenv("TRANSCRIPTION_MIN_DURATION", "1.5"))
     transcription_idle_timeout = float(os.getenv("TRANSCRIPTION_IDLE_TIMEOUT", "2.0"))
-    save_transcription_audio = (
-        os.getenv("SAVE_TRANSCRIPTION_AUDIO", "true").lower() == "true"
-    )
+    save_transcription_audio = os.getenv("SAVE_TRANSCRIPTION_AUDIO", "true").lower() == "true"
     use_vad = os.getenv("USE_VAD", "false").lower() == "true"
 
     if ec2_host:
@@ -1953,7 +1818,7 @@ async def startup_event():
                 min_duration=transcription_min_duration,
                 idle_timeout=transcription_idle_timeout,
                 save_audio=save_transcription_audio,
-                use_vad=use_vad,
+                use_vad=use_vad
             )
             logger.info(
                 f"📻 Radio service started - EC2 relay: {ec2_host}:{ec2_port}, "
@@ -1977,7 +1842,7 @@ async def update_camera_status(camera_id: str, status: str, error_msg: str = Non
             await client.patch(
                 f"{BACKEND_URL}/api/cameras/{camera_id}/status",
                 json=payload,
-                timeout=5.0,
+                timeout=5.0
             )
             logger.debug(f"Updated camera {camera_id} status to {status}")
     except Exception as e:
@@ -2005,20 +1870,17 @@ async def auto_load_cameras():
             detection_loop = get_detection_loop()
 
             # Ensure the frame callback is registered
-            if (
-                detection_loop
-                and detection_loop.on_frame not in rtsp_manager._frame_callbacks
-            ):
+            if detection_loop and detection_loop.on_frame not in rtsp_manager._frame_callbacks:
                 rtsp_manager.add_frame_callback(detection_loop.on_frame)
                 logger.info(f"Registered detection loop frame callback")
 
             for camera in cameras:
-                rtsp_url = camera.get("rtspUrl")
+                rtsp_url = camera.get('rtspUrl')
                 if not rtsp_url:
                     continue
 
-                camera_id = camera.get("cameraId") or str(camera.get("_id"))
-                ai_enabled = camera.get("aiEnabled", True)
+                camera_id = camera.get('cameraId') or str(camera.get('_id'))
+                ai_enabled = camera.get('aiEnabled', True)
 
                 if not ai_enabled:
                     logger.info(f"Skipping camera {camera_id} (AI disabled)")
@@ -2030,7 +1892,10 @@ async def auto_load_cameras():
                 await update_camera_status(camera_id, "connecting")
 
                 config = RTSPConfig(
-                    width=1280, height=720, fps=TARGET_FPS, tcp_transport=True
+                    width=1280,
+                    height=720,
+                    fps=TARGET_FPS,
+                    tcp_transport=True
                 )
 
                 try:
@@ -2043,9 +1908,7 @@ async def auto_load_cameras():
                         await update_camera_status(camera_id, "online")
                         logger.info(f"✅ Camera {camera_id} online")
                     else:
-                        await update_camera_status(
-                            camera_id, "error", "No frames received"
-                        )
+                        await update_camera_status(camera_id, "error", "No frames received")
                         logger.warning(f"⚠️ Camera {camera_id} - no frames yet")
                 except Exception as e:
                     await update_camera_status(camera_id, "error", str(e))
@@ -2087,7 +1950,6 @@ async def shutdown_event():
 
 # ============== DETECTION LOOP ENDPOINTS ==============
 
-
 @app.get("/detection/stats")
 async def detection_stats():
     """Get detection loop statistics."""
@@ -2099,7 +1961,7 @@ async def detection_stats():
 
     return {
         "detection_loop": detection_loop.get_stats(),
-        "rtsp_readers": rtsp_manager.get_all_stats(),
+        "rtsp_readers": rtsp_manager.get_all_stats()
     }
 
 
@@ -2119,19 +1981,14 @@ async def gemini_debug_status():
 
     if detection_loop:
         # Get analysis buffer stats
-        if (
-            hasattr(detection_loop, "analysis_buffer")
-            and detection_loop.analysis_buffer
-        ):
+        if hasattr(detection_loop, 'analysis_buffer') and detection_loop.analysis_buffer:
             result["analysis_buffer"] = detection_loop.analysis_buffer.get_stats()
         else:
             result["analysis_buffer"] = "not_initialized"
 
         # Check if Gemini is being used in the loop
         result["loop_has_gemini"] = detection_loop.gemini is not None
-        result["loop_gemini_configured"] = (
-            detection_loop.gemini.is_configured() if detection_loop.gemini else False
-        )
+        result["loop_gemini_configured"] = detection_loop.gemini.is_configured() if detection_loop.gemini else False
 
     return result
 
@@ -2172,7 +2029,6 @@ async def realtime_stats():
 
     # Get frame buffer stats
     from services.recording import get_frame_buffer
-
     frame_buffer = get_frame_buffer()
     buffer_stats = frame_buffer.get_stats() if frame_buffer else {}
 
@@ -2185,14 +2041,13 @@ async def realtime_stats():
     return {
         "timestamp": time.time(),
         "uptime_seconds": detection_stats.get("uptime_seconds", 0),
+
         # Performance metrics (timing in ms)
         "performance": {
             # Main pipeline stages
             "yolo_ms": round(timing.get("yolo_ms", 0), 1),
             "yolo_postprocess_ms": round(timing.get("yolo_postprocess_ms", 0), 1),
-            "reid_ms": round(
-                timing.get("reid_extract_ms", 0), 1
-            ),  # renamed for clarity
+            "reid_ms": round(timing.get("reid_extract_ms", 0), 1),  # renamed for clarity
             "reid_extract_ms": round(timing.get("reid_extract_ms", 0), 1),
             "reid_per_detection_ms": round(timing.get("reid_per_detection_ms", 0), 1),
             "tracker_ms": round(timing.get("tracker_ms", 0), 1),
@@ -2212,9 +2067,11 @@ async def realtime_stats():
             "theoretical_fps": detection_stats.get("theoretical_fps", 0),
             "target_fps": config.get("detection_fps", 15),
         },
+
         # Pipeline breakdown (percentage of total time per stage)
         "pipeline_breakdown": pipeline_breakdown,
         "bottlenecks": bottlenecks,
+
         # Counters
         "counters": {
             "frames_processed": detection_stats.get("frames_processed", 0),
@@ -2225,30 +2082,39 @@ async def realtime_stats():
             "gemini_calls": gemini.get_call_count() if gemini else 0,
             "frames_dropped": detection_stats.get("frames_dropped_stale", 0),
         },
+
         # Tracker stats
         "tracker": {
             "bot_sort": detection_stats.get("bot_sort", {}),
             "reid": reid_stats,
             "stable": stable_stats,
         },
+
         # Queue/buffer pressure
         "pressure": {
             "pending_frames": detection_stats.get("pending_frames", 0),
             "result_queue_size": detection_stats.get("result_queue_size", 0),
             "active_cameras": detection_stats.get("active_cameras", []),
         },
+
         # Configuration
         "config": config,
+
         # Recording stats
         "recording": recording_stats,
+
         # Buffer stats
         "frame_buffer": buffer_stats,
+
         # RTSP readers
         "rtsp_readers": rtsp_stats,
+
         # Frame selection stats
         "frame_selection": detection_stats.get("frame_selection", {}),
+
         # Image enhancement stats
         "image_enhancement": detection_stats.get("image_enhancement", {}),
+
         # ReID cache stats
         "reid_cache": detection_stats.get("reid_cache", {}),
     }
@@ -2276,8 +2142,8 @@ async def get_fps_config():
         "description": {
             "target_fps": "Master FPS setting - MUST match camera output FPS",
             "detection_fps": "AI detection processing FPS (can be lower to save CPU)",
-            "stream_fps": "Output stream FPS to frontend (can be lower to save bandwidth)",
-        },
+            "stream_fps": "Output stream FPS to frontend (can be lower to save bandwidth)"
+        }
     }
 
 
@@ -2285,7 +2151,7 @@ async def get_fps_config():
 async def update_fps_config(
     target_fps: Optional[int] = None,
     detection_fps: Optional[int] = None,
-    stream_fps: Optional[int] = None,
+    stream_fps: Optional[int] = None
 ):
     """
     Update FPS configuration.
@@ -2330,9 +2196,9 @@ async def update_fps_config(
         "current": {
             "target_fps": TARGET_FPS,
             "detection_fps": DETECTION_FPS,
-            "stream_fps": STREAM_FPS,
+            "stream_fps": STREAM_FPS
         },
-        "note": "Changes are in-memory only. Update .env file to persist across restarts.",
+        "note": "Changes are in-memory only. Update .env file to persist across restarts."
     }
 
 
@@ -2344,7 +2210,10 @@ async def get_active_cameras():
     """
     rtsp_manager = get_rtsp_manager()
     active_cameras = rtsp_manager.get_active_cameras()
-    return {"active_cameras": active_cameras, "count": len(active_cameras)}
+    return {
+        "active_cameras": active_cameras,
+        "count": len(active_cameras)
+    }
 
 
 @app.post("/detection/reload")
@@ -2394,7 +2263,7 @@ async def cleanup_cameras():
     return {
         "status": "cleaned",
         "stopped_cameras": active_cameras,
-        "message": "All camera streams and processes stopped",
+        "message": "All camera streams and processes stopped"
     }
 
 
@@ -2434,7 +2303,6 @@ async def stop_camera(camera_id: str):
     # Stop any active recordings for this camera
     try:
         from services.recording import get_recording_manager
-
         recording_manager = get_recording_manager()
         if recording_manager and recording_manager.is_recording(camera_id):
             recording_manager.stop_recording(camera_id)
@@ -2445,7 +2313,6 @@ async def stop_camera(camera_id: str):
     # Clear scenario hooks state for this camera (prevents armed count carryover)
     try:
         from services.scenario.scenario_hooks import get_scenario_hooks
-
         hooks = get_scenario_hooks()
         hooks.clear_camera_state(camera_id)
         logger.info(f"Cleared scenario state for {camera_id}")
@@ -2455,13 +2322,15 @@ async def stop_camera(camera_id: str):
     return {
         "status": "stopped",
         "camera_id": camera_id,
-        "message": f"Camera {camera_id} stopped and removed",
+        "message": f"Camera {camera_id} stopped and removed"
     }
 
 
 @app.post("/detection/start/{camera_id}")
 async def start_camera_detection(
-    camera_id: str, rtsp_url: Optional[str] = None, use_go2rtc: Optional[bool] = True
+    camera_id: str,
+    rtsp_url: Optional[str] = None,
+    use_go2rtc: Optional[bool] = True
 ):
     """Start detection for a specific camera.
 
@@ -2498,15 +2367,13 @@ async def start_camera_detection(
                 src_url = original_url
                 if original_url.startswith("rtsp://") and "#" not in original_url:
                     src_url = f"{original_url}#transport=tcp"
-                elif (
-                    original_url.startswith("rtsp://")
-                    and "transport=" not in original_url
-                ):
+                elif original_url.startswith("rtsp://") and "transport=" not in original_url:
                     src_url = f"{original_url}&transport=tcp"
 
                 # Add stream to go2rtc
                 response = await client.put(
-                    f"{GO2RTC_URL}/api/streams", params={"name": cam_id, "src": src_url}
+                    f"{GO2RTC_URL}/api/streams",
+                    params={"name": cam_id, "src": src_url}
                 )
                 if response.status_code in [200, 201]:
                     # Return go2rtc's RTSP re-stream URL
@@ -2520,10 +2387,7 @@ async def start_camera_detection(
         detection_loop = get_detection_loop()
 
         # Ensure the frame callback is registered (in case it wasn't during startup)
-        if (
-            detection_loop
-            and detection_loop.on_frame not in rtsp_manager._frame_callbacks
-        ):
+        if detection_loop and detection_loop.on_frame not in rtsp_manager._frame_callbacks:
             rtsp_manager.add_frame_callback(detection_loop.on_frame)
             logger.info(f"Re-registered detection loop frame callback")
 
@@ -2535,13 +2399,10 @@ async def start_camera_detection(
             async with httpx.AsyncClient() as client:
                 response = await client.get(f"{BACKEND_URL}/api/cameras/{camera_id}")
                 if response.status_code != 200:
-                    raise HTTPException(
-                        404,
-                        f"Camera {camera_id} not found in backend. Use ?rtsp_url= to provide URL directly.",
-                    )
+                    raise HTTPException(404, f"Camera {camera_id} not found in backend. Use ?rtsp_url= to provide URL directly.")
 
                 camera = response.json()
-                original_url = camera.get("rtspUrl")
+                original_url = camera.get('rtspUrl')
                 if not original_url:
                     raise HTTPException(400, f"Camera {camera_id} has no RTSP URL")
 
@@ -2567,7 +2428,7 @@ async def start_camera_detection(
             "camera_id": camera_id,
             "rtsp_url": stream_url,
             "original_url": original_url,
-            "using_go2rtc": using_go2rtc,
+            "using_go2rtc": using_go2rtc
         }
 
     except HTTPException:
@@ -2587,7 +2448,6 @@ async def stop_camera_detection(camera_id: str):
 
     # Stop any active recordings for this camera
     from services.recording import get_recording_manager
-
     recording_manager = get_recording_manager()
     if recording_manager and recording_manager.is_recording(camera_id):
         recording_manager.stop_recording(camera_id)
@@ -2620,18 +2480,10 @@ async def get_detection_config():
 
 @app.post("/detection/config/fps")
 async def set_detection_fps(
-    detection_fps: Optional[int] = Query(
-        None, description="Detection FPS (1-30)", ge=1, le=30
-    ),
-    stream_fps: Optional[int] = Query(
-        None, description="Stream FPS (1-30)", ge=1, le=30
-    ),
-    reader_fps: Optional[int] = Query(
-        None, description="Reader FPS (1-30)", ge=1, le=30
-    ),
-    recording_fps: Optional[int] = Query(
-        None, description="Recording FPS (1-30)", ge=1, le=30
-    ),
+    detection_fps: Optional[int] = Query(None, description="Detection FPS (1-30)", ge=1, le=30),
+    stream_fps: Optional[int] = Query(None, description="Stream FPS (1-30)", ge=1, le=30),
+    reader_fps: Optional[int] = Query(None, description="Reader FPS (1-30)", ge=1, le=30),
+    recording_fps: Optional[int] = Query(None, description="Recording FPS (1-30)", ge=1, le=30)
 ):
     """Change FPS settings dynamically.
 
@@ -2648,12 +2500,7 @@ async def set_detection_fps(
     if not detection_loop:
         raise HTTPException(503, "Detection loop not running")
 
-    if (
-        detection_fps is None
-        and stream_fps is None
-        and reader_fps is None
-        and recording_fps is None
-    ):
+    if detection_fps is None and stream_fps is None and reader_fps is None and recording_fps is None:
         raise HTTPException(400, "Must provide at least one FPS value")
 
     detection_loop.set_fps(detection_fps, stream_fps, reader_fps, recording_fps)
@@ -2664,16 +2511,12 @@ async def set_detection_fps(
         "stream_fps": detection_loop.config.stream_fps,
         "reader_fps": detection_loop.config.reader_fps,
         "recording_fps": detection_loop.config.recording_fps,
-        "note": "Frontend streams should reconnect to see changes",
+        "note": "Frontend streams should reconnect to see changes"
     }
 
 
 @app.post("/detection/config/demo-mode")
-async def set_demo_mode(
-    enabled: bool = Query(
-        ..., description="Enable demo mode (slower FPS for longer video duration)"
-    ),
-):
+async def set_demo_mode(enabled: bool = Query(..., description="Enable demo mode (slower FPS for longer video duration)")):
     """Toggle demo mode on/off.
 
     Demo mode uses lower FPS values to make videos last longer,
@@ -2698,13 +2541,19 @@ async def set_demo_mode(
     if enabled:
         # Demo mode - slower FPS for longer video duration
         detection_loop.set_fps(
-            detection_fps=8, stream_fps=10, reader_fps=10, recording_fps=10
+            detection_fps=8,
+            stream_fps=10,
+            reader_fps=10,
+            recording_fps=10
         )
         mode = "demo"
     else:
         # Production mode - faster FPS
         detection_loop.set_fps(
-            detection_fps=20, stream_fps=20, reader_fps=25, recording_fps=15
+            detection_fps=20,
+            stream_fps=20,
+            reader_fps=25,
+            recording_fps=15
         )
         mode = "production"
 
@@ -2715,14 +2564,12 @@ async def set_demo_mode(
         "stream_fps": detection_loop.config.stream_fps,
         "reader_fps": detection_loop.config.reader_fps,
         "recording_fps": detection_loop.config.recording_fps,
-        "note": "Video processing speed adjusted. Lower FPS = longer video duration.",
+        "note": "Video processing speed adjusted. Lower FPS = longer video duration."
     }
 
 
 @app.post("/detection/config/reid-recovery")
-async def set_reid_recovery(
-    enabled: bool = Query(..., description="Enable/disable ReID recovery"),
-):
+async def set_reid_recovery(enabled: bool = Query(..., description="Enable/disable ReID recovery")):
     """Toggle ReID-based detection recovery on/off.
 
     ReID recovery helps maintain tracking when objects are temporarily occluded,
@@ -2739,21 +2586,15 @@ async def set_reid_recovery(
 
     return {
         "message": f"ReID recovery {'enabled' if enabled else 'disabled'}",
-        "use_reid_recovery": detection_loop.config.use_reid_recovery,
+        "use_reid_recovery": detection_loop.config.use_reid_recovery
     }
 
 
 @app.post("/detection/config/confidence")
 async def set_confidence_thresholds(
-    yolo_confidence: Optional[float] = Query(
-        None, description="YOLO confidence (0.0-1.0)", ge=0.0, le=1.0
-    ),
-    weapon_confidence: Optional[float] = Query(
-        None, description="Weapon confidence (0.0-1.0)", ge=0.0, le=1.0
-    ),
-    recovery_confidence: Optional[float] = Query(
-        None, description="Recovery confidence (0.0-1.0)", ge=0.0, le=1.0
-    ),
+    yolo_confidence: Optional[float] = Query(None, description="YOLO confidence (0.0-1.0)", ge=0.0, le=1.0),
+    weapon_confidence: Optional[float] = Query(None, description="Weapon confidence (0.0-1.0)", ge=0.0, le=1.0),
+    recovery_confidence: Optional[float] = Query(None, description="Recovery confidence (0.0-1.0)", ge=0.0, le=1.0)
 ):
     """Change confidence thresholds dynamically.
 
@@ -2774,31 +2615,23 @@ async def set_confidence_thresholds(
     if not detection_loop:
         raise HTTPException(503, "Detection loop not running")
 
-    if (
-        yolo_confidence is None
-        and weapon_confidence is None
-        and recovery_confidence is None
-    ):
+    if yolo_confidence is None and weapon_confidence is None and recovery_confidence is None:
         raise HTTPException(400, "Must provide at least one confidence value")
 
-    detection_loop.set_confidence(
-        yolo_confidence, weapon_confidence, recovery_confidence
-    )
+    detection_loop.set_confidence(yolo_confidence, weapon_confidence, recovery_confidence)
 
     return {
         "message": "Confidence thresholds updated",
         "yolo_confidence": detection_loop.config.yolo_confidence,
         "weapon_confidence": detection_loop.config.weapon_confidence,
         "recovery_confidence": detection_loop.config.recovery_confidence,
-        "note": "Changes take effect immediately on next frame",
+        "note": "Changes take effect immediately on next frame"
     }
 
 
 @app.post("/detection/reset-gemini")
 async def reset_gemini_state(
-    reset_tracker: bool = Query(
-        True, description="Also reset BoT-SORT tracker (clears all track IDs)"
-    ),
+    reset_tracker: bool = Query(True, description="Also reset BoT-SORT tracker (clears all track IDs)")
 ):
     """Reset Gemini analysis state to force re-analysis of all tracks.
 
@@ -2826,12 +2659,11 @@ async def reset_gemini_state(
     return {
         "message": "Gemini analysis state reset - new tracks will be analyzed",
         "details": result,
-        "note": "Objects will now be re-analyzed by Gemini as they appear",
+        "note": "Objects will now be re-analyzed by Gemini as they appear"
     }
 
 
 # ============== RULES ENDPOINTS ==============
-
 
 @app.post("/api/rules/reload")
 async def reload_event_rules():
@@ -2845,7 +2677,10 @@ async def reload_event_rules():
     try:
         engine = get_rule_engine()
         await engine.reload_rules()
-        return {"status": "reloaded", "rules_count": len(engine.rules)}
+        return {
+            "status": "reloaded",
+            "rules_count": len(engine.rules)
+        }
     except Exception as e:
         logger.error(f"Failed to reload rules: {e}")
         raise HTTPException(500, str(e))
@@ -2853,21 +2688,19 @@ async def reload_event_rules():
 
 # ============== RADIO ENDPOINTS ==============
 
-
 @app.get("/radio/stats")
 async def radio_stats():
     """Get radio service and transcriber statistics."""
     service = get_radio_service()
-    service_stats = (
-        service.get_stats()
-        if service
-        else {"error": "Radio service not running", "running": False}
-    )
+    service_stats = service.get_stats() if service else {"error": "Radio service not running", "running": False}
 
     # Add global transcriber stats
     transcriber_stats = get_transcriber_stats()
 
-    return {**service_stats, "transcriber_manager": transcriber_stats}
+    return {
+        **service_stats,
+        "transcriber_manager": transcriber_stats
+    }
 
 
 @app.post("/radio/transcribe-file")
@@ -2897,19 +2730,14 @@ async def transcribe_audio_file(file: UploadFile = File(...)):
     backend_url = os.getenv("BACKEND_URL", "http://localhost:3000")
 
     # Validate file type
-    if not file.filename.lower().endswith(".wav"):
-        raise HTTPException(
-            400, "Only WAV files are supported. Please upload a .wav file."
-        )
+    if not file.filename.lower().endswith('.wav'):
+        raise HTTPException(400, "Only WAV files are supported. Please upload a .wav file.")
 
     # Check file size (limit to 25MB)
     MAX_SIZE = 25 * 1024 * 1024  # 25MB
     contents = await file.read()
     if len(contents) > MAX_SIZE:
-        raise HTTPException(
-            400,
-            f"File too large. Maximum size is 25MB, got {len(contents) / 1024 / 1024:.1f}MB",
-        )
+        raise HTTPException(400, f"File too large. Maximum size is 25MB, got {len(contents) / 1024 / 1024:.1f}MB")
 
     # Save to temp file using async I/O to avoid blocking the event loop
     def write_temp_file():
@@ -2920,9 +2748,7 @@ async def transcribe_audio_file(file: UploadFile = File(...)):
     tmp_path = await asyncio.to_thread(write_temp_file)
 
     try:
-        logger.info(
-            f"Transcribing uploaded file: {file.filename} ({len(contents)} bytes)"
-        )
+        logger.info(f"Transcribing uploaded file: {file.filename} ({len(contents)} bytes)")
 
         # Get GLOBAL transcribers (shared with live radio service)
         gemini_transcriber = get_gemini_transcriber()
@@ -2930,15 +2756,13 @@ async def transcribe_audio_file(file: UploadFile = File(...)):
         whisper_semaphore = get_whisper_semaphore()
 
         if not gemini_transcriber or not whisper_transcriber:
-            raise HTTPException(
-                500, "Transcribers not initialized. Server may still be starting up."
-            )
+            raise HTTPException(500, "Transcribers not initialized. Server may still be starting up.")
 
         results = {
             "success": True,
             "filename": file.filename,
             "gemini": None,
-            "whisper": None,
+            "whisper": None
         }
 
         # Helper to send transcription to backend (emits socket event immediately)
@@ -2946,31 +2770,19 @@ async def transcribe_audio_file(file: UploadFile = File(...)):
             """Send transcription result to backend to emit socket event."""
             try:
                 endpoint = f"{backend_url}/api/radio/transcription/{transcriber_type}"
-                logger.info(
-                    f"[{transcriber_type.upper()}] Sending to endpoint: {endpoint}"
-                )
+                logger.info(f"[{transcriber_type.upper()}] Sending to endpoint: {endpoint}")
                 async with httpx.AsyncClient(timeout=10.0) as client:
                     response = await client.post(endpoint, json=data)
                     if response.status_code == 200:
-                        logger.info(
-                            f"[{transcriber_type.upper()}] SUCCESS - sent to {endpoint}"
-                        )
+                        logger.info(f"[{transcriber_type.upper()}] SUCCESS - sent to {endpoint}")
                     else:
-                        logger.warning(
-                            f"[{transcriber_type.upper()}] Backend response: {response.status_code} - {response.text}"
-                        )
+                        logger.warning(f"[{transcriber_type.upper()}] Backend response: {response.status_code} - {response.text}")
             except httpx.TimeoutException:
-                logger.error(
-                    f"[{transcriber_type.capitalize()}] Backend request timed out"
-                )
+                logger.error(f"[{transcriber_type.capitalize()}] Backend request timed out")
             except httpx.ConnectError as e:
-                logger.error(
-                    f"[{transcriber_type.capitalize()}] Failed to connect to backend: {e}"
-                )
+                logger.error(f"[{transcriber_type.capitalize()}] Failed to connect to backend: {e}")
             except Exception as e:
-                logger.error(
-                    f"[{transcriber_type.capitalize()}] Failed to send to backend: {type(e).__name__}: {e}"
-                )
+                logger.error(f"[{transcriber_type.capitalize()}] Failed to send to backend: {type(e).__name__}: {e}")
 
         # Define async tasks for parallel execution
         async def transcribe_gemini():
@@ -2989,16 +2801,12 @@ async def transcribe_audio_file(file: UploadFile = File(...)):
                         "is_command": result.is_command,
                         "command_type": result.command_type,
                         "source": f"file:{file.filename}",
-                        "processing_time_ms": processing_time_ms,
+                        "processing_time_ms": processing_time_ms
                     }
-                    logger.info(
-                        f"[Gemini] File transcription complete in {processing_time_ms:.0f}ms: '{result.text[:100] if result.text else '(empty)'}...'"
-                    )
+                    logger.info(f"[Gemini] File transcription complete in {processing_time_ms:.0f}ms: '{result.text[:100] if result.text else '(empty)'}...'")
 
                     # Record statistics
-                    record_transcription_stats(
-                        "gemini", "file", processing_time_ms, success=True
-                    )
+                    record_transcription_stats("gemini", "file", processing_time_ms, success=True)
 
                     # Send to backend IMMEDIATELY (emits socket event)
                     await send_to_backend("gemini", result_data)
@@ -3007,9 +2815,7 @@ async def transcribe_audio_file(file: UploadFile = File(...)):
                 return {"error": "No transcription result"}
             except Exception as e:
                 record_transcription_stats("gemini", "file", 0, success=False)
-                logger.error(
-                    f"[Gemini] File transcription error: {type(e).__name__}: {e}"
-                )
+                logger.error(f"[Gemini] File transcription error: {type(e).__name__}: {e}")
                 return {"error": str(e)}
 
         async def transcribe_whisper():
@@ -3019,9 +2825,7 @@ async def transcribe_audio_file(file: UploadFile = File(...)):
             # Use semaphore to prevent concurrent CPU-intensive processing
             if whisper_semaphore:
                 if whisper_semaphore.locked():
-                    logger.info(
-                        "[Whisper] Waiting for semaphore (another transcription in progress)..."
-                    )
+                    logger.info("[Whisper] Waiting for semaphore (another transcription in progress)...")
                     record_whisper_queue_wait()
 
                 async with whisper_semaphore:
@@ -3044,16 +2848,12 @@ async def transcribe_audio_file(file: UploadFile = File(...)):
                         "command_type": result.command_type,
                         "segments": result.segments,
                         "source": f"file:{file.filename}",
-                        "processing_time_ms": processing_time_ms,
+                        "processing_time_ms": processing_time_ms
                     }
-                    logger.info(
-                        f"[Whisper] File transcription complete in {processing_time_ms:.0f}ms: '{result.text[:100] if result.text else '(empty)'}...'"
-                    )
+                    logger.info(f"[Whisper] File transcription complete in {processing_time_ms:.0f}ms: '{result.text[:100] if result.text else '(empty)'}...'")
 
                     # Record statistics
-                    record_transcription_stats(
-                        "whisper", "file", processing_time_ms, success=True
-                    )
+                    record_transcription_stats("whisper", "file", processing_time_ms, success=True)
 
                     # Send to backend IMMEDIATELY (emits socket event)
                     await send_to_backend("whisper", result_data)
@@ -3062,17 +2862,15 @@ async def transcribe_audio_file(file: UploadFile = File(...)):
                 return {"error": "No transcription result"}
             except Exception as e:
                 record_transcription_stats("whisper", "file", 0, success=False)
-                logger.error(
-                    f"[Whisper] File transcription error: {type(e).__name__}: {e}"
-                )
+                logger.error(f"[Whisper] File transcription error: {type(e).__name__}: {e}")
                 return {"error": str(e)}
 
         # Run BOTH transcribers in PARALLEL - each emits socket event when done
-        logger.info(
-            "Running Gemini and Whisper transcription in parallel (independent socket events)..."
-        )
+        logger.info("Running Gemini and Whisper transcription in parallel (independent socket events)...")
         gemini_result, whisper_result = await asyncio.gather(
-            transcribe_gemini(), transcribe_whisper(), return_exceptions=True
+            transcribe_gemini(),
+            transcribe_whisper(),
+            return_exceptions=True
         )
 
         # Handle results (could be exceptions if something went wrong)
@@ -3091,9 +2889,7 @@ async def transcribe_audio_file(file: UploadFile = File(...)):
         whisper_ok = results["whisper"] and "text" in results["whisper"]
 
         if not gemini_ok and not whisper_ok:
-            raise HTTPException(
-                500, "Both transcribers failed. Check logs for details."
-            )
+            raise HTTPException(500, "Both transcribers failed. Check logs for details.")
 
         return results
 
@@ -3109,12 +2905,10 @@ async def transcribe_audio_file(file: UploadFile = File(...)):
                 os_module.unlink(tmp_path)
             except:
                 pass
-
         asyncio.get_event_loop().run_in_executor(None, cleanup)
 
 
 # ============== FFMPEG STREAMING ENDPOINTS ==============
-
 
 @app.get("/recordings/{filename}")
 async def get_recording(filename: str):
@@ -3133,7 +2927,11 @@ async def get_recording(filename: str):
     except ValueError:
         raise HTTPException(403, "Invalid path")
 
-    return FileResponse(video_path, media_type="video/mp4", filename=filename)
+    return FileResponse(
+        video_path,
+        media_type="video/mp4",
+        filename=filename
+    )
 
 
 @app.get("/recordings")
@@ -3150,14 +2948,12 @@ async def list_recordings():
     recordings = []
     for video_file in sorted(recordings_path.glob("*.mp4"), reverse=True):
         stat = video_file.stat()
-        recordings.append(
-            {
-                "filename": video_file.name,
-                "url": f"/recordings/{video_file.name}",
-                "size_bytes": stat.st_size,
-                "created_at": stat.st_ctime,
-            }
-        )
+        recordings.append({
+            "filename": video_file.name,
+            "url": f"/recordings/{video_file.name}",
+            "size_bytes": stat.st_size,
+            "created_at": stat.st_ctime
+        })
 
     return {"recordings": recordings}
 
@@ -3170,12 +2966,11 @@ async def recording_stats():
         return {"error": "Recording manager not initialized"}
 
     from services.recording import get_frame_buffer
-
     frame_buffer = get_frame_buffer()
 
     return {
         "recording_manager": manager.get_stats(),
-        "frame_buffer": frame_buffer.get_stats() if frame_buffer else None,
+        "frame_buffer": frame_buffer.get_stats() if frame_buffer else None
     }
 
 
@@ -3184,23 +2979,21 @@ async def ffmpeg_stats():
     """Get FFmpeg stream statistics."""
     return {
         "streams": ffmpeg_manager.get_all_stats(),
-        "active_count": len(ffmpeg_manager.get_active_cameras()),
+        "active_count": len(ffmpeg_manager.get_active_cameras())
     }
 
 
 # ============== SCENARIO RULES ENDPOINTS ==============
-
 
 @app.get("/scenario-rules")
 async def get_scenario_rules():
     """Get all defined scenario rules."""
     try:
         from services.scenario import get_scenario_rule_engine
-
         engine = get_scenario_rule_engine()
         return {
             "scenarios": engine.get_all_scenarios(),
-            "activeScenario": engine.get_active_scenario(),
+            "activeScenario": engine.get_active_scenario()
         }
     except Exception as e:
         logger.error(f"Failed to get scenario rules: {e}")
@@ -3212,7 +3005,6 @@ async def get_scenario_rule(scenario_id: str):
     """Get a specific scenario rule by ID."""
     try:
         from services.scenario import get_scenario_rule_engine
-
         engine = get_scenario_rule_engine()
         scenario = engine.get_scenario(scenario_id)
         if scenario:
@@ -3230,9 +3022,11 @@ async def get_active_scenario_status():
     """Get the status of the currently active scenario."""
     try:
         from services.scenario import get_scenario_rule_engine
-
         engine = get_scenario_rule_engine()
-        return {"active": engine.is_active(), "scenario": engine.get_active_scenario()}
+        return {
+            "active": engine.is_active(),
+            "scenario": engine.get_active_scenario()
+        }
     except Exception as e:
         logger.error(f"Failed to get scenario status: {e}")
         return {"active": False, "scenario": None, "error": str(e)}
@@ -3243,13 +3037,9 @@ async def reload_scenario_rules():
     """Reload scenario rules from config file."""
     try:
         from services.scenario import get_scenario_rule_engine
-
         engine = get_scenario_rule_engine()
         engine.reload_config()
-        return {
-            "message": "Scenario rules reloaded",
-            "count": len(engine.get_all_scenarios()),
-        }
+        return {"message": "Scenario rules reloaded", "count": len(engine.get_all_scenarios())}
     except Exception as e:
         logger.error(f"Failed to reload scenario rules: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -3264,7 +3054,6 @@ async def ffmpeg_stop(camera_id: str):
 
 # ============== TRACKER ENDPOINTS ==============
 
-
 @app.get("/tracker/stable/stats")
 async def stable_tracker_stats():
     """Get StableTracker statistics."""
@@ -3273,7 +3062,7 @@ async def stable_tracker_stats():
         "stats": tracker.get_stats(),
         "vehicles": [v.to_dict() for v in tracker.get_all_vehicles()],
         "persons": [p.to_dict() for p in tracker.get_all_persons()],
-        "armed_persons": [p.to_dict() for p in tracker.get_armed_persons()],
+        "armed_persons": [p.to_dict() for p in tracker.get_armed_persons()]
     }
 
 
@@ -3294,25 +3083,15 @@ async def stream_debug(camera_id: str):
     state = {
         "detection_loop_running": detection_loop._running if detection_loop else False,
         "active_cameras": rtsp_manager.get_active_cameras(),
-        "pending_frames": list(detection_loop._latest_frames.keys())
-        if detection_loop
-        else [],
-        "annotated_frames": list(detection_loop._annotated_frames.keys())
-        if detection_loop
-        else [],
+        "pending_frames": list(detection_loop._latest_frames.keys()) if detection_loop else [],
+        "annotated_frames": list(detection_loop._annotated_frames.keys()) if detection_loop else [],
         "camera_requested": camera_id,
         "camera_in_active": camera_id in rtsp_manager.get_active_cameras(),
-        "has_annotated_frame": camera_id in detection_loop._annotated_frames
-        if detection_loop
-        else False,
+        "has_annotated_frame": camera_id in detection_loop._annotated_frames if detection_loop else False,
     }
 
     # Get RTSP reader stats if available
-    reader = (
-        rtsp_manager.get_reader(camera_id)
-        if hasattr(rtsp_manager, "get_reader")
-        else None
-    )
+    reader = rtsp_manager.get_reader(camera_id) if hasattr(rtsp_manager, 'get_reader') else None
     if reader:
         state["reader_stats"] = reader.get_stats()
 
@@ -3344,7 +3123,7 @@ async def get_latest_detections(camera_id: str):
         "camera_id": camera_id,
         "timestamp": time.time(),
         "detections": detections,
-        "count": len(detections),
+        "count": len(detections)
     }
 
 
@@ -3441,9 +3220,7 @@ async def enable_ai(camera_id: str, rtsp_url: Optional[str] = None):
                                 # Clean up go2rtc format (remove #transport=tcp etc for our reader)
                                 if "#" in source_url:
                                     source_url = source_url.split("#")[0]
-                                logger.info(
-                                    f"Got RTSP URL from go2rtc: {source_url[:50]}..."
-                                )
+                                logger.info(f"Got RTSP URL from go2rtc: {source_url[:50]}...")
             except Exception as e:
                 logger.debug(f"Could not get URL from go2rtc: {e}")
 
@@ -3452,9 +3229,7 @@ async def enable_ai(camera_id: str, rtsp_url: Optional[str] = None):
             try:
                 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:3000")
                 async with httpx.AsyncClient(timeout=5.0) as client:
-                    response = await client.get(
-                        f"{BACKEND_URL}/api/cameras/{camera_id}"
-                    )
+                    response = await client.get(f"{BACKEND_URL}/api/cameras/{camera_id}")
                     if response.status_code == 200:
                         camera_config = response.json()
                         source_url = camera_config.get("rtspUrl")
@@ -3464,14 +3239,16 @@ async def enable_ai(camera_id: str, rtsp_url: Optional[str] = None):
                 logger.debug(f"Could not get URL from backend: {e}")
 
         if not source_url:
-            raise HTTPException(
-                400,
-                f"Camera {camera_id} not found and no RTSP URL provided. "
-                "Add camera to go2rtc or provide rtsp_url parameter.",
-            )
+            raise HTTPException(400, f"Camera {camera_id} not found and no RTSP URL provided. "
+                              "Add camera to go2rtc or provide rtsp_url parameter.")
 
         # Start the camera in RTSP reader
-        config = RTSPConfig(width=1280, height=720, fps=TARGET_FPS, tcp_transport=True)
+        config = RTSPConfig(
+            width=1280,
+            height=720,
+            fps=TARGET_FPS,
+            tcp_transport=True
+        )
 
         try:
             rtsp_manager.add_camera(camera_id, source_url, config)
@@ -3489,8 +3266,7 @@ async def enable_ai(camera_id: str, rtsp_url: Optional[str] = None):
         "camera_id": camera_id,
         "ai_enabled": True,
         "stream_started": camera_needs_start,
-        "message": "AI enabled"
-        + (" and RTSP reader started" if camera_needs_start else ""),
+        "message": "AI enabled" + (" and RTSP reader started" if camera_needs_start else "")
     }
 
 
@@ -3549,9 +3325,7 @@ async def stream_annotated(camera_id: str, fps: Optional[int] = None):
     active_cameras = rtsp_manager.get_active_cameras()
     logger.info(f"[Stream] Request for {camera_id}, active cameras: {active_cameras}")
     logger.info(f"[Stream] Detection loop running: {detection_loop._running}")
-    logger.info(
-        f"[Stream] Annotated frames available: {list(detection_loop._annotated_frames.keys())}"
-    )
+    logger.info(f"[Stream] Annotated frames available: {list(detection_loop._annotated_frames.keys())}")
 
     # Use configured stream_fps if not explicitly provided
     if fps is None:
@@ -3578,12 +3352,10 @@ async def stream_annotated(camera_id: str, fps: Optional[int] = None):
 
                     # Only send if it's a new frame (prevents bursts of duplicates)
                     if frame_id != last_frame_id:
-                        ret, jpeg = cv2.imencode(
-                            ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 65]
-                        )
+                        ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
                         if ret:
-                            frame_b64 = base64.b64encode(jpeg.tobytes()).decode("utf-8")
-                            yield f'data: {{"frame": "{frame_b64}"}}\n\n'
+                            frame_b64 = base64.b64encode(jpeg.tobytes()).decode('utf-8')
+                            yield f"data: {{\"frame\": \"{frame_b64}\"}}\n\n"
                             last_frame_id = frame_id
                             last_send_time = current_time
                     else:
@@ -3599,8 +3371,8 @@ async def stream_annotated(camera_id: str, fps: Optional[int] = None):
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+            "X-Accel-Buffering": "no"
+        }
     )
 
 
