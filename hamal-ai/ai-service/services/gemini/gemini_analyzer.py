@@ -20,8 +20,16 @@ import base64
 from io import BytesIO
 from typing import Dict, Any, Optional, List
 from PIL import Image
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+# Debug directory for raw Gemini responses
+DEBUG_GEMINI_RESPONSES = os.getenv("DEBUG_GEMINI_RESPONSES", "true").lower() in ("true", "1", "yes")
+GEMINI_DEBUG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "data", "gemini_debug")
+if DEBUG_GEMINI_RESPONSES:
+    os.makedirs(GEMINI_DEBUG_DIR, exist_ok=True)
+    logger.info(f"📝 Gemini debug logging enabled: {GEMINI_DEBUG_DIR}")
 
 # Import image enhancer for quality improvement before Gemini analysis
 try:
@@ -109,13 +117,68 @@ class GeminiAnalyzer:
         """Reset the API call counter"""
         self._call_count = 0
 
-    async def _generate_content(self, content_parts: list):
+    def _save_debug_response(self, analysis_type: str, prompt: str, response_text: str, image_info: str = ""):
+        """
+        Save raw Gemini response to disk for debugging.
+
+        Args:
+            analysis_type: Type of analysis (vehicle, person, scene, etc.)
+            prompt: The prompt sent to Gemini
+            response_text: Raw response text from Gemini
+            image_info: Optional info about the image (size, bbox, etc.)
+        """
+        if not DEBUG_GEMINI_RESPONSES:
+            return
+
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            filename = f"{timestamp}_{analysis_type}.json"
+            filepath = os.path.join(GEMINI_DEBUG_DIR, filename)
+
+            debug_data = {
+                "timestamp": datetime.now().isoformat(),
+                "analysis_type": analysis_type,
+                "image_info": image_info,
+                "prompt": prompt,
+                "raw_response": response_text,
+                "response_length": len(response_text) if response_text else 0,
+            }
+
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(debug_data, f, ensure_ascii=False, indent=2)
+
+            logger.debug(f"📝 Saved Gemini debug response to {filename}")
+
+            # Also log to console for immediate visibility
+            logger.info(f"📝 GEMINI RAW RESPONSE [{analysis_type}]: {response_text[:500]}...")
+
+        except Exception as e:
+            logger.warning(f"Failed to save Gemini debug response: {e}")
+
+    async def _generate_content(self, content_parts: list, analysis_type: str = "unknown"):
         """
         Wrapper for model.generate_content_async that increments the call counter.
         Use this instead of calling generate_content_async directly.
+
+        Args:
+            content_parts: List of content parts (prompt, images)
+            analysis_type: Type of analysis for debug logging
         """
         self._call_count += 1
-        return await self.model.generate_content_async(content_parts)
+        response = await self.model.generate_content_async(content_parts)
+
+        # Extract prompt for debugging (first string part)
+        prompt = next((p for p in content_parts if isinstance(p, str)), "")
+
+        # Save debug response
+        if DEBUG_GEMINI_RESPONSES and response:
+            self._save_debug_response(
+                analysis_type=analysis_type,
+                prompt=prompt[:500],  # Truncate prompt
+                response_text=response.text if response else "NO RESPONSE"
+            )
+
+        return response
 
     def _frame_to_pil(self, frame, bbox: Optional[List[float]] = None, margin_percent: float = 0.50, class_name: str = "unknown") -> Image.Image:
         """
@@ -382,7 +445,7 @@ class GeminiAnalyzer:
 4. נסה לזהות צבע מדויק - לא רק "בהיר" או "כהה"
 5. אם רואים חלק מלוח הרישוי, רשום מה שנראה"""
 
-            response = await self._generate_content([prompt, img])
+            response = await self._generate_content([prompt, img], analysis_type="vehicle")
             result = self._parse_json(response.text)
 
             # Add cutout image if requested
@@ -504,7 +567,7 @@ class GeminiAnalyzer:
 4. armed=true רק אם רואים נשק בבירור
 5. אם לא רואים פרט מסוים, כתוב "לא נראה" """
 
-            response = await self._generate_content([prompt, img])
+            response = await self._generate_content([prompt, img], analysis_type="person")
             result = self._parse_json(response.text)
 
             # Add cutout image if requested
@@ -561,7 +624,7 @@ class GeminiAnalyzer:
             }
             """
 
-            response = await self._generate_content([prompt, img])
+            response = await self._generate_content([prompt, img], analysis_type="threat")
             result = self._parse_json(response.text)
 
             if result.get("threatNeutralized"):
@@ -614,7 +677,7 @@ class GeminiAnalyzer:
                 }
                 """
 
-            response = await self._generate_content([prompt, img])
+            response = await self._generate_content([prompt, img], analysis_type="scene")
             return self._parse_json(response.text)
 
         except Exception as e:
@@ -647,7 +710,7 @@ class GeminiAnalyzer:
             אם יש מילים לא ברורות, נסה לנחש לפי הקונטקסט הצבאי/ביטחוני.
             """
 
-            response = await self._generate_content([prompt, audio_file])
+            response = await self._generate_content([prompt, audio_file], analysis_type="audio")
             transcript = response.text.strip()
 
             logger.info(f"Audio transcribed: {transcript[:50]}...")
@@ -678,7 +741,7 @@ class GeminiAnalyzer:
         try:
             images = [self._frame_to_pil(f) for f in frames]
 
-            response = await self._generate_content([prompt, *images])
+            response = await self._generate_content([prompt, *images], analysis_type="multi_frame")
             return self._parse_json(response.text)
 
         except Exception as e:
@@ -718,7 +781,7 @@ class GeminiAnalyzer:
             }
             """
 
-            response = await self._generate_content([prompt, img1, img2])
+            response = await self._generate_content([prompt, img1, img2], analysis_type="vehicle_verify")
             return self._parse_json(response.text)
 
         except Exception as e:
@@ -758,7 +821,7 @@ class GeminiAnalyzer:
             }
             """
 
-            response = await self._generate_content([prompt, img1, img2])
+            response = await self._generate_content([prompt, img1, img2], analysis_type="person_verify")
             return self._parse_json(response.text)
 
         except Exception as e:
