@@ -437,14 +437,12 @@ class WhisperTranscriber:
             # IMPORTANT: model.transcribe returns a generator - we must consume it in the thread
             # to avoid blocking the event loop during iteration
             def do_transcription():
-                import time as _time
-                start = _time.time()
                 segments_iter, _info = self.model.transcribe(
                     audio_float,
                     language="he",
                     beam_size=1,
-                    best_of=1,  # Reduced from 5 for speed
-                    temperature=0.0,  # Single temperature for speed
+                    best_of=5,
+                    temperature=[0.0, 0.2, 0.4, 0.6, 0.8],
                     vad_filter=True,
                     vad_parameters=vad_params,
                     condition_on_previous_text=False,
@@ -453,17 +451,13 @@ class WhisperTranscriber:
                 # Consume the generator inside the thread
                 segments = []
                 full_text = []
-                logger.info("[Whisper] Processing segments...")
-                for i, segment in enumerate(segments_iter):
+                for segment in segments_iter:
                     segments.append({
                         "start": segment.start,
                         "end": segment.end,
                         "text": segment.text.strip(),
                     })
                     full_text.append(segment.text.strip())
-                    logger.debug(f"[Whisper] Segment {i+1}: {segment.text.strip()[:50]}...")
-                elapsed = _time.time() - start
-                logger.info(f"[Whisper] Transcription took {elapsed:.1f}s for {len(segments)} segments")
                 return segments, full_text
 
             segments, full_text = await asyncio.to_thread(do_transcription)
