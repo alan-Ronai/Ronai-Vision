@@ -96,14 +96,10 @@ def init_transcribers(
         logger.info(f"    Model path: {whisper_model_path}")
         logger.info(f"    Device: {_whisper_transcriber.device}")
 
-        # Pre-load Whisper model if requested
-        if preload_whisper and _whisper_transcriber.is_configured():
-            logger.info("  Pre-loading Whisper model (this may take a moment)...")
-            start_time = time.time()
-            _whisper_transcriber._lazy_load()
-            load_time_ms = (time.time() - start_time) * 1000
-            _stats["whisper"]["model_load_time_ms"] = load_time_ms
-            logger.info(f"  Whisper model loaded in {load_time_ms:.0f}ms")
+        # Note: Whisper model is now loaded automatically in __init__
+        # Just record the load time if available
+        if _whisper_transcriber.is_configured() and _whisper_transcriber._initialized:
+            logger.info("  Whisper model: already loaded at initialization")
 
         # Initialize semaphore (allow only 1 concurrent Whisper transcription)
         _whisper_semaphore = asyncio.Semaphore(1)
