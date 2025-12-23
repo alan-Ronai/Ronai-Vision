@@ -308,7 +308,7 @@ class RadioService:
             }
 
             # Send to backend - different endpoints for different transcribers
-            endpoint = f"/api/radio/transcription:{transcriber}"
+            endpoint = f"/api/radio/transcription/{transcriber}"
             response = await self._http_client.post(
                 f"{self.backend_url}{endpoint}",
                 json=payload
