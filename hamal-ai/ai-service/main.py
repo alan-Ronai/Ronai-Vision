@@ -2846,12 +2846,14 @@ async def transcribe_audio_file(file: UploadFile = File(...)):
         logger.info(f"Transcribing uploaded file: {file.filename} ({len(contents)} bytes)")
 
         # Get GLOBAL transcribers (shared with live radio service)
+        # Note: Either or both may be None if disabled via environment variables
         gemini_transcriber = get_gemini_transcriber()
         whisper_transcriber = get_whisper_transcriber()
         whisper_semaphore = get_whisper_semaphore()
 
-        if not gemini_transcriber or not whisper_transcriber:
-            raise HTTPException(500, "Transcribers not initialized. Server may still be starting up.")
+        # Require at least one transcriber to be available
+        if not gemini_transcriber and not whisper_transcriber:
+            raise HTTPException(500, "No transcribers available. Both are disabled or not initialized.")
 
         results = {
             "success": True,
@@ -2881,6 +2883,8 @@ async def transcribe_audio_file(file: UploadFile = File(...)):
 
         # Define async tasks for parallel execution
         async def transcribe_gemini():
+            if not gemini_transcriber:
+                return {"error": "Gemini transcriber disabled", "disabled": True}
             if not gemini_transcriber.is_configured():
                 return {"error": "Gemini not configured (missing GEMINI_API_KEY)"}
             try:
@@ -2914,6 +2918,8 @@ async def transcribe_audio_file(file: UploadFile = File(...)):
                 return {"error": str(e)}
 
         async def transcribe_whisper():
+            if not whisper_transcriber:
+                return {"error": "Whisper transcriber disabled", "disabled": True}
             if not whisper_transcriber.is_configured():
                 return {"error": "Whisper not configured (model not found)"}
 
