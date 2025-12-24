@@ -2095,10 +2095,7 @@ class DetectionLoop:
                 else ["car", "truck", "bus", "motorcycle", "bicycle"]
             )
 
-            # Limit ReID extractions in recovery to avoid performance impact
-            MAX_RECOVERY_REID = 3  # Maximum ReID extractions per recovery pass
-            reid_extracted = 0
-
+            # STEP 2a: Collect ALL candidates first (without extracting features)
             for box in low_conf_results.boxes:
                 cls = int(box.cls[0])
                 label = low_conf_results.names[cls]
@@ -2113,25 +2110,41 @@ class DetectionLoop:
                 x1, y1, x2, y2 = xyxy
                 bbox = (x1, y1, x2 - x1, y2 - y1)
 
-                # Extract ReID feature only for first few candidates (expensive operation)
-                feature = None
-                if reid_extracted < MAX_RECOVERY_REID:
-                    try:
-                        feature = self._extract_reid_feature_cached(frame, xyxy, label)
-                        if feature is not None:
-                            reid_extracted += 1
-                    except Exception as e:
-                        logger.debug(f"Recovery ReID extraction failed for {label}: {e}")
-
                 recovery_candidates.append(
                     {
                         "bbox": bbox,
                         "confidence": conf,
                         "class_id": cls,
                         "class_name": label,
-                        "feature": feature,
+                        "feature": None,
                     }
                 )
+
+            # STEP 2b: BATCH extract ReID features (OPTIMIZATION - single forward pass!)
+            # Only extract for persons (vehicles use IoU only)
+            MAX_RECOVERY_REID = 5  # Can handle more with batching
+            if object_type == "person" and recovery_candidates:
+                # Create lightweight objects with .bbox and .feature for batch extraction
+                from types import SimpleNamespace
+                temp_detections = [
+                    SimpleNamespace(bbox=c["bbox"], feature=None)
+                    for c in recovery_candidates[:MAX_RECOVERY_REID]
+                ]
+
+                # Batch extract - single forward pass instead of N separate calls!
+                batch_features = self._extract_reid_features_batch(
+                    frame, temp_detections, class_type="person"
+                )
+
+                # Assign features back to candidates
+                for idx, feature in batch_features.items():
+                    if idx < len(recovery_candidates):
+                        recovery_candidates[idx]["feature"] = feature
+
+                if batch_features:
+                    logger.debug(
+                        f"Recovery: batch extracted {len(batch_features)} ReID features"
+                    )
 
             if not recovery_candidates:
                 return []
