@@ -648,6 +648,31 @@ export const PIPELINE_TYPES = {
     }
   },
 
+  gid_limit: {
+    label: 'הפעלה חד-פעמית לפי GID',
+    labelEn: 'GID Limit',
+    description: 'הגבלת מספר ההפעלות לכל אובייקט מזוהה (לפי Track ID). מתאים למניעת התראות חוזרות על אותו אובייקט',
+    category: 'flow',
+    params: {
+      maxTriggers: {
+        type: 'number',
+        label: 'מספר הפעלות מקסימלי',
+        min: 1,
+        max: 100,
+        default: 1,
+        help: 'כמה פעמים החוק יופעל עבור אותו אובייקט (ברירת מחדל: פעם אחת)'
+      },
+      resetAfterSeconds: {
+        type: 'number',
+        label: 'איפוס אחרי (שניות)',
+        min: 0,
+        max: 86400,
+        default: 0,
+        help: 'אחרי כמה שניות לאפס את המונה. 0 = לעולם לא לאפס'
+      }
+    }
+  },
+
   set_placeholder: {
     label: 'הגדרת משתנה מותאם',
     labelEn: 'Set Placeholder',
