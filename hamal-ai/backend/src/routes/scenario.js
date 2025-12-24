@@ -9,6 +9,7 @@ import express from 'express';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs/promises';
+import { createReadStream, unlinkSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { getScenarioManager } from '../services/scenarioManager.js';
 import { SCENARIO_CONFIG, isPlateStolen } from '../config/scenarioConfig.js';
@@ -229,37 +230,143 @@ router.post('/transcription', async (req, res) => {
 
 /**
  * POST /api/scenario/soldier-video
- * Upload soldier video
+ * Upload soldier video - STANDALONE feature
+ *
+ * This endpoint works independently of the scenario system.
+ * It always displays the video overlay when a video is uploaded.
+ * If a scenario happens to be active at the right stage, it will also trigger the transition.
  */
 router.post('/soldier-video', upload.single('video'), async (req, res) => {
   try {
-    const manager = getScenarioManager();
-    if (!manager) {
-      return res.status(503).json({
-        error: 'Scenario manager not initialized'
-      });
-    }
-
     if (!req.file) {
       return res.status(400).json({ error: 'No video file provided' });
     }
 
     const videoPath = `/uploads/scenario/${req.file.filename}`;
-    console.log('[Scenario] Soldier video uploaded:', videoPath);
+    const absolutePath = path.join(__dirname, '../../uploads/scenario', req.file.filename);
+    console.log('[SoldierVideo] Video uploaded:', videoPath);
 
-    const handled = await manager.handleSoldierVideo(videoPath);
+    // Get Socket.IO instance to emit events
+    const io = req.app.get('io');
+
+    // ALWAYS display the soldier video panel (standalone behavior)
+    if (io) {
+      io.emit('scenario:soldier-video', {
+        open: true,
+        videoPath: videoPath
+      });
+      console.log('[SoldierVideo] Emitted soldier video panel open event');
+    }
+
+    // Check if scenario is active and can handle this
+    let scenarioHandled = false;
+    const manager = getScenarioManager();
+    if (manager) {
+      scenarioHandled = await manager.handleSoldierVideo(videoPath);
+      if (scenarioHandled) {
+        console.log('[SoldierVideo] Scenario also handled the video (triggered stage transition)');
+      }
+    }
+
+    // Start transcription in background (non-blocking)
+    // This will emit transcription events as they complete
+    transcribeVideoAudio(absolutePath, videoPath, io).catch(err => {
+      console.error('[SoldierVideo] Background transcription error:', err);
+    });
 
     res.json({
       success: true,
-      handled,
+      displayed: true,
+      scenarioHandled,
       videoPath,
-      state: manager.getState()
+      message: 'Video uploaded and displayed' + (scenarioHandled ? ' (scenario triggered)' : '')
     });
   } catch (error) {
-    console.error('[Scenario] Soldier video error:', error);
+    console.error('[SoldierVideo] Upload error:', error);
     res.status(500).json({ error: error.message });
   }
 });
+
+/**
+ * Extract audio from video and transcribe using available transcribers
+ * Emits transcription events via Socket.IO as results come in
+ */
+async function transcribeVideoAudio(videoAbsolutePath, videoRelativePath, io) {
+  const { exec } = await import('child_process');
+  const { promisify } = await import('util');
+  const axios = (await import('axios')).default;
+  const execAsync = promisify(exec);
+
+  // Extract audio to WAV using ffmpeg
+  const audioPath = videoAbsolutePath.replace(/\.[^.]+$/, '.wav');
+
+  try {
+    console.log('[SoldierVideo] Extracting audio from video...');
+    await execAsync(`ffmpeg -y -i "${videoAbsolutePath}" -vn -acodec pcm_s16le -ar 16000 -ac 1 "${audioPath}"`);
+    console.log('[SoldierVideo] Audio extracted:', audioPath);
+
+    // Get AI service URL from environment
+    const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://localhost:8000';
+
+    // Check which transcribers are available
+    let availableTranscribers = [];
+    try {
+      const statusRes = await fetch(`${AI_SERVICE_URL}/radio/transcribers`);
+      if (statusRes.ok) {
+        const status = await statusRes.json();
+        availableTranscribers = status.available_transcribers || [];
+      }
+    } catch (e) {
+      console.warn('[SoldierVideo] Could not check transcriber status:', e.message);
+      availableTranscribers = ['gemini', 'whisper']; // Assume both available
+    }
+
+    if (availableTranscribers.length === 0) {
+      console.log('[SoldierVideo] No transcribers available');
+      return;
+    }
+
+    console.log('[SoldierVideo] Available transcribers:', availableTranscribers);
+
+    // Create form data with file stream - use axios for proper multipart handling
+    const FormData = (await import('form-data')).default;
+    const formData = new FormData();
+    formData.append('file', createReadStream(audioPath), {
+      filename: 'soldier-video-audio.wav',
+      contentType: 'audio/wav'
+    });
+
+    // Send to transcription endpoint using axios (handles multipart correctly)
+    const transcribeRes = await axios.post(
+      `${AI_SERVICE_URL}/radio/transcribe-file`,
+      formData,
+      {
+        headers: formData.getHeaders(),
+        timeout: 120000, // 2 minute timeout for transcription
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity
+      }
+    );
+
+    console.log('[SoldierVideo] Transcription complete');
+    // Note: We don't emit here because the AI service already sends transcriptions
+    // immediately via the radio endpoints (/api/radio/transcription/gemini and /whisper)
+    // which emit radio:transcription:gemini and radio:transcription:whisper events.
+    // The SoldierVideoPanel listens to these events directly for real-time updates.
+
+    // Clean up audio file
+    await fs.unlink(audioPath).catch(() => {});
+
+  } catch (error) {
+    if (error.response) {
+      console.error('[SoldierVideo] Transcription failed:', error.response.status, error.response.data);
+    } else {
+      console.error('[SoldierVideo] Audio extraction/transcription error:', error.message);
+    }
+    // Clean up on error
+    await fs.unlink(audioPath).catch(() => {});
+  }
+}
 
 /**
  * POST /api/scenario/video-panel-closed

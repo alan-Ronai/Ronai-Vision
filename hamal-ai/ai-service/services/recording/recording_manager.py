@@ -276,11 +276,16 @@ class RecordingManager:
                     logger.info(f"Queued {recording.recording_id} for encoding")
                 except Exception as e:
                     logger.error(f"Failed to queue for async encoding: {e}, encoding synchronously")
-                    self._encode_recording_sync(recording)
+                    success = self._encode_recording_sync(recording)
+                    if success:
+                        self._send_video_event_sync(recording)
             else:
                 # No event loop available - encode synchronously
                 logger.info(f"No async loop, encoding {recording.recording_id} synchronously")
-                self._encode_recording_sync(recording)
+                success = self._encode_recording_sync(recording)
+                if success:
+                    # Send video event synchronously since we're not in async context
+                    self._send_video_event_sync(recording)
 
         except Exception as e:
             logger.error(f"Recording thread error for {recording.recording_id}: {e}", exc_info=True)
@@ -506,6 +511,90 @@ class RecordingManager:
 
         except Exception as e:
             logger.error(f"Failed to send video event: {e}", exc_info=True)
+
+    def _send_video_event_sync(self, recording: ActiveRecording):
+        """Synchronous version of _send_video_event for use from background threads.
+
+        Args:
+            recording: Completed recording
+        """
+        try:
+            # Calculate video URL (relative to recordings endpoint)
+            video_filename = os.path.basename(recording.output_path)
+            video_url = f"/recordings/{video_filename}"
+
+            # Build a descriptive title with context
+            title_parts = ["🎬"]
+
+            # Add object type if available
+            object_type = recording.metadata.get("object_type")
+            if object_type:
+                type_labels = {
+                    "person": "אדם",
+                    "car": "רכב",
+                    "truck": "משאית",
+                    "bus": "אוטובוס",
+                    "motorcycle": "אופנוע",
+                }
+                title_parts.append(type_labels.get(object_type, object_type))
+
+            # Add event type context
+            event_type = recording.metadata.get("event_type", "")
+            if event_type == "detection":
+                if not object_type:
+                    title_parts.append("זיהוי")
+            elif event_type == "transcription":
+                title_parts.append("קשר")
+
+            # Add camera
+            title_parts.append(f"מצלמה {recording.camera_id}")
+
+            title = " - ".join(title_parts) if len(title_parts) > 1 else "הקלטה נשמרה"
+
+            # Build description
+            description_parts = [f"{recording.duration:.0f} שניות"]
+            if recording.pre_buffer > 0:
+                description_parts.append(f"+{recording.pre_buffer:.0f}s לפני האירוע")
+
+            description = " | ".join(description_parts)
+
+            # Build event payload
+            event = {
+                "type": "video",
+                "severity": "info",
+                "title": title,
+                "description": description,
+                "cameraId": recording.camera_id,
+                "videoClip": video_url,
+                "details": {
+                    "recording_id": recording.recording_id,
+                    "duration": recording.duration,
+                    "pre_buffer": recording.pre_buffer,
+                    "frame_count": len(recording.timestamps),
+                    "trigger_reason": recording.trigger_reason,
+                    "video_url": video_url,
+                    **recording.metadata
+                }
+            }
+
+            # Use synchronous httpx client
+            with httpx.Client(timeout=10.0) as client:
+                response = client.post(
+                    f"{BACKEND_URL}/api/events",
+                    json=event
+                )
+
+                if response.status_code in (200, 201):
+                    logger.info(f"Video event sent (sync) for {recording.recording_id}")
+                else:
+                    logger.warning(f"Video event failed (sync): {response.status_code}")
+
+            # Call callback if registered
+            if self.on_recording_complete:
+                self.on_recording_complete(recording)
+
+        except Exception as e:
+            logger.error(f"Failed to send video event (sync): {e}", exc_info=True)
 
     def get_stats(self) -> Dict:
         """Get recording manager statistics.

@@ -1469,9 +1469,14 @@ class DetectionLoop:
             weapon_elapsed = (time.time() - weapon_start) * 1000
             self._update_timing("weapon_ms", weapon_elapsed)
 
-            # Check for armed persons
+            # Check for armed persons - only include actively detected (not predicted/stale)
             armed_persons = []
             for p in tracked_persons:
+                # Skip persons that are only predicted (not actively detected in this frame)
+                # This prevents triggering events for persons who have left the scene
+                if p.get("is_predicted", False):
+                    continue
+
                 meta = p.get("metadata", {})
                 if meta:
                     if meta.get("armed") or meta.get("חמוש"):
@@ -2994,7 +2999,7 @@ class DetectionLoop:
             # Build list of detections for rule context
             all_detections = []
 
-            # Add tracked persons
+            # Add tracked persons (include is_predicted flag for stale detection filtering)
             for p in result.tracked_persons:
                 all_detections.append({
                     "class": "person",
@@ -3002,17 +3007,19 @@ class DetectionLoop:
                     "bbox": p.get("bbox"),
                     "confidence": p.get("confidence", 0.5),
                     "metadata": p.get("metadata", {}),
-                    "armed": p.get("metadata", {}).get("analysis", {}).get("armed", False)
+                    "armed": p.get("metadata", {}).get("analysis", {}).get("armed", False),
+                    "is_predicted": p.get("is_predicted", False),  # True if not actively detected
                 })
 
-            # Add tracked vehicles
+            # Add tracked vehicles (include is_predicted flag for stale detection filtering)
             for v in result.tracked_vehicles:
                 all_detections.append({
                     "class": v.get("class", "vehicle"),
                     "track_id": v.get("track_id"),
                     "bbox": v.get("bbox"),
                     "confidence": v.get("confidence", 0.5),
-                    "metadata": v.get("metadata", {})
+                    "metadata": v.get("metadata", {}),
+                    "is_predicted": v.get("is_predicted", False),  # True if not actively detected
                 })
 
             # Get attributes from armed persons if any

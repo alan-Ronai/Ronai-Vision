@@ -82,33 +82,45 @@ class RadioService:
             "last_chunk_time": None,
         }
 
+        # Check environment variables to disable transcribers
+        disable_whisper = os.environ.get("DISABLE_WHISPER", "false").lower() == "true"
+        disable_gemini = os.environ.get("DISABLE_GEMINI_TRANSCRIPTION", "false").lower() == "true"
+
         # Initialize Gemini transcriber (Tab 2 - מתמלל 2)
-        self.gemini_transcriber = StreamingGeminiTranscriber(
-            sample_rate=sample_rate,
-            chunk_duration=chunk_duration,
-            silence_threshold=silence_threshold,
-            silence_duration=silence_duration,
-            min_duration=min_duration,
-            idle_timeout=idle_timeout,
-            save_audio=save_audio,
-            use_vad=use_vad,
-            on_transcription=self._handle_gemini_transcription,
-        )
+        if not disable_gemini:
+            self.gemini_transcriber = StreamingGeminiTranscriber(
+                sample_rate=sample_rate,
+                chunk_duration=chunk_duration,
+                silence_threshold=silence_threshold,
+                silence_duration=silence_duration,
+                min_duration=min_duration,
+                idle_timeout=idle_timeout,
+                save_audio=save_audio,
+                use_vad=use_vad,
+                on_transcription=self._handle_gemini_transcription,
+            )
+        else:
+            self.gemini_transcriber = None
+            logger.info("Gemini transcriber DISABLED (DISABLE_GEMINI_TRANSCRIPTION=true)")
 
         # Initialize Whisper transcriber (Tab 1 - מתמלל 1)
-        self.whisper_transcriber = WhisperTranscriber(
-            model_path=whisper_model_path,
-            device="auto",
-            compute_type="int8",
-            sample_rate=sample_rate,
-            chunk_duration=chunk_duration,
-            silence_threshold=silence_threshold,
-            silence_duration=silence_duration,
-            min_duration=min_duration,
-            idle_timeout=idle_timeout,
-            save_audio=save_audio,
-            on_transcription=self._handle_whisper_transcription,
-        )
+        if not disable_whisper:
+            self.whisper_transcriber = WhisperTranscriber(
+                model_path=whisper_model_path,
+                device="auto",
+                compute_type="int8",
+                sample_rate=sample_rate,
+                chunk_duration=chunk_duration,
+                silence_threshold=silence_threshold,
+                silence_duration=silence_duration,
+                min_duration=min_duration,
+                idle_timeout=idle_timeout,
+                save_audio=save_audio,
+                on_transcription=self._handle_whisper_transcription,
+            )
+        else:
+            self.whisper_transcriber = None
+            logger.info("Whisper transcriber DISABLED (DISABLE_WHISPER=true)")
 
         # Keep reference to main transcriber for backwards compatibility
         self.transcriber = self.gemini_transcriber
@@ -125,7 +137,7 @@ class RadioService:
 
         # Diagnostic logging
         logger.info("=" * 60)
-        logger.info("RadioService Configuration (Dual Transcriber):")
+        logger.info("RadioService Configuration (Live Streaming):")
         logger.info(f"  EC2 Relay: {self.ec2_host}:{self.ec2_port}")
         logger.info(f"  Sample Rate: {sample_rate} Hz")
         logger.info(f"  Chunk Duration: {chunk_duration}s (max)")
@@ -137,13 +149,19 @@ class RadioService:
         logger.info(f"  Save Audio Files: {save_audio}")
         logger.info(f"  VAD Enabled: {use_vad}")
         logger.info(f"  Backend URL: {backend_url}")
-        logger.info(
-            f"  Gemini Transcriber: {'configured' if self.gemini_transcriber.is_configured() else 'NOT configured'}"
-        )
-        logger.info(
-            f"  Whisper Transcriber: {'configured' if self.whisper_transcriber.is_configured() else 'NOT configured'}"
-        )
-        logger.info(f"  Whisper Model Path: {whisper_model_path}")
+        if self.gemini_transcriber:
+            logger.info(
+                f"  Gemini Transcriber: {'configured' if self.gemini_transcriber.is_configured() else 'NOT configured'}"
+            )
+        else:
+            logger.info("  Gemini Transcriber: DISABLED")
+        if self.whisper_transcriber:
+            logger.info(
+                f"  Whisper Transcriber: {'configured' if self.whisper_transcriber.is_configured() else 'NOT configured'}"
+            )
+            logger.info(f"  Whisper Model Path: {whisper_model_path}")
+        else:
+            logger.info("  Whisper Transcriber: DISABLED")
         logger.info("=" * 60)
 
     async def start(self):
@@ -154,11 +172,13 @@ class RadioService:
         self._running = True
         self._http_client = httpx.AsyncClient(timeout=10.0)
 
-        # Set event loop for both transcribers (for cross-thread async calls)
+        # Set event loop for transcribers (for cross-thread async calls)
         try:
             loop = asyncio.get_running_loop()
-            self.gemini_transcriber.set_event_loop(loop)
-            self.whisper_transcriber.set_event_loop(loop)
+            if self.gemini_transcriber:
+                self.gemini_transcriber.set_event_loop(loop)
+            if self.whisper_transcriber:
+                self.whisper_transcriber.set_event_loop(loop)
         except RuntimeError:
             logger.warning("Could not get running loop for transcribers")
 
@@ -206,20 +226,22 @@ class RadioService:
                 f"(chunk #{self._audio_stats['chunks_received']})"
             )
 
-        # Feed to BOTH transcribers
-        try:
-            self.gemini_transcriber.add_audio(audio_data)
-        except Exception as e:
-            logger.error(
-                f"Failed to add audio to Gemini transcriber: {e}", exc_info=True
-            )
+        # Feed to enabled transcribers
+        if self.gemini_transcriber:
+            try:
+                self.gemini_transcriber.add_audio(audio_data)
+            except Exception as e:
+                logger.error(
+                    f"Failed to add audio to Gemini transcriber: {e}", exc_info=True
+                )
 
-        try:
-            self.whisper_transcriber.add_audio(audio_data)
-        except Exception as e:
-            logger.error(
-                f"Failed to add audio to Whisper transcriber: {e}", exc_info=True
-            )
+        if self.whisper_transcriber:
+            try:
+                self.whisper_transcriber.add_audio(audio_data)
+            except Exception as e:
+                logger.error(
+                    f"Failed to add audio to Whisper transcriber: {e}", exc_info=True
+                )
 
     def _handle_gemini_transcription(self, result: TranscriptionResult):
         """Handle Gemini transcription result.
@@ -341,17 +363,19 @@ class RadioService:
 
     def get_stats(self) -> dict:
         """Get service statistics."""
-        return {
+        stats = {
             "running": self._running,
             "ec2_host": self.ec2_host,
             "ec2_port": self.ec2_port,
             "audio": self._audio_stats,
             "tcp_client": self.tcp_client.get_stats(),
-            "gemini_transcriber": self.gemini_transcriber.get_stats(),
-            "whisper_transcriber": self.whisper_transcriber.get_stats(),
-            # Keep for backwards compatibility
-            "transcriber": self.gemini_transcriber.get_stats(),
+            "gemini_transcriber": self.gemini_transcriber.get_stats() if self.gemini_transcriber else {"disabled": True},
+            "whisper_transcriber": self.whisper_transcriber.get_stats() if self.whisper_transcriber else {"disabled": True},
         }
+        # Keep for backwards compatibility
+        if self.gemini_transcriber:
+            stats["transcriber"] = self.gemini_transcriber.get_stats()
+        return stats
 
 
 # Global singleton

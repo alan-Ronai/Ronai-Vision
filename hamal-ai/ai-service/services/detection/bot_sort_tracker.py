@@ -635,13 +635,67 @@ class BoTSORTTracker:
                     return track
         return None
 
-    def get_stats(self) -> dict:
-        """Get tracker statistics."""
-        return {
+    def get_stats(self, camera_id: Optional[str] = None) -> dict:
+        """Get tracker statistics.
+
+        Args:
+            camera_id: Optional camera ID to filter stats by
+
+        Returns:
+            Dictionary with tracker stats including active/visible counts
+        """
+        # Count all tracks
+        total_persons = len(self._persons)
+        total_vehicles = len(self._vehicles)
+
+        # Count visible tracks (time_since_update == 0, meaning actively detected this frame)
+        visible_persons = 0
+        visible_vehicles = 0
+
+        # Count tracks by camera if specified
+        camera_persons = 0
+        camera_vehicles = 0
+        camera_visible_persons = 0
+        camera_visible_vehicles = 0
+
+        for track in self._persons.values():
+            is_visible = track.time_since_update == 0
+            if is_visible:
+                visible_persons += 1
+
+            if camera_id and track.last_seen_camera == camera_id:
+                camera_persons += 1
+                if is_visible:
+                    camera_visible_persons += 1
+
+        for track in self._vehicles.values():
+            is_visible = track.time_since_update == 0
+            if is_visible:
+                visible_vehicles += 1
+
+            if camera_id and track.last_seen_camera == camera_id:
+                camera_vehicles += 1
+                if is_visible:
+                    camera_visible_vehicles += 1
+
+        result = {
             **self._stats,
-            "persons": len(self._persons),
-            "vehicles": len(self._vehicles)
+            "persons": total_persons,
+            "vehicles": total_vehicles,
+            "visible_persons": visible_persons,
+            "visible_vehicles": visible_vehicles,
         }
+
+        if camera_id:
+            result["camera_stats"] = {
+                "camera_id": camera_id,
+                "persons": camera_persons,
+                "vehicles": camera_vehicles,
+                "visible_persons": camera_visible_persons,
+                "visible_vehicles": camera_visible_vehicles,
+            }
+
+        return result
 
     def reset(self):
         """Reset tracker (clear all tracks)."""

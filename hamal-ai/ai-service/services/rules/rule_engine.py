@@ -131,6 +131,7 @@ class RuleEngine:
         self._debounce_cache: Dict[str, float] = {}
         self._aggregate_cache: Dict[str, List[Dict]] = {}
         self._periodic_cache: Dict[str, float] = {}  # Track last trigger time for periodic rules
+        self._gid_trigger_counts: Dict[str, int] = {}  # Track trigger counts per GID per rule
         self._condition_handlers: Dict[str, Callable] = {}
         self._pipeline_handlers: Dict[str, Callable] = {}
         self._action_handlers: Dict[str, Callable] = {}
@@ -168,6 +169,7 @@ class RuleEngine:
             "filter": self._pipe_filter,
             "delay": self._pipe_delay,
             "debounce": self._pipe_debounce,
+            "gid_limit": self._pipe_gid_limit,  # Limit triggers per GID
             "set_placeholder": self._pipe_set_placeholder,
             "transform": self._pipe_transform,
             "enrich": self._pipe_enrich,
@@ -1116,6 +1118,84 @@ class RuleEngine:
             }
 
         return True
+
+    async def _pipe_gid_limit(
+        self, params: Dict, ctx: RuleContext, rule_id: str
+    ) -> bool:
+        """Limit triggers per GID - only allow N triggers per global ID.
+
+        This is useful for rules that should only fire once (or a limited number
+        of times) per detected object, regardless of how many frames it appears in.
+
+        Params:
+            maxTriggers: Maximum number of triggers allowed per GID (default: 1)
+            resetAfterSeconds: Reset the counter after this many seconds (default: 0 = never)
+
+        Example usage in rule pipeline:
+            {"type": "gid_limit", "params": {"maxTriggers": 1}}  # Trigger once per GID
+            {"type": "gid_limit", "params": {"maxTriggers": 3, "resetAfterSeconds": 300}}  # 3 times per 5 min
+        """
+        max_triggers = params.get("maxTriggers", 1)
+        reset_after = params.get("resetAfterSeconds", 0)
+
+        # Get GID from track_id
+        track_id = ctx.track_id
+        if track_id is None:
+            # No track ID, allow the trigger (might be a non-track event)
+            return True
+
+        # Build unique key: rule_id + gid
+        gid_key = f"{rule_id}_gid_{track_id}"
+
+        # Check if we need to reset based on time
+        if reset_after > 0:
+            time_key = f"{gid_key}_time"
+            last_time = self._debounce_cache.get(time_key, 0)
+            now = time.time()
+            if last_time > 0 and (now - last_time) > reset_after:
+                # Reset the counter
+                self._gid_trigger_counts.pop(gid_key, None)
+                logger.debug(f"GID limit reset for {gid_key} after {reset_after}s")
+
+            # Update last time
+            self._debounce_cache[time_key] = now
+
+        # Get current count
+        current_count = self._gid_trigger_counts.get(gid_key, 0)
+
+        if current_count >= max_triggers:
+            logger.debug(f"GID limit reached for {gid_key}: {current_count}/{max_triggers}")
+            return False  # Block the trigger
+
+        # Increment count and allow
+        self._gid_trigger_counts[gid_key] = current_count + 1
+        logger.debug(f"GID trigger {current_count + 1}/{max_triggers} for {gid_key}")
+
+        # Clean old entries periodically (keep last 10000 GIDs)
+        if len(self._gid_trigger_counts) > 10000:
+            # Keep most recent 5000 entries (rough cleanup)
+            keys = list(self._gid_trigger_counts.keys())
+            for key in keys[:5000]:
+                self._gid_trigger_counts.pop(key, None)
+
+        return True
+
+    def reset_gid_limits(self, rule_id: Optional[str] = None):
+        """Reset GID trigger counts.
+
+        Args:
+            rule_id: If provided, only reset counts for this rule. Otherwise reset all.
+        """
+        if rule_id:
+            prefix = f"{rule_id}_gid_"
+            self._gid_trigger_counts = {
+                k: v for k, v in self._gid_trigger_counts.items()
+                if not k.startswith(prefix)
+            }
+            logger.info(f"Reset GID limits for rule {rule_id}")
+        else:
+            self._gid_trigger_counts.clear()
+            logger.info("Reset all GID limits")
 
     async def _pipe_set_placeholder(
         self, params: Dict, ctx: RuleContext, rule_id: str

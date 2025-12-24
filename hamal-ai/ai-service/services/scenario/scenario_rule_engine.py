@@ -413,6 +413,27 @@ class ScenarioRuleEngine:
 
         logger.info(f"Scenario ended: {self.active_scenario.scenario_id}, duration: {duration_ms}ms")
 
+        # Clear armed status from all tracked persons
+        # This ensures GID Store indicators update when alert is handled
+        try:
+            from services.reid import get_reid_tracker
+            reid_tracker = get_reid_tracker()
+            if reid_tracker:
+                cleared = reid_tracker.clear_armed_status()
+                if cleared > 0:
+                    logger.info(f"Cleared armed status for {cleared} persons on scenario end")
+        except Exception as e:
+            logger.warning(f"Failed to clear armed status: {e}")
+
+        # Also clear scenario hooks state
+        try:
+            from services.scenario import get_scenario_hooks
+            hooks = get_scenario_hooks()
+            if hooks:
+                hooks.reset_reported()
+        except Exception as e:
+            logger.warning(f"Failed to reset scenario hooks: {e}")
+
         # Notify backend
         await self._notify_backend('ended', {
             'scenarioId': self.active_scenario.scenario_id,

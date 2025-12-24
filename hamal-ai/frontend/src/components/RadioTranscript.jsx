@@ -2,6 +2,7 @@ import { useApp } from "../context/AppContext";
 import { useRef, useEffect, useState } from "react";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3000";
+const AI_SERVICE_URL = import.meta.env.VITE_AI_SERVICE_URL || "http://localhost:8000";
 
 export default function RadioTranscript() {
     const {
@@ -16,7 +17,40 @@ export default function RadioTranscript() {
     const fileInputRef = useRef(null);
     const [isUploading, setIsUploading] = useState(false);
     const [uploadError, setUploadError] = useState(null);
-    const [activeTab, setActiveTab] = useState("whisper"); // Default to Whisper (מתמלל 1)
+    const [activeTab, setActiveTab] = useState(null); // Will be set based on available transcribers
+    const [availableTranscribers, setAvailableTranscribers] = useState(["whisper", "gemini"]); // Default to both
+    const [transcribersLoading, setTranscribersLoading] = useState(true);
+
+    // Fetch available transcribers on mount
+    useEffect(() => {
+        const fetchTranscribers = async () => {
+            try {
+                const response = await fetch(`${AI_SERVICE_URL}/radio/transcribers`);
+                if (response.ok) {
+                    const data = await response.json();
+                    const available = data.available_transcribers || [];
+                    setAvailableTranscribers(available);
+                    // Set default tab to first available transcriber
+                    if (available.length > 0 && !activeTab) {
+                        setActiveTab(available[0]);
+                    }
+                }
+            } catch (error) {
+                console.warn("Failed to fetch transcriber status:", error);
+                // Keep defaults if fetch fails
+            } finally {
+                setTranscribersLoading(false);
+            }
+        };
+        fetchTranscribers();
+    }, []);
+
+    // Set default tab once transcribers are loaded
+    useEffect(() => {
+        if (!transcribersLoading && !activeTab && availableTranscribers.length > 0) {
+            setActiveTab(availableTranscribers[0]);
+        }
+    }, [transcribersLoading, availableTranscribers, activeTab]);
 
     // Get current transcript based on active tab
     const currentTranscript =
@@ -186,8 +220,10 @@ export default function RadioTranscript() {
 
             {/* Main content area with vertical tabs */}
             <div className="flex-1 flex min-h-0">
-                {/* Vertical tabs on the left (appears on right in RTL) */}
+                {/* Vertical tabs on the left (appears on right in RTL) - only show if multiple transcribers */}
+                {availableTranscribers.length > 1 && (
                 <div className="flex flex-col border-l border-gray-600 bg-gray-750">
+                    {availableTranscribers.includes("whisper") && (
                     <button
                         onClick={() => setActiveTab("whisper")}
                         className={`
@@ -202,7 +238,7 @@ export default function RadioTranscript() {
                             writingMode: "vertical-rl",
                             textOrientation: "mixed",
                         }}
-                        title="מתמלל 1"
+                        title="מתמלל 1 (Whisper)"
                     >
                         <div className="flex items-center gap-1">
                             <span>מתמלל 1</span>
@@ -213,6 +249,8 @@ export default function RadioTranscript() {
                             )}
                         </div>
                     </button>
+                    )}
+                    {availableTranscribers.includes("gemini") && (
                     <button
                         onClick={() => setActiveTab("gemini")}
                         className={`
@@ -227,7 +265,7 @@ export default function RadioTranscript() {
                             writingMode: "vertical-rl",
                             textOrientation: "mixed",
                         }}
-                        title="מתמלל 2"
+                        title="מתמלל 2 (Gemini)"
                     >
                         <div className="flex items-center gap-1">
                             <span>מתמלל 2</span>
@@ -238,22 +276,34 @@ export default function RadioTranscript() {
                             )}
                         </div>
                     </button>
+                    )}
                 </div>
+                )}
 
                 {/* Transcript content */}
                 <div
                     ref={scrollRef}
                     className="flex-1 overflow-x-auto overflow-y-hidden p-3"
                 >
-                    {currentTranscript.length === 0 ? (
+                    {availableTranscribers.length === 0 ? (
+                        <div className="h-full flex items-center justify-center text-gray-500">
+                            <div className="text-center">
+                                <div className="text-4xl mb-2">🔇</div>
+                                <p>אין מתמללים זמינים</p>
+                                <p className="text-xs mt-1 text-gray-600">
+                                    כל המתמללים מושבתים
+                                </p>
+                            </div>
+                        </div>
+                    ) : currentTranscript.length === 0 ? (
                         <div className="h-full flex items-center justify-center text-gray-500">
                             <div className="text-center">
                                 <div className="text-4xl mb-2">📻</div>
                                 <p>ממתין לשידורים...</p>
                                 <p className="text-xs mt-1 text-gray-600">
-                                    {activeTab === "whisper"
-                                        ? "מתמלל 1"
-                                        : "מתמלל 2"}
+                                    {availableTranscribers.length === 1
+                                        ? (activeTab === "whisper" ? "Whisper" : "Gemini")
+                                        : (activeTab === "whisper" ? "מתמלל 1" : "מתמלל 2")}
                                 </p>
                             </div>
                         </div>
@@ -275,7 +325,7 @@ export default function RadioTranscript() {
             </div>
 
             {/* Latest transcription highlight */}
-            {currentTranscript.length > 0 && (
+            {currentTranscript.length > 0 && availableTranscribers.length > 0 && (
                 <div className="bg-gray-700/50 px-4 py-2 border-t border-gray-600 flex-shrink-0">
                     <div className="flex items-center gap-2">
                         <span className="text-yellow-400">⚡</span>
@@ -286,6 +336,8 @@ export default function RadioTranscript() {
                                     ?.text
                             }
                         </span>
+                        {/* Only show transcriber badge if multiple transcribers available */}
+                        {availableTranscribers.length > 1 && (
                         <span
                             className={`text-xs px-1 rounded ${
                                 activeTab === "whisper"
@@ -295,6 +347,7 @@ export default function RadioTranscript() {
                         >
                             {activeTab === "whisper" ? "מתמלל 1" : "מתמלל 2"}
                         </span>
+                        )}
                     </div>
                 </div>
             )}

@@ -1359,6 +1359,37 @@ async def get_tracker_stats():
     return tracker.get_stats()
 
 
+@app.get("/tracker/stats/{camera_id}")
+async def get_tracker_stats_for_camera(camera_id: str):
+    """Get tracker statistics for a specific camera.
+
+    Returns counts of visible (actively detected) vs total tracked objects
+    for the specified camera.
+    """
+    from services.detection import get_bot_sort_tracker
+
+    bot_sort = get_bot_sort_tracker()
+    if not bot_sort:
+        return {"error": "BoT-SORT tracker not initialized"}
+
+    stats = bot_sort.get_stats(camera_id=camera_id)
+
+    return {
+        "camera_id": camera_id,
+        "reid_tracker": tracker.get_stats(),
+        "bot_sort": stats,
+        # Convenience fields for frontend
+        "persons": {
+            "visible": stats.get("camera_stats", {}).get("visible_persons", 0),
+            "total": stats.get("camera_stats", {}).get("persons", 0),
+        },
+        "vehicles": {
+            "visible": stats.get("camera_stats", {}).get("visible_vehicles", 0),
+            "total": stats.get("camera_stats", {}).get("vehicles", 0),
+        },
+    }
+
+
 @app.post("/tracker/refresh-analysis/{track_id}")
 async def refresh_analysis(
     track_id: str,
@@ -1640,6 +1671,38 @@ async def reset_tracker():
     """Reset all trackers and clear stored data"""
     tracker.reset()
     return {"message": "Tracker reset successfully"}
+
+
+@app.post("/tracker/clear-armed")
+async def clear_armed_status():
+    """Clear armed status from all tracked persons.
+
+    Called when an alert/scenario is handled to reset the armed indicators
+    in the GID Store panel.
+    """
+    cleared = tracker.clear_armed_status()
+
+    # Also reset scenario hooks and GID limits in rule engine
+    try:
+        from services.scenario import get_scenario_hooks
+        hooks = get_scenario_hooks()
+        if hooks:
+            hooks.reset_reported()
+    except Exception as e:
+        logger.warning(f"Failed to reset scenario hooks: {e}")
+
+    try:
+        from services.rules import get_rule_engine
+        rule_engine = get_rule_engine()
+        if rule_engine:
+            rule_engine.reset_gid_limits()
+    except Exception as e:
+        logger.warning(f"Failed to reset GID limits: {e}")
+
+    return {
+        "message": f"Cleared armed status for {cleared} persons",
+        "cleared_count": cleared
+    }
 
 
 @app.delete("/tracker/cleanup")
@@ -2700,6 +2763,38 @@ async def radio_stats():
     return {
         **service_stats,
         "transcriber_manager": transcriber_stats
+    }
+
+
+@app.get("/radio/transcribers")
+async def get_transcriber_status():
+    """Get status of available transcribers.
+
+    Returns which transcribers are enabled/disabled and configured.
+    Frontend can use this to show/hide transcription tabs.
+    """
+    gemini = get_gemini_transcriber()
+    whisper = get_whisper_transcriber()
+    stats = get_transcriber_stats()
+
+    return {
+        "gemini": {
+            "enabled": not stats.get("gemini_disabled", False),
+            "configured": gemini.is_configured() if gemini else False,
+            "available": gemini is not None and gemini.is_configured(),
+        },
+        "whisper": {
+            "enabled": not stats.get("whisper_disabled", False),
+            "configured": whisper.is_configured() if whisper else False,
+            "available": whisper is not None and whisper.is_configured(),
+        },
+        # Convenience: list of available transcribers for UI tabs
+        "available_transcribers": [
+            name for name, available in [
+                ("gemini", gemini is not None and gemini.is_configured()),
+                ("whisper", whisper is not None and whisper.is_configured()),
+            ] if available
+        ]
     }
 
 

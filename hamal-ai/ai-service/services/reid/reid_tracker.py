@@ -187,6 +187,30 @@ class ReIDTracker:
                     armed.append(track_id)
         return armed
 
+    def clear_armed_status(self) -> int:
+        """Clear armed status from all tracked persons.
+
+        Called when a scenario/alert is resolved to reset the armed indicators.
+
+        Returns:
+            Number of persons that had their armed status cleared
+        """
+        cleared = 0
+        for track_id, meta in self.tracked_objects.items():
+            if track_id.startswith("p_"):
+                analysis = meta.get("analysis", {})
+                if analysis.get("armed") or analysis.get("חמוש"):
+                    analysis["armed"] = False
+                    analysis["חמוש"] = False
+                    analysis["armed_cleared"] = True  # Mark as previously armed but cleared
+                    cleared += 1
+                    logger.debug(f"Cleared armed status for {track_id}")
+
+        if cleared > 0:
+            logger.info(f"Cleared armed status for {cleared} persons")
+
+        return cleared
+
     def cleanup_old_tracks(self, max_age_seconds: int = 3600) -> int:
         """
         Remove tracks that haven't been seen for a while.

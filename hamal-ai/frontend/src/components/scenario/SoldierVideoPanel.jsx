@@ -1,27 +1,30 @@
 /**
  * SoldierVideoPanel - Split-screen video player with transcription
  *
- * Shows soldier video on the left, live transcription on the right.
+ * Shows soldier video on the right (in RTL), live transcription on the left.
+ * Receives real transcriptions via Socket.IO from available transcribers (Whisper/Gemini).
+ * Shows tabs if multiple transcribers are available.
  */
 
 import { useState, useRef, useEffect } from 'react';
 import { useScenario } from '../../context/ScenarioContext';
+import { useApp } from '../../context/AppContext';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+const AI_SERVICE_URL = import.meta.env.VITE_AI_SERVICE_URL || 'http://localhost:8000';
 
 export default function SoldierVideoPanel() {
   const { soldierVideo, closeSoldierVideoPanel, config } = useScenario();
-  const [transcription, setTranscription] = useState([]);
+  const { socket } = useApp();
+  const [transcriptions, setTranscriptions] = useState({ whisper: [], gemini: [] });
+  const [activeTab, setActiveTab] = useState('whisper');
+  const [availableTranscribers, setAvailableTranscribers] = useState([]);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const videoRef = useRef(null);
   const transcriptionRef = useRef(null);
 
-  if (!soldierVideo || !soldierVideo.open) {
-    return null;
-  }
-
   // Handle missing video path - show placeholder
-  const hasVideo = soldierVideo.videoPath && soldierVideo.videoPath.length > 0;
+  const hasVideo = soldierVideo?.videoPath && soldierVideo.videoPath.length > 0;
   const videoUrl = hasVideo
     ? (soldierVideo.videoPath.startsWith('http')
         ? soldierVideo.videoPath
@@ -32,43 +35,123 @@ export default function SoldierVideoPanel() {
     await closeSoldierVideoPanel();
   };
 
-  // Simulate live transcription (in real implementation, this would use audio extraction + transcription)
+  // Fetch available transcribers on mount
   useEffect(() => {
-    if (!soldierVideo) return;
+    if (!soldierVideo?.open) return;
 
+    const fetchTranscribers = async () => {
+      try {
+        const response = await fetch(`${AI_SERVICE_URL}/radio/transcribers`);
+        if (response.ok) {
+          const data = await response.json();
+          const available = data.available_transcribers || [];
+          setAvailableTranscribers(available);
+          if (available.length > 0) {
+            setActiveTab(available[0]);
+          }
+        }
+      } catch (error) {
+        console.warn('Failed to fetch transcriber status:', error);
+        setAvailableTranscribers(['whisper', 'gemini']); // Default
+      }
+    };
+    fetchTranscribers();
+  }, [soldierVideo?.open]);
+
+  // Listen for transcription events from Socket.IO
+  // We listen to BOTH the soldier-video specific event AND the regular radio transcription events
+  // This way we get transcriptions immediately as each transcriber finishes
+  useEffect(() => {
+    if (!socket || !soldierVideo?.open) return;
+
+    // Start transcription indicator when video opens
     setIsTranscribing(true);
+    setTranscriptions({ whisper: [], gemini: [] });
 
-    // Simulate transcription appearing over time
-    const mockTranscription = [
-      { time: 0, text: 'אני באזור המטרה.' },
-      { time: 2, text: 'רואה שלושה חשודים לובשים שחור.' },
-      { time: 5, text: 'הם חמושים ברובים.' },
-      { time: 8, text: 'ממתין להוראות.' },
-      { time: 11, text: 'האם להתקדם?' },
-    ];
+    // Handler for adding a single transcription
+    const addTranscription = (source, text, timestamp) => {
+      console.log(`[SoldierVideoPanel] Received ${source} transcription:`, text?.substring(0, 50));
 
-    const timers = mockTranscription.map((item, index) => {
-      return setTimeout(() => {
-        setTranscription(prev => [...prev, item]);
+      setTranscriptions(prev => {
+        const updated = { ...prev };
+        if (!updated[source]) updated[source] = [];
+        updated[source] = [...updated[source], {
+          text: text,
+          source: source,
+          timestamp: timestamp || new Date().toISOString(),
+          time: updated[source].length
+        }];
+        return updated;
+      });
+      setIsTranscribing(false);
 
-        // Auto-scroll transcription
+      // Auto-scroll transcription
+      setTimeout(() => {
         if (transcriptionRef.current) {
           transcriptionRef.current.scrollTop = transcriptionRef.current.scrollHeight;
         }
-      }, item.time * 1000);
-    });
+      }, 100);
+    };
 
-    // Mark transcription complete
-    const completeTimer = setTimeout(() => {
+    // Handler for soldier-video specific event (combined results)
+    const handleSoldierVideoTranscription = (data) => {
+      console.log('[SoldierVideoPanel] Received soldier-video transcription:', data);
+      if (data.transcriptions && data.transcriptions.length > 0) {
+        data.transcriptions.forEach((t) => {
+          addTranscription(t.source || 'whisper', t.text, t.timestamp);
+        });
+      }
+    };
+
+    // Handler for Whisper radio transcription (immediate)
+    const handleWhisperTranscription = (data) => {
+      if (data.text) {
+        addTranscription('whisper', data.text, data.timestamp);
+      }
+    };
+
+    // Handler for Gemini radio transcription (immediate)
+    const handleGeminiTranscription = (data) => {
+      if (data.text) {
+        addTranscription('gemini', data.text, data.timestamp);
+      }
+    };
+
+    // Listen to all transcription events
+    socket.on('scenario:soldier-video-transcription', handleSoldierVideoTranscription);
+    socket.on('radio:transcription:whisper', handleWhisperTranscription);
+    socket.on('radio:transcription:gemini', handleGeminiTranscription);
+
+    // Set timeout to stop "transcribing" indicator if no transcription received
+    const timeout = setTimeout(() => {
       setIsTranscribing(false);
-    }, 15000);
+    }, 60000); // 1 minute timeout
 
     return () => {
-      timers.forEach(t => clearTimeout(t));
-      clearTimeout(completeTimer);
-      setTranscription([]);
+      socket.off('scenario:soldier-video-transcription', handleSoldierVideoTranscription);
+      socket.off('radio:transcription:whisper', handleWhisperTranscription);
+      socket.off('radio:transcription:gemini', handleGeminiTranscription);
+      clearTimeout(timeout);
     };
-  }, [soldierVideo]);
+  }, [socket, soldierVideo?.open]);
+
+  // Clear transcription when panel closes
+  useEffect(() => {
+    if (!soldierVideo?.open) {
+      setTranscriptions({ whisper: [], gemini: [] });
+      setIsTranscribing(false);
+    }
+  }, [soldierVideo?.open]);
+
+  if (!soldierVideo || !soldierVideo.open) {
+    return null;
+  }
+
+  // Get current tab's transcription
+  const currentTranscription = transcriptions[activeTab] || [];
+
+  // Check if we have multiple transcribers with content
+  const hasMultipleTranscribers = availableTranscribers.length > 1;
 
   return (
     <div className="fixed inset-0 z-[100] bg-black/95 flex flex-col">
@@ -87,9 +170,9 @@ export default function SoldierVideoPanel() {
         </button>
       </div>
 
-      {/* Main content - split view */}
-      <div className="flex-1 flex">
-        {/* Video player - left side (60%) */}
+      {/* Main content - split view (flex-row-reverse for RTL: video on right, transcription on left) */}
+      <div className="flex-1 flex flex-row-reverse">
+        {/* Video player - right side in RTL (60%) */}
         <div className="w-3/5 p-4 flex items-center justify-center bg-black">
           {hasVideo ? (
             <video
@@ -119,16 +202,58 @@ export default function SoldierVideoPanel() {
           )}
         </div>
 
-        {/* Transcription - right side (40%) */}
-        <div className="w-2/5 bg-gray-900 border-r border-gray-700 flex flex-col">
-          {/* Transcription header */}
-          <div className="px-4 py-3 border-b border-gray-700 flex items-center justify-between">
-            <h3 className="text-lg font-semibold text-white">תמלול אודיו</h3>
-            {isTranscribing && (
-              <span className="flex items-center gap-2 text-green-400 text-sm">
-                <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
-                מתמלל...
-              </span>
+        {/* Transcription - left side in RTL (40%) */}
+        <div className="w-2/5 bg-gray-900 border-l border-gray-700 flex flex-col">
+          {/* Transcription header with tabs */}
+          <div className="px-4 py-3 border-b border-gray-700">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-lg font-semibold text-white">תמלול אודיו</h3>
+              {isTranscribing && (
+                <span className="flex items-center gap-2 text-green-400 text-sm">
+                  <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
+                  מתמלל...
+                </span>
+              )}
+            </div>
+
+            {/* Tabs - only show if multiple transcribers */}
+            {hasMultipleTranscribers && (
+              <div className="flex gap-2">
+                {availableTranscribers.includes('whisper') && (
+                  <button
+                    onClick={() => setActiveTab('whisper')}
+                    className={`px-3 py-1 rounded text-sm transition-colors ${
+                      activeTab === 'whisper'
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+                    }`}
+                  >
+                    Whisper
+                    {transcriptions.whisper.length > 0 && (
+                      <span className="mr-1 bg-blue-500 text-white text-xs px-1 rounded">
+                        {transcriptions.whisper.length}
+                      </span>
+                    )}
+                  </button>
+                )}
+                {availableTranscribers.includes('gemini') && (
+                  <button
+                    onClick={() => setActiveTab('gemini')}
+                    className={`px-3 py-1 rounded text-sm transition-colors ${
+                      activeTab === 'gemini'
+                        ? 'bg-purple-600 text-white'
+                        : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+                    }`}
+                  >
+                    Gemini
+                    {transcriptions.gemini.length > 0 && (
+                      <span className="mr-1 bg-purple-500 text-white text-xs px-1 rounded">
+                        {transcriptions.gemini.length}
+                      </span>
+                    )}
+                  </button>
+                )}
+              </div>
             )}
           </div>
 
@@ -138,19 +263,26 @@ export default function SoldierVideoPanel() {
             className="flex-1 p-4 overflow-y-auto text-right"
             dir="rtl"
           >
-            {transcription.length === 0 ? (
+            {currentTranscription.length === 0 ? (
               <div className="text-gray-500 text-center py-8">
-                ממתין לתמלול...
+                {isTranscribing ? 'מתמלל...' : 'ממתין לתמלול...'}
               </div>
             ) : (
               <div className="space-y-3">
-                {transcription.map((item, i) => (
+                {currentTranscription.map((item, i) => (
                   <div
                     key={i}
-                    className="bg-gray-800 rounded p-3 animate-fade-in"
+                    className={`rounded p-3 animate-fade-in ${
+                      item.source === 'whisper' ? 'bg-blue-900/30 border border-blue-700' : 'bg-purple-900/30 border border-purple-700'
+                    }`}
                   >
-                    <div className="text-xs text-gray-500 mb-1">
-                      {formatTime(item.time)}
+                    <div className="flex items-center gap-2 text-xs text-gray-500 mb-1">
+                      <span>{formatTime(item.time)}</span>
+                      <span className={`px-1 rounded ${
+                        item.source === 'whisper' ? 'bg-blue-600' : 'bg-purple-600'
+                      }`}>
+                        {item.source === 'whisper' ? 'W' : 'G'}
+                      </span>
                     </div>
                     <div className="text-white">{item.text}</div>
                   </div>
@@ -164,8 +296,17 @@ export default function SoldierVideoPanel() {
             <button
               className="w-full bg-blue-600 hover:bg-blue-700 text-white py-2 rounded flex items-center justify-center gap-2"
               onClick={() => {
-                // Download transcription as text
-                const text = transcription.map(t => `[${formatTime(t.time)}] ${t.text}`).join('\n');
+                // Download all transcriptions as text
+                let text = '';
+                if (transcriptions.whisper.length > 0) {
+                  text += '=== Whisper ===\n';
+                  text += transcriptions.whisper.map(t => `[${formatTime(t.time)}] ${t.text}`).join('\n');
+                  text += '\n\n';
+                }
+                if (transcriptions.gemini.length > 0) {
+                  text += '=== Gemini ===\n';
+                  text += transcriptions.gemini.map(t => `[${formatTime(t.time)}] ${t.text}`).join('\n');
+                }
                 const blob = new Blob([text], { type: 'text/plain' });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');

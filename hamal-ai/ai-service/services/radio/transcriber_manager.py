@@ -57,6 +57,10 @@ def init_transcribers(
 
     Should be called once during application startup.
 
+    Environment variables:
+        DISABLE_WHISPER: Set to "true" to disable Whisper transcription (saves memory/CPU)
+        DISABLE_GEMINI_TRANSCRIPTION: Set to "true" to disable Gemini transcription
+
     Args:
         whisper_model_path: Path to Whisper CT2 model
         save_audio: Whether to save audio files for debugging
@@ -71,8 +75,16 @@ def init_transcribers(
         logger.warning("Transcribers already initialized, skipping")
         return True
 
+    # Check environment variables to disable transcribers
+    disable_whisper = os.environ.get("DISABLE_WHISPER", "false").lower() == "true"
+    disable_gemini = os.environ.get("DISABLE_GEMINI_TRANSCRIPTION", "false").lower() == "true"
+
     logger.info("=" * 60)
     logger.info("📻 Initializing Global Transcriber Manager")
+    if disable_whisper:
+        logger.info("  ⚠️  WHISPER DISABLED via DISABLE_WHISPER=true")
+    if disable_gemini:
+        logger.info("  ⚠️  GEMINI TRANSCRIPTION DISABLED via DISABLE_GEMINI_TRANSCRIPTION=true")
     logger.info("=" * 60)
 
     try:
@@ -80,32 +92,46 @@ def init_transcribers(
         from .whisper_transcriber import WhisperTranscriber
 
         # Initialize Gemini transcriber (fast, cloud-based)
-        _gemini_transcriber = GeminiTranscriber(save_audio=save_audio)
-        gemini_status = "✅ configured" if _gemini_transcriber.is_configured() else "❌ not configured (missing GEMINI_API_KEY)"
-        logger.info(f"  Gemini Transcriber: {gemini_status}")
+        if not disable_gemini:
+            _gemini_transcriber = GeminiTranscriber(save_audio=save_audio)
+            gemini_status = "✅ configured" if _gemini_transcriber.is_configured() else "❌ not configured (missing GEMINI_API_KEY)"
+            logger.info(f"  Gemini Transcriber: {gemini_status}")
+        else:
+            _gemini_transcriber = None
+            logger.info("  Gemini Transcriber: ⏸️  DISABLED (DISABLE_GEMINI_TRANSCRIPTION=true)")
 
         # Initialize Whisper transcriber (slow, local)
-        _whisper_transcriber = WhisperTranscriber(
-            model_path=whisper_model_path,
-            device="auto",
-            compute_type="int8",
-            save_audio=save_audio,
-        )
-        whisper_status = "✅ configured" if _whisper_transcriber.is_configured() else "❌ not configured (model not found)"
-        logger.info(f"  Whisper Transcriber: {whisper_status}")
-        logger.info(f"    Model path: {whisper_model_path}")
-        logger.info(f"    Device: {_whisper_transcriber.device}")
+        if not disable_whisper:
+            _whisper_transcriber = WhisperTranscriber(
+                model_path=whisper_model_path,
+                device="auto",
+                compute_type="int8",
+                save_audio=save_audio,
+            )
+            whisper_status = "✅ configured" if _whisper_transcriber.is_configured() else "❌ not configured (model not found)"
+            logger.info(f"  Whisper Transcriber: {whisper_status}")
+            logger.info(f"    Model path: {whisper_model_path}")
+            logger.info(f"    Device: {_whisper_transcriber.device}")
 
-        # Note: Whisper model is now loaded automatically in __init__
-        # Just record the load time if available
-        if _whisper_transcriber.is_configured() and _whisper_transcriber._initialized:
-            logger.info("  Whisper model: already loaded at initialization")
+            # Note: Whisper model is now loaded automatically in __init__
+            # Just record the load time if available
+            if _whisper_transcriber.is_configured() and _whisper_transcriber._initialized:
+                logger.info("  Whisper model: already loaded at initialization")
+        else:
+            _whisper_transcriber = None
+            logger.info("  Whisper Transcriber: ⏸️  DISABLED (DISABLE_WHISPER=true)")
+            logger.info("    💾 Memory saved: ~1-2GB (Whisper model not loaded)")
 
         # Initialize semaphore (allow only 1 concurrent Whisper transcription)
-        _whisper_semaphore = asyncio.Semaphore(1)
+        if not disable_whisper:
+            _whisper_semaphore = asyncio.Semaphore(1)
+        else:
+            _whisper_semaphore = None
 
         _initialized = True
         _stats["initialized_at"] = datetime.now().isoformat()
+        _stats["whisper_disabled"] = disable_whisper
+        _stats["gemini_disabled"] = disable_gemini
 
         logger.info("=" * 60)
         logger.info("✅ Global Transcriber Manager initialized")

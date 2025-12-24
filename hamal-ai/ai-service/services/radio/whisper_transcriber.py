@@ -18,9 +18,13 @@ from concurrent.futures import Future
 from datetime import datetime
 import numpy as np
 
-# Suppress warnings
+# Suppress warnings (including numpy RuntimeWarnings from faster_whisper mel spectrogram calculations)
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=RuntimeWarning, module="faster_whisper")
+warnings.filterwarnings("ignore", message=".*divide by zero.*")
+warnings.filterwarnings("ignore", message=".*overflow.*")
+warnings.filterwarnings("ignore", message=".*invalid value.*")
 
 logger = logging.getLogger(__name__)
 

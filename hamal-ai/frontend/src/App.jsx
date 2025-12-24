@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { AppProvider, useApp } from './context/AppContext';
 import { ScenarioProvider, useScenario } from './context/ScenarioContext';
 import CameraGrid from './components/CameraGrid';
@@ -201,6 +201,8 @@ function ScenarioTestControls() {
   const [showControls, setShowControls] = useState(false);
   const [realDataLoading, setRealDataLoading] = useState(false);
   const [realDataMessage, setRealDataMessage] = useState('');
+  const [soldierVideoUploading, setSoldierVideoUploading] = useState(false);
+  const soldierVideoInputRef = useRef(null);
 
   // Trigger real data scenario
   const triggerRealScenario = async (type) => {
@@ -243,6 +245,52 @@ function ScenarioTestControls() {
       setRealDataMessage('שגיאה בחיבור');
     } finally {
       setRealDataLoading(false);
+    }
+  };
+
+  // Handle soldier video upload
+  const handleSoldierVideoUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!file.name.toLowerCase().endsWith('.mp4')) {
+      setRealDataMessage('יש להעלות קובץ MP4 בלבד');
+      return;
+    }
+
+    if (file.size > 100 * 1024 * 1024) {
+      setRealDataMessage('הקובץ גדול מדי (מקס 100MB)');
+      return;
+    }
+
+    setSoldierVideoUploading(true);
+    setRealDataMessage('מעלה סרטון...');
+
+    try {
+      const formData = new FormData();
+      formData.append('video', file);
+
+      const response = await fetch(`${BACKEND_URL}/api/scenario/soldier-video`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      const result = await response.json();
+
+      if (response.ok) {
+        setRealDataMessage('סרטון נשלח, מתמלל...');
+        setTimeout(() => setRealDataMessage(''), 5000);
+      } else {
+        setRealDataMessage(result.error || 'שגיאה');
+      }
+    } catch (error) {
+      console.error('Soldier video upload error:', error);
+      setRealDataMessage('שגיאה בהעלאה');
+    } finally {
+      setSoldierVideoUploading(false);
+      if (soldierVideoInputRef.current) {
+        soldierVideoInputRef.current.value = '';
+      }
     }
   };
 
@@ -301,6 +349,39 @@ function ScenarioTestControls() {
                 🔫 סמן אנשים כחמושים
               </button>
             </div>
+          </div>
+
+          {/* Soldier Video Upload */}
+          <div className="border-2 border-blue-500 rounded-lg p-3 bg-blue-900/20">
+            <h4 className="text-blue-400 font-bold mb-2 text-sm">📹 סרטון מלוחם:</h4>
+            <input
+              ref={soldierVideoInputRef}
+              type="file"
+              accept=".mp4,video/mp4"
+              onChange={handleSoldierVideoUpload}
+              className="hidden"
+            />
+            <button
+              onClick={() => soldierVideoInputRef.current?.click()}
+              disabled={soldierVideoUploading}
+              className={`w-full px-3 py-2 rounded text-sm font-bold flex items-center justify-center gap-2 ${
+                soldierVideoUploading
+                  ? 'bg-gray-600 cursor-wait'
+                  : 'bg-blue-600 hover:bg-blue-500'
+              }`}
+            >
+              {soldierVideoUploading ? (
+                <>
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                  <span>מעלה...</span>
+                </>
+              ) : (
+                <>📹 העלה סרטון MP4</>
+              )}
+            </button>
+            <p className="text-xs text-gray-400 mt-1 text-center">
+              יפתח פאנל וידאו עם תמלול אוטומטי
+            </p>
           </div>
 
           {/* Divider */}
