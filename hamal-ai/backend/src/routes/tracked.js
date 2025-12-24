@@ -352,7 +352,9 @@ router.post('/', async (req, res) => {
     }
 
     // Upsert - create or update
-    const query = gid ? { gid } : { trackId };
+    // IMPORTANT: Query by BOTH gid AND type to prevent collisions
+    // (vehicle GID 1 and person GID 1 are different objects)
+    const query = gid ? { gid, type } : { trackId };
     const object = await TrackedObject.findOneAndUpdate(
       query,
       {
@@ -531,7 +533,25 @@ router.patch('/:gid/analysis', async (req, res) => {
         });
       }
 
-      object = trackedStore.updateAnalysis(gid, req.body);
+      // Handle type correction from Gemini
+      const typeCorrection = req.body._typeCorrection;
+      if (typeCorrection && typeCorrection.correctedType && object.type !== typeCorrection.correctedType) {
+        console.log(`[Tracked] Type correction for GID ${gid}: ${typeCorrection.originalType} -> ${typeCorrection.correctedType}`);
+        object = trackedStore.changeType(gid, object.type, typeCorrection.correctedType);
+        if (!object) {
+          return res.status(404).json({ error: 'Failed to change object type' });
+        }
+        if (io) {
+          io.emit('tracked:typeChanged', {
+            gid: object.gid,
+            oldType: typeCorrection.originalType,
+            newType: typeCorrection.correctedType,
+            reason: typeCorrection.reason
+          });
+        }
+      }
+
+      object = trackedStore.updateAnalysis(gid, req.body, object.type);
       if (io) {
         io.emit('tracked:analysis', { gid, analysis: object.analysis });
         if (req.body.armed) {
@@ -567,6 +587,35 @@ router.patch('/:gid/analysis', async (req, res) => {
       });
       await object.save();
       console.log(`Auto-created tracked object GID ${gid} (${type})`);
+    }
+
+    // Handle type correction from Gemini (MongoDB)
+    const typeCorrection = req.body._typeCorrection;
+    if (typeCorrection && typeCorrection.correctedType && object.type !== typeCorrection.correctedType) {
+      console.log(`[Tracked] Type correction for GID ${gid}: ${typeCorrection.originalType} -> ${typeCorrection.correctedType}`);
+      const oldType = object.type;
+      object.type = typeCorrection.correctedType;
+      object.trackId = `${typeCorrection.correctedType === 'vehicle' ? 'v' : 't'}_${gid}`;
+
+      // If changing to vehicle, remove armed status
+      if (typeCorrection.correctedType === 'vehicle') {
+        object.isArmed = false;
+        if (object.analysis) {
+          delete object.analysis.armed;
+          delete object.analysis.חמוש;
+        }
+      }
+
+      await object.save();
+
+      if (io) {
+        io.emit('tracked:typeChanged', {
+          gid: object.gid,
+          oldType: oldType,
+          newType: typeCorrection.correctedType,
+          reason: typeCorrection.reason
+        });
+      }
     }
 
     await object.updateAnalysis(req.body);
@@ -890,6 +939,254 @@ router.delete('/cleanup', async (req, res) => {
       deleted: result.deletedCount
     });
   } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * DELETE /api/tracked/clear-all
+ * Clear ALL tracked objects (used on AI service restart)
+ */
+router.delete('/clear-all', async (req, res) => {
+  try {
+    // Clear in-memory store
+    trackedStore.clear();
+
+    // Clear MongoDB if connected
+    if (isMongoConnected()) {
+      await TrackedObject.deleteMany({});
+    }
+
+    console.log('[TrackedStore] All tracked objects cleared (AI service restart)');
+
+    res.json({
+      message: 'All tracked objects cleared',
+      success: true
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// ReID Gallery Endpoints for Persistent Re-identification
+// ============================================
+
+/**
+ * GET /api/tracked/gallery
+ * Get all tracked objects with ReID features for gallery sync
+ */
+router.get('/gallery', async (req, res) => {
+  try {
+    const { type, ttlDays = 7, withFeatures = 'true' } = req.query;
+    const ttl = parseInt(ttlDays);
+
+    if (!isMongoConnected()) {
+      const entries = trackedStore.getGalleryEntries({
+        type: type || undefined,
+        ttlDays: ttl
+      });
+      return res.json({ entries, count: entries.length, storage: 'in-memory' });
+    }
+
+    const entries = await TrackedObject.getGalleryEntries({
+      type: type || undefined,
+      ttlDays: ttl
+    });
+
+    // Format entries for gallery
+    const formattedEntries = entries.map(obj => ({
+      gid: obj.gid,
+      type: obj.type,
+      feature: obj.reidFeature?.feature,
+      feature_dim: obj.reidFeature?.featureDim,
+      feature_dtype: obj.reidFeature?.featureDtype || 'float32',
+      last_seen: obj.reidFeature?.lastUpdated || obj.lastSeen,
+      first_seen: obj.reidFeature?.firstCaptured || obj.firstSeen,
+      camera_id: obj.reidFeature?.capturedCameraId,
+      confidence: obj.reidFeature?.bestConfidence,
+      match_count: obj.reidFeature?.matchCount || 1,
+    }));
+
+    res.json({ entries: formattedEntries, count: formattedEntries.length, storage: 'mongodb' });
+  } catch (error) {
+    console.error('Error getting gallery:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/tracked/gallery/sync
+ * Sync gallery entries from AI service (batch update)
+ */
+router.post('/gallery/sync', async (req, res) => {
+  try {
+    const { entries } = req.body;
+
+    if (!Array.isArray(entries) || entries.length === 0) {
+      return res.status(400).json({ error: 'entries array required' });
+    }
+
+    let synced = 0;
+    let errors = 0;
+
+    if (!isMongoConnected()) {
+      for (const entry of entries) {
+        try {
+          let obj = trackedStore.getByGid(entry.gid, entry.type);
+
+          if (!obj) {
+            // Auto-create object
+            obj = trackedStore.upsert({
+              gid: entry.gid,
+              type: entry.type,
+              isActive: true,
+              status: 'active'
+            });
+          }
+
+          trackedStore.updateFeature(entry.gid, {
+            feature: entry.feature,
+            feature_dim: entry.feature_dim,
+            feature_dtype: entry.feature_dtype,
+            confidence: entry.confidence,
+            camera_id: entry.camera_id
+          }, entry.type);
+
+          synced++;
+        } catch (e) {
+          errors++;
+          console.error(`Gallery sync error for GID ${entry.gid}:`, e.message);
+        }
+      }
+    } else {
+      for (const entry of entries) {
+        try {
+          let obj = await TrackedObject.findOne({ gid: entry.gid, type: entry.type });
+
+          if (!obj) {
+            // Auto-create object
+            obj = new TrackedObject({
+              gid: entry.gid,
+              type: entry.type,
+              trackId: `${entry.type === 'vehicle' ? 'v' : 't'}_${entry.gid}`,
+              isActive: true,
+              status: 'active',
+              firstSeen: new Date(),
+              lastSeen: new Date()
+            });
+          }
+
+          await obj.updateFeature({
+            feature: entry.feature,
+            feature_dim: entry.feature_dim,
+            feature_dtype: entry.feature_dtype,
+            confidence: entry.confidence,
+            camera_id: entry.camera_id
+          });
+
+          synced++;
+        } catch (e) {
+          errors++;
+          console.error(`Gallery sync error for GID ${entry.gid}:`, e.message);
+        }
+      }
+    }
+
+    res.json({ synced, errors, total: entries.length });
+  } catch (error) {
+    console.error('Error syncing gallery:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * PATCH /api/tracked/:gid/features
+ * Update ReID features for a tracked object
+ */
+router.patch('/:gid/features', async (req, res) => {
+  try {
+    const gid = parseInt(req.params.gid);
+    const featureData = req.body;
+
+    if (!featureData.feature) {
+      return res.status(400).json({ error: 'feature required' });
+    }
+
+    if (!isMongoConnected()) {
+      let obj = trackedStore.getByGid(gid, featureData.type);
+
+      if (!obj) {
+        // Auto-create object
+        obj = trackedStore.upsert({
+          gid,
+          type: featureData.type || 'person',
+          isActive: true,
+          status: 'active'
+        });
+      }
+
+      obj = trackedStore.updateFeature(gid, featureData, featureData.type);
+      return res.json(obj);
+    }
+
+    let obj = await TrackedObject.findOne({ gid });
+
+    if (!obj) {
+      // Auto-create object
+      const type = featureData.type || 'person';
+      obj = new TrackedObject({
+        gid,
+        type,
+        trackId: `${type === 'vehicle' ? 'v' : 't'}_${gid}`,
+        isActive: true,
+        status: 'active',
+        firstSeen: new Date(),
+        lastSeen: new Date()
+      });
+    }
+
+    await obj.updateFeature(featureData);
+    res.json(obj);
+  } catch (error) {
+    console.error('Error updating features:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * DELETE /api/tracked/gallery/cleanup
+ * Remove expired gallery entries
+ */
+router.delete('/gallery/cleanup', async (req, res) => {
+  try {
+    const { ttlDays = 7 } = req.query;
+    const ttl = parseInt(ttlDays);
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - ttl);
+
+    if (!isMongoConnected()) {
+      // For in-memory, we don't actually delete but could mark expired
+      return res.json({
+        message: 'Cleanup skipped for in-memory store',
+        storage: 'in-memory'
+      });
+    }
+
+    // Clear features for entries older than TTL
+    const result = await TrackedObject.updateMany(
+      { 'reidFeature.lastUpdated': { $lt: cutoffDate } },
+      { $unset: { reidFeature: 1 } }
+    );
+
+    res.json({
+      cleaned: result.modifiedCount,
+      ttlDays: ttl,
+      cutoffDate,
+      storage: 'mongodb'
+    });
+  } catch (error) {
+    console.error('Error cleaning gallery:', error.message);
     res.status(500).json({ error: error.message });
   }
 });

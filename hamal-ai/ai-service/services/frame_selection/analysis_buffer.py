@@ -40,7 +40,7 @@ class BufferConfig:
     # Memory management
     max_concurrent_buffers: int = 20  # Maximum tracks being buffered simultaneously
     store_full_frames: bool = False  # Store full frames (False = store crops only)
-    max_crop_size: int = 400  # Max dimension for stored crops
+    max_crop_size: int = 600  # Max dimension for stored crops (increased for better quality)
 
 
 @dataclass
@@ -198,6 +198,7 @@ class AnalysisBuffer:
         frame: np.ndarray,
         bbox: Tuple[float, float, float, float],
         confidence: float = 0.5,
+        object_class: Optional[str] = None,
     ) -> Optional[Tuple[np.ndarray, Tuple, Dict]]:
         """Add a frame to a track's buffer.
 
@@ -206,6 +207,7 @@ class AnalysisBuffer:
             frame: Full frame (BGR numpy array)
             bbox: Bounding box (x1, y1, x2, y2)
             confidence: Detection confidence
+            object_class: Object class (e.g., "person", "car") for consistency check
 
         Returns:
             If analysis should trigger: (best_frame, best_bbox, metadata)
@@ -218,6 +220,37 @@ class AnalysisBuffer:
 
             if buffer.analysis_triggered:
                 return None
+
+            # CLASS CONSISTENCY CHECK: Verify object class matches buffer's class
+            # This prevents buffering wrong object type if tracker misassigns track_id
+            if object_class is not None:
+                # Normalize class names for comparison
+                # "car", "truck", "bus", "motorcycle", "bicycle" are all "vehicle" for buffering purposes
+                vehicle_classes = {"car", "truck", "bus", "motorcycle", "bicycle", "vehicle"}
+                expected_type = "vehicle" if buffer.object_class in vehicle_classes else buffer.object_class
+                current_type = "vehicle" if object_class in vehicle_classes else object_class
+
+                if expected_type != current_type:
+                    logger.warning(
+                        f"CLASS MISMATCH for track {track_id}: buffer expects {buffer.object_class} "
+                        f"({expected_type}) but got {object_class} ({current_type}). "
+                        f"Resetting buffer."
+                    )
+                    # Reset the buffer with the new class
+                    # This handles cases where tracker reassigned track to different object type
+                    old_frames = buffer.frames_received
+                    camera_id = buffer.camera_id
+                    del self._buffers[track_id]
+                    self._buffers[track_id] = TrackBuffer(
+                        track_id=track_id,
+                        object_class=object_class,
+                        camera_id=camera_id,
+                    )
+                    buffer = self._buffers[track_id]
+                    logger.info(
+                        f"Buffer reset for track {track_id}: was {expected_type} ({old_frames} frames), "
+                        f"now {current_type}"
+                    )
 
             # Increment frame index
             self._frame_index += 1
@@ -284,17 +317,20 @@ class AnalysisBuffer:
         self,
         frame: np.ndarray,
         bbox: Tuple[float, float, float, float],
-        margin_percent: float = 0.25,
+        margin_percent: float = 0.60,  # Increased from 0.25 to avoid cutting off heads/feet
     ) -> np.ndarray:
         """Crop frame to bbox with margin.
+
+        IMPORTANT: Use generous margin (60%) to ensure full person/vehicle is captured.
+        This crop will be used directly for analysis and display - no further cropping needed.
 
         Args:
             frame: Full frame
             bbox: Bounding box (x1, y1, x2, y2)
-            margin_percent: Margin to add around bbox
+            margin_percent: Margin to add around bbox (default 60%)
 
         Returns:
-            Cropped region
+            Cropped region with sufficient context around the subject
         """
         h, w = frame.shape[:2]
         x1, y1, x2, y2 = [int(v) for v in bbox]

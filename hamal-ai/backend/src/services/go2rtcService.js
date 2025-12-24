@@ -6,6 +6,7 @@
 import axios from 'axios';
 
 const GO2RTC_URL = process.env.GO2RTC_URL || 'http://localhost:1984';
+const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://localhost:8000';
 
 class Go2rtcService {
   constructor() {
@@ -14,23 +15,61 @@ class Go2rtcService {
   }
 
   /**
+   * Check if a source is a local file path
+   * @param {string} source - Source URL or file path
+   * @returns {boolean}
+   */
+  isLocalFile(source) {
+    if (!source) return false;
+    // Check if it's a file path (not a URL scheme)
+    if (source.startsWith('/') || source.startsWith('./') || source.startsWith('../')) {
+      return true;
+    }
+    // Check for common video extensions without URL scheme
+    if (/\.(mp4|mkv|avi|mov|webm|ts|m3u8)$/i.test(source) && !source.includes('://')) {
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Convert a local file to a go2rtc source by using AI service's MJPEG stream
+   * This is optimal because:
+   * 1. AI service already reads and processes the file
+   * 2. go2rtc uses ffmpeg to transcode MJPEG to H264 for WebRTC
+   * @param {string} streamId - Stream identifier
+   * @returns {string} - go2rtc source URL
+   */
+  fileToSource(streamId) {
+    // Use ffmpeg to transcode MJPEG from AI service to H264 for WebRTC
+    // Format: ffmpeg:<input>#video=h264
+    const mjpegUrl = `${AI_SERVICE_URL}/api/stream/mjpeg/${streamId}`;
+    return `ffmpeg:${mjpegUrl}#video=h264`;
+  }
+
+  /**
    * Add a stream to go2rtc
    * @param {string} streamId - Unique stream identifier
-   * @param {string} rtspUrl - RTSP URL of the camera
-   * @param {boolean} useTcp - Use TCP transport for more reliable streaming (default: true)
+   * @param {string} sourceUrl - RTSP URL, file path, or other source
+   * @param {boolean} useTcp - Use TCP transport for RTSP streams (default: true)
    * @returns {Promise<object>} - Stream info
    */
-  async addStream(streamId, rtspUrl, useTcp = true) {
+  async addStream(streamId, sourceUrl, useTcp = true) {
     try {
-      // Use TCP transport for more reliable streaming over the network
-      // TCP is more reliable than UDP especially for remote cameras
-      let source = rtspUrl;
-      if (useTcp && rtspUrl.startsWith('rtsp://')) {
+      let source = sourceUrl;
+
+      // Handle local file paths - use AI service's MJPEG stream
+      if (this.isLocalFile(sourceUrl)) {
+        source = this.fileToSource(streamId);
+        console.log(`[go2rtc] Local file detected, using AI service MJPEG: ${source}`);
+      }
+      // Handle RTSP URLs with TCP transport
+      else if (useTcp && sourceUrl.startsWith('rtsp://')) {
         // Add TCP transport hint if not already present
-        if (!rtspUrl.includes('#')) {
-          source = `${rtspUrl}#transport=tcp`;
-        } else if (!rtspUrl.includes('transport=')) {
-          source = `${rtspUrl}&transport=tcp`;
+        if (!sourceUrl.includes('#')) {
+          source = `${sourceUrl}#transport=tcp`;
+        } else if (!sourceUrl.includes('transport=')) {
+          source = `${sourceUrl}&transport=tcp`;
         }
       }
 
@@ -185,7 +224,7 @@ class Go2rtcService {
 
   /**
    * Sync cameras from database to go2rtc
-   * @param {Array} cameras - Array of camera objects with rtspUrl
+   * @param {Array} cameras - Array of camera objects with rtspUrl, filePath, or sourceUrl
    */
   async syncCameras(cameras) {
     const results = [];
@@ -194,9 +233,12 @@ class Go2rtcService {
       // Use cameraId (frontend uses this), fallback to _id
       const streamId = camera.cameraId || camera._id;
 
-      if (camera.rtspUrl) {
+      // Get source URL - can be rtspUrl, filePath, or sourceUrl
+      const sourceUrl = camera.rtspUrl || camera.filePath || camera.sourceUrl;
+
+      if (sourceUrl) {
         try {
-          const result = await this.addStream(streamId, camera.rtspUrl);
+          const result = await this.addStream(streamId, sourceUrl);
           results.push({ camera: streamId, ...result });
         } catch (error) {
           results.push({
@@ -206,7 +248,7 @@ class Go2rtcService {
           });
         }
       } else {
-        console.log(`[go2rtc] Skipping ${streamId}: no RTSP URL`);
+        console.log(`[go2rtc] Skipping ${streamId}: no source URL`);
       }
     }
 

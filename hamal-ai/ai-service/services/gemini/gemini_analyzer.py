@@ -66,6 +66,13 @@ class GeminiAnalyzer:
         self._call_count = 0  # Centralized API call counter
         self._image_enhancer = None
 
+        # Stolen plates cache - loaded from backend once, refreshed periodically
+        self._stolen_plates: Dict[str, Dict[str, Any]] = {}  # plate -> record
+        self._stolen_plates_loaded = False
+        self._stolen_plates_lock = asyncio.Lock()
+        self._stolen_plates_refresh_interval = 60  # seconds
+        self._stolen_plates_last_refresh = 0
+
         # Initialize image enhancer for better Gemini analysis
         use_enhancement = os.getenv("USE_IMAGE_ENHANCEMENT", "true").lower() in ("true", "1", "yes")
         if use_enhancement and IMAGE_ENHANCER_AVAILABLE:
@@ -180,7 +187,7 @@ class GeminiAnalyzer:
 
         return response
 
-    def _frame_to_pil(self, frame, bbox: Optional[List[float]] = None, margin_percent: float = 0.50, class_name: str = "unknown") -> Optional[Image.Image]:
+    def _frame_to_pil(self, frame, bbox: Optional[List[float]] = None, margin_percent: float = 0.50, class_name: str = "unknown", is_pre_cropped: bool = False) -> Optional[Image.Image]:
         """
         Convert OpenCV frame to PIL Image, optionally cropping to bbox WITH MARGIN.
         Applies image enhancement for better Gemini analysis.
@@ -190,6 +197,7 @@ class GeminiAnalyzer:
             bbox: Optional [x1, y1, x2, y2] to crop
             margin_percent: Percentage of bbox size to add as margin (default 50%)
             class_name: Object class for class-specific enhancement (e.g., "car", "person")
+            is_pre_cropped: If True, frame is already cropped - use entire frame without further cropping
 
         Returns:
             PIL Image in RGB format with the subject fully visible in the center, or None if invalid
@@ -199,7 +207,11 @@ class GeminiAnalyzer:
             logger.warning("_frame_to_pil received empty or invalid frame")
             return None
 
-        if bbox is not None:
+        # If explicitly told frame is pre-cropped, use entire frame
+        if is_pre_cropped:
+            h, w = frame.shape[:2]
+            logger.debug(f"Frame explicitly marked as pre-cropped ({w}x{h}), using entire frame")
+        elif bbox is not None:
             x1, y1, x2, y2 = map(int, bbox)
             h, w = frame.shape[:2]
 
@@ -214,7 +226,8 @@ class GeminiAnalyzer:
                 # Check if frame appears to be pre-cropped (bbox coords outside frame bounds)
                 # This happens when AnalysisBuffer stores crops instead of full frames
                 bbox_outside_frame = (x1 >= w or y1 >= h or x2 > w * 1.5 or y2 > h * 1.5)
-                frame_is_small_crop = (w < bbox_w or h < bbox_h) or (w < 600 and h < 600)
+                # Frame is small and likely a crop (< 800px in both dimensions)
+                frame_is_small_crop = (w < bbox_w or h < bbox_h) or (w < 800 and h < 800)
 
                 if bbox_outside_frame or frame_is_small_crop:
                     # Frame is already a crop - use entire frame
@@ -428,7 +441,8 @@ class GeminiAnalyzer:
         self,
         frame,
         bbox: List[float],
-        include_cutout: bool = True
+        include_cutout: bool = True,
+        is_pre_cropped: bool = False
     ) -> Dict[str, Any]:
         """
         Analyze a vehicle in the frame.
@@ -437,6 +451,7 @@ class GeminiAnalyzer:
             frame: OpenCV frame (BGR numpy array)
             bbox: Bounding box [x1, y1, x2, y2]
             include_cutout: Whether to include base64 image cutout
+            is_pre_cropped: If True, frame is already cropped around the vehicle
 
         Returns:
             Dict with: color, model, manufacturer, licensePlate, vehicleType, cutout_image
@@ -446,15 +461,22 @@ class GeminiAnalyzer:
 
         try:
             # Use "vehicle" class for enhanced license plate region processing
-            img = self._frame_to_pil(frame, bbox, class_name="vehicle")
+            img = self._frame_to_pil(frame, bbox, class_name="vehicle", is_pre_cropped=is_pre_cropped)
             if img is None:
                 return {"error": "Failed to prepare image - empty or invalid frame"}
 
-            prompt = """אתה מנתח ביטחוני. נתח את הרכב בתמונה בקפידה רבה.
-זהה את כל הפרטים הנראים לעין. תן תשובה מלאה ומפורטת.
+            prompt = """אתה מנתח ביטחוני. התמונה הזו היא גזירה (crop) ממצלמת אבטחה.
+הגזירה מתמקדת ברכב אחד ספציפי שזוהה. נתח את הרכב הבודד הזה בלבד.
+
+חשוב מאוד:
+- התמקד רק ברכב המרכזי בתמונה (זה שהגזירה נועדה להציג)
+- התעלם מכל אובייקט אחר בקצוות התמונה
+- אם התמונה מציגה אדם במקום רכב, סמן isCorrectType=false
 
 החזר JSON בלבד (ללא markdown, ללא טקסט לפני או אחרי):
 {
+    "actualObjectType": "vehicle או person - מה האובייקט המרכזי בתמונה?",
+    "isCorrectType": true/false,
     "color": "צבע הרכב בעברית - בחר אחד: לבן/שחור/אפור/כסוף/אדום/כחול/ירוק/צהוב/כתום/חום/בז'/זהב/בורדו/תכלת/סגול",
     "secondaryColor": "צבע משני אם יש (גג, פסים) או null",
     "manufacturer": "יצרן הרכב - נסה לזהות לפי הלוגו, צורת הפנסים, גריל: טויוטה/יונדאי/קיא/מזדה/הונדה/ניסאן/מיצובישי/סוזוקי/פולקסווגן/סקודה/שברולט/פורד/BMW/מרצדס/אאודי/סובארו/וולוו/פיג'ו/סיטרואן/רנו/דאצ'יה/סיאט",
@@ -469,12 +491,11 @@ class GeminiAnalyzer:
     "confidence": 0.85
 }
 
-הוראות חשובות:
-1. מלא את כל השדות - אל תשאיר שדות ריקים
-2. אם לא ניתן לזהות ערך, כתוב "לא זוהה"
-3. נסה מאוד לזהות את היצרן - בדוק לוגו, צורת גריל, פנסים
-4. נסה לזהות צבע מדויק - לא רק "בהיר" או "כהה"
-5. אם רואים חלק מלוח הרישוי, רשום מה שנראה"""
+הוראות:
+1. נתח רק את הרכב הבודד שהגזירה מתמקדת בו
+2. אם זה אדם ולא רכב, החזר isCorrectType=false ו-actualObjectType="person"
+3. מלא את כל השדות - אם לא ניתן לזהות ערך, כתוב "לא זוהה"
+4. נסה לזהות את היצרן לפי לוגו, גריל, פנסים"""
 
             response = await self._generate_content([prompt, img], analysis_type="vehicle")
             result = self._parse_json(response.text)
@@ -506,9 +527,67 @@ class GeminiAnalyzer:
             logger.error(f"Vehicle analysis error: {e}")
             return {"error": str(e)}
 
+    async def _refresh_stolen_plates_cache(self):
+        """
+        Refresh the stolen plates cache from backend.
+        Fetches all stolen plates once and caches them in memory.
+        """
+        import httpx
+        import time
+
+        # Check if refresh is needed
+        now = time.time()
+        if self._stolen_plates_loaded and (now - self._stolen_plates_last_refresh) < self._stolen_plates_refresh_interval:
+            return  # Cache is still fresh
+
+        async with self._stolen_plates_lock:
+            # Double-check after acquiring lock
+            now = time.time()
+            if self._stolen_plates_loaded and (now - self._stolen_plates_last_refresh) < self._stolen_plates_refresh_interval:
+                return
+
+            backend_url = os.environ.get("BACKEND_URL", "http://localhost:3000")
+
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(
+                        f"{backend_url}/api/stolen-plates",
+                        timeout=5.0
+                    )
+                    if response.status_code == 200:
+                        plates_list = response.json()
+                        # Build lookup dict - normalize plate (remove spaces, uppercase)
+                        self._stolen_plates = {}
+                        for record in plates_list:
+                            # Handle both formats: list of strings or list of objects
+                            if isinstance(record, str):
+                                plate = record
+                                record_data = {"licensePlate": plate}
+                            else:
+                                plate = record.get("licensePlate", "")
+                                record_data = record
+                            # Store with normalized key for fast lookup
+                            normalized = self._normalize_plate(plate)
+                            if normalized:
+                                self._stolen_plates[normalized] = record_data
+                        self._stolen_plates_loaded = True
+                        self._stolen_plates_last_refresh = now
+                        logger.info(f"✅ Loaded {len(self._stolen_plates)} stolen plates into cache")
+                    else:
+                        logger.warning(f"Failed to fetch stolen plates: HTTP {response.status_code}")
+            except Exception as e:
+                logger.warning(f"Failed to refresh stolen plates cache: {e}")
+
+    def _normalize_plate(self, plate: str) -> str:
+        """Normalize plate for comparison (remove spaces, hyphens, uppercase)."""
+        import re
+        # Remove spaces, hyphens, dots and convert to uppercase
+        return re.sub(r'[\s\-\.]', '', plate).upper()
+
     async def _check_stolen_plate(self, plate: str) -> Dict[str, Any]:
         """
         Check if a license plate is in the stolen plates database.
+        Uses in-memory cache instead of per-request HTTP calls.
         Feature 1: Stolen Vehicle Detection.
 
         Args:
@@ -517,29 +596,29 @@ class GeminiAnalyzer:
         Returns:
             Dict with: stolen (bool), plate (str), record (optional)
         """
-        import httpx
-        backend_url = os.environ.get("BACKEND_URL", "http://localhost:3000")
+        # Ensure cache is loaded/fresh
+        await self._refresh_stolen_plates_cache()
 
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{backend_url}/api/stolen-plates/check/{plate}",
-                    timeout=5.0
-                )
-                if response.status_code == 200:
-                    return response.json()
-                else:
-                    logger.debug(f"Stolen plate check failed: HTTP {response.status_code}")
-                    return {"stolen": False, "plate": plate}
-        except Exception as e:
-            logger.debug(f"Stolen plate check error: {e}")
-            return {"stolen": False, "plate": plate}
+        # Normalize and check cache
+        normalized = self._normalize_plate(plate)
+
+        if normalized in self._stolen_plates:
+            record = self._stolen_plates[normalized]
+            logger.info(f"🚨 Stolen plate match: {plate}")
+            return {
+                "stolen": True,
+                "plate": plate,
+                "record": record
+            }
+
+        return {"stolen": False, "plate": plate}
 
     async def analyze_person(
         self,
         frame,
         bbox: List[float],
-        include_cutout: bool = True
+        include_cutout: bool = True,
+        is_pre_cropped: bool = False
     ) -> Dict[str, Any]:
         """
         Analyze a person in the frame - clothing and armed status.
@@ -548,6 +627,7 @@ class GeminiAnalyzer:
             frame: OpenCV frame (BGR numpy array)
             bbox: Bounding box [x1, y1, x2, y2]
             include_cutout: Whether to include base64 image cutout
+            is_pre_cropped: If True, frame is already cropped around the person
 
         Returns:
             Dict with: shirtColor, pantsColor, headwear, armed, weaponType, cutout_image
@@ -557,15 +637,22 @@ class GeminiAnalyzer:
 
         try:
             # Use "person" class for person-specific enhancement
-            img = self._frame_to_pil(frame, bbox, class_name="person")
+            img = self._frame_to_pil(frame, bbox, class_name="person", is_pre_cropped=is_pre_cropped)
             if img is None:
                 return {"error": "Failed to prepare image - empty or invalid frame"}
 
-            prompt = """אתה מנתח ביטחוני מקצועי. נתח את האדם בתמונה בקפידה רבה.
-תאר את כל מה שאתה רואה בפירוט מלא. זה חשוב לזיהוי.
+            prompt = """אתה מנתח ביטחוני מקצועי. התמונה הזו היא גזירה (crop) ממצלמת אבטחה.
+הגזירה מתמקדת באדם אחד ספציפי שזוהה. נתח את האדם הבודד הזה בלבד.
+
+חשוב מאוד:
+- התמקד רק באדם המרכזי בתמונה (זה שהגזירה נועדה להציג)
+- התעלם מכל אובייקט או אדם אחר בקצוות התמונה
+- אם התמונה מציגה רכב במקום אדם, סמן isCorrectType=false
 
 החזר JSON בלבד (ללא markdown, ללא טקסט לפני או אחרי):
 {
+    "actualObjectType": "person או vehicle - מה האובייקט המרכזי בתמונה?",
+    "isCorrectType": true/false,
     "gender": "זכר/נקבה/לא ניתן לקבוע",
     "approximateAge": "ילד (0-12)/נער (13-19)/צעיר (20-35)/מבוגר (36-55)/קשיש (55+)",
     "shirtColor": "צבע החולצה - בחר: לבן/שחור/אפור/כחול/אדום/ירוק/צהוב/כתום/ורוד/סגול/חום/בז'/חאקי/צבאי/פסים/משובץ",
@@ -590,15 +677,14 @@ class GeminiAnalyzer:
     "weaponLocation": "אם חמוש: ביד/בחגורה/על הגב/לא רלוונטי",
     "suspiciousIndicators": ["התנהגות חשודה", "ביגוד לא תואם מזג אוויר", "מסתיר פנים"],
     "suspiciousLevel": 1,
-    "description": "תיאור מילולי קצר וממוקד לזיהוי: גבר צעיר בחולצה כחולה ומכנסי ג'ינס עם תיק גב שחור"
+    "description": "תיאור מילולי קצר וממוקד לזיהוי של האדם הבודד הזה"
 }
 
-הוראות קריטיות:
-1. מלא את כל השדות - זה חשוב לזיהוי!
-2. תאר צבעים ספציפיים, לא "בהיר" או "כהה"
-3. שדה description חייב לכלול תיאור שימושי לזיהוי
-4. armed=true רק אם רואים נשק בבירור
-5. אם לא רואים פרט מסוים, כתוב "לא נראה" """
+הוראות:
+1. נתח רק את האדם הבודד שהגזירה מתמקדת בו - לא אנשים אחרים ברקע
+2. אם זה רכב ולא אדם, החזר isCorrectType=false ו-actualObjectType="vehicle"
+3. מלא את כל השדות - אם לא ניתן לזהות ערך, כתוב "לא נראה"
+4. armed=true רק אם רואים נשק בבירור על האדם הזה"""
 
             response = await self._generate_content([prompt, img], analysis_type="person")
             result = self._parse_json(response.text)

@@ -493,6 +493,11 @@ export default function AIStatsPanel({ isOpen, onClose }) {
                                     value={pressure.active_cameras?.length}
                                     icon="📹"
                                 />
+                                <Counter
+                                    label="Event Signals"
+                                    value={counters.event_signals}
+                                    icon="⚡"
+                                />
                             </div>
 
                             {/* Tracker Stats */}
@@ -714,6 +719,105 @@ export default function AIStatsPanel({ isOpen, onClose }) {
                                     </div>
                                 </div>
                             </div>
+
+                            {/* Backend Sync Stats */}
+                            {stats?.backend_sync && (
+                                <div className="bg-gray-700 rounded-lg p-4">
+                                    <h3 className="text-lg font-bold mb-3 flex items-center gap-2">
+                                        <span>🔄</span>
+                                        <span>סנכרון Backend</span>
+                                    </h3>
+
+                                    {/* Sync Operations */}
+                                    <div className="mb-4 pb-4 border-b border-gray-600">
+                                        <h4 className="text-sm font-semibold text-gray-300 mb-2">פעולות סנכרון</h4>
+                                        <div className="grid grid-cols-4 gap-2 text-center">
+                                            <div className="bg-gray-600 rounded p-2">
+                                                <div className="text-xl font-bold text-green-400">
+                                                    {stats.backend_sync.sync_operations?.total_synced || 0}
+                                                </div>
+                                                <div className="text-xs text-gray-400">הצליחו</div>
+                                            </div>
+                                            <div className="bg-gray-600 rounded p-2">
+                                                <div className="text-xl font-bold text-red-400">
+                                                    {stats.backend_sync.sync_operations?.total_failed || 0}
+                                                </div>
+                                                <div className="text-xs text-gray-400">נכשלו</div>
+                                            </div>
+                                            <div className="bg-gray-600 rounded p-2">
+                                                <div className="text-xl font-bold text-blue-400">
+                                                    {stats.backend_sync.sync_operations?.analysis_synced || 0}
+                                                </div>
+                                                <div className="text-xs text-gray-400">ניתוחים</div>
+                                            </div>
+                                            <div className="bg-gray-600 rounded p-2">
+                                                <div className="text-xl font-bold text-yellow-400">
+                                                    {stats.backend_sync.sync_operations?.armed_synced || 0}
+                                                </div>
+                                                <div className="text-xs text-gray-400">חמושים</div>
+                                            </div>
+                                        </div>
+                                        <div className="text-xs text-gray-400 mt-2 text-center">
+                                            שיעור הצלחה: {stats.backend_sync.sync_operations?.success_rate || "100.0%"}
+                                        </div>
+                                    </div>
+
+                                    {/* Retry Stats */}
+                                    <div className="mb-4 pb-4 border-b border-gray-600">
+                                        <h4 className="text-sm font-semibold text-gray-300 mb-2">Retry Logic</h4>
+                                        <div className="grid grid-cols-4 gap-2 text-center">
+                                            <div className="bg-gray-600 rounded p-2">
+                                                <div className="text-lg font-bold text-green-400">
+                                                    {stats.backend_sync.retry?.successful_first_try || 0}
+                                                </div>
+                                                <div className="text-xs text-gray-400">הצלחה ראשונה</div>
+                                            </div>
+                                            <div className="bg-gray-600 rounded p-2">
+                                                <div className="text-lg font-bold text-yellow-400">
+                                                    {stats.backend_sync.retry?.successful_after_retry || 0}
+                                                </div>
+                                                <div className="text-xs text-gray-400">הצלחה אחרי retry</div>
+                                            </div>
+                                            <div className="bg-gray-600 rounded p-2">
+                                                <div className="text-lg font-bold text-red-400">
+                                                    {stats.backend_sync.retry?.failed_all_retries || 0}
+                                                </div>
+                                                <div className="text-xs text-gray-400">כשלון מוחלט</div>
+                                            </div>
+                                            <div className="bg-gray-600 rounded p-2">
+                                                <div className="text-lg font-bold text-purple-400">
+                                                    {stats.backend_sync.retry?.total_retries || 0}
+                                                </div>
+                                                <div className="text-xs text-gray-400">סה״כ retries</div>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* Rate Limiters */}
+                                    <div>
+                                        <h4 className="text-sm font-semibold text-gray-300 mb-2">Rate Limiters</h4>
+                                        <div className="grid grid-cols-2 gap-2">
+                                            {Object.entries(stats.backend_sync.rate_limiters || {}).map(([name, limiter]) => (
+                                                <div key={name} className="bg-gray-600 rounded p-2">
+                                                    <div className="text-xs font-semibold text-gray-300 mb-1">{limiter.name || name}</div>
+                                                    <div className="flex justify-between text-xs">
+                                                        <span className="text-gray-400">Allowed:</span>
+                                                        <span className="text-green-400">{limiter.allowed || 0}</span>
+                                                    </div>
+                                                    <div className="flex justify-between text-xs">
+                                                        <span className="text-gray-400">Throttled:</span>
+                                                        <span className="text-yellow-400">{limiter.throttled || 0}</span>
+                                                    </div>
+                                                    <div className="flex justify-between text-xs">
+                                                        <span className="text-gray-400">Rate:</span>
+                                                        <span className="text-blue-400">{limiter.throttle_rate || "0%"}</span>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
 
                             {/* Audio/Radio Transcription Stats */}
                             {radioStats && (

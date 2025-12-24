@@ -155,8 +155,7 @@ router.post('/vehicle-detected', async (req, res) => {
     }
 
     const vehicleData = req.body;
-    console.log('[Scenario] Vehicle detected:', vehicleData);
-
+    // Only log when scenario is actually triggered (not every detection)
     const triggered = await manager.handleStolenVehicle(vehicleData);
 
     res.json({
@@ -184,8 +183,7 @@ router.post('/armed-person', async (req, res) => {
     }
 
     const personData = req.body;
-    console.log('[Scenario] Armed person detected:', personData);
-
+    // Only log via manager when threshold is reached (not every detection)
     const thresholdReached = await manager.handleArmedPerson(personData);
 
     res.json({

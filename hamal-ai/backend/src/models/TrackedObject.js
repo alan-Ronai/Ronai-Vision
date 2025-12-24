@@ -132,6 +132,26 @@ const TrackedObjectSchema = new mongoose.Schema({
   metadata: {
     type: mongoose.Schema.Types.Mixed,
     default: {}
+  },
+
+  // ReID Feature Storage for persistent re-identification
+  reidFeature: {
+    // Base64 encoded feature vector (512-dim for person, 768-dim for vehicle)
+    feature: String,
+    // Feature vector dimension (for validation)
+    featureDim: Number,
+    // Data type (e.g., 'float32')
+    featureDtype: { type: String, default: 'float32' },
+    // When feature was first captured
+    firstCaptured: Date,
+    // When feature was last updated
+    lastUpdated: Date,
+    // Number of times feature has been matched/updated (for confidence)
+    matchCount: { type: Number, default: 1 },
+    // Best confidence during feature capture
+    bestConfidence: Number,
+    // Camera where feature was captured
+    capturedCameraId: String,
   }
 
 }, {
@@ -148,6 +168,9 @@ TrackedObjectSchema.index({ status: 1, lastSeen: -1 });
 TrackedObjectSchema.index({ 'analysis.armed': 1 });
 TrackedObjectSchema.index({ 'analysis.licensePlate': 1 });
 TrackedObjectSchema.index({ trackId: 1 }, { sparse: true });
+// Index for ReID gallery queries (objects with features)
+TrackedObjectSchema.index({ 'reidFeature.lastUpdated': -1 }, { sparse: true });
+TrackedObjectSchema.index({ type: 1, 'reidFeature.feature': 1 }, { sparse: true });
 
 // Virtuals
 TrackedObjectSchema.virtual('durationSeconds').get(function() {
@@ -215,6 +238,41 @@ TrackedObjectSchema.statics.findByPlate = function(plate) {
   });
 };
 
+// Get all objects with ReID features for gallery sync
+TrackedObjectSchema.statics.getGalleryEntries = function(options = {}) {
+  const { type, ttlDays = 7, limit = 10000 } = options;
+
+  const minDate = new Date();
+  minDate.setDate(minDate.getDate() - ttlDays);
+
+  const query = {
+    'reidFeature.feature': { $exists: true, $ne: null },
+    'reidFeature.lastUpdated': { $gte: minDate }
+  };
+
+  if (type) query.type = type;
+
+  return this.find(query)
+    .select('gid type reidFeature lastSeen')
+    .sort({ 'reidFeature.lastUpdated': -1 })
+    .limit(limit)
+    .lean();
+};
+
+// Get objects with features for a specific type
+TrackedObjectSchema.statics.getGalleryByType = function(type, ttlDays = 7) {
+  const minDate = new Date();
+  minDate.setDate(minDate.getDate() - ttlDays);
+
+  return this.find({
+    type,
+    'reidFeature.feature': { $exists: true, $ne: null },
+    'reidFeature.lastUpdated': { $gte: minDate }
+  })
+    .select('gid type reidFeature lastSeen')
+    .lean();
+};
+
 // Instance methods
 TrackedObjectSchema.methods.markLost = function() {
   this.status = 'lost';
@@ -245,6 +303,39 @@ TrackedObjectSchema.methods.updateAnalysis = function(analysisData) {
     this.isArmed = analysisData.armed;
   }
   return this.save();
+};
+
+// Update ReID feature for gallery storage
+TrackedObjectSchema.methods.updateFeature = function(featureData) {
+  const now = new Date();
+
+  if (!this.reidFeature) {
+    this.reidFeature = {
+      firstCaptured: now,
+      matchCount: 1
+    };
+  }
+
+  this.reidFeature.feature = featureData.feature;
+  this.reidFeature.featureDim = featureData.feature_dim || featureData.featureDim;
+  this.reidFeature.featureDtype = featureData.feature_dtype || featureData.featureDtype || 'float32';
+  this.reidFeature.lastUpdated = now;
+  this.reidFeature.matchCount = (this.reidFeature.matchCount || 0) + 1;
+
+  if (featureData.confidence && (!this.reidFeature.bestConfidence || featureData.confidence > this.reidFeature.bestConfidence)) {
+    this.reidFeature.bestConfidence = featureData.confidence;
+  }
+
+  if (featureData.camera_id || featureData.capturedCameraId) {
+    this.reidFeature.capturedCameraId = featureData.camera_id || featureData.capturedCameraId;
+  }
+
+  return this.save();
+};
+
+// Check if this object has a stored feature
+TrackedObjectSchema.methods.hasFeature = function() {
+  return !!(this.reidFeature && this.reidFeature.feature);
 };
 
 const TrackedObject = mongoose.model('TrackedObject', TrackedObjectSchema);

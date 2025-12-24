@@ -10,10 +10,19 @@ import os
 import numpy as np
 from typing import Optional
 import torch
+import torchvision.transforms as transforms
+from PIL import Image
 import logging
 from .base_reid import BaseReID
 
 logger = logging.getLogger(__name__)
+
+# Pre-create transform for efficiency (avoid recreating on every call)
+_TRANSREID_TRANSFORM = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+])
 
 
 class TransReIDVehicle(BaseReID):
@@ -207,27 +216,13 @@ class TransReIDVehicle(BaseReID):
         crops_rgb = [c[:, :, ::-1] if c.ndim == 3 else c for c in crops]
 
         try:
-            import torchvision.transforms as transforms
-
-            transform = transforms.Compose(
-                [
-                    transforms.Resize((224, 224)),
-                    transforms.ToTensor(),
-                    transforms.Normalize(
-                        mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
-                    ),
-                ]
-            )
-
-            from PIL import Image
-
             tensors = []
             for crop_rgb in crops_rgb:
                 if isinstance(crop_rgb, np.ndarray):
                     img = Image.fromarray(crop_rgb)
                 else:
                     img = crop_rgb
-                tensor = transform(img)
+                tensor = _TRANSREID_TRANSFORM(img)
                 tensors.append(tensor)
 
             inputs = torch.stack(tensors).to(self.device)

@@ -123,6 +123,8 @@ def get_device():
         return "cpu"
 
 DEVICE = get_device()
+# Export DEVICE to environment so ReID models can use it
+os.environ["DEVICE"] = DEVICE
 
 # Model paths
 MODEL_PATH = os.getenv("YOLO_MODEL", "yolo12m.pt")  # Upgraded from yolo12n for better accuracy
@@ -585,6 +587,7 @@ async def generate_mjpeg_frames(camera_id: str, fps: int = 15):
     """
     logger.info(f"Starting MJPEG stream generator for {camera_id} at {fps} FPS")
     frame_count = 0
+    no_frame_count = 0
     frame_interval = 1.0 / fps
     last_frame_time = 0
 
@@ -605,6 +608,7 @@ async def generate_mjpeg_frames(camera_id: str, fps: int = 15):
         # Get frame from FFmpeg RTSP reader
         frame = rtsp_manager.get_frame(camera_id)
         if frame is not None:
+            no_frame_count = 0  # Reset counter
             # Encode frame as JPEG (lower quality for reduced latency)
             ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
             if ret:
@@ -614,7 +618,14 @@ async def generate_mjpeg_frames(camera_id: str, fps: int = 15):
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
         else:
-            await asyncio.sleep(0.01)  # Reduced from 0.1 for lower latency
+            no_frame_count += 1
+            if no_frame_count == 1 or no_frame_count % 50 == 0:
+                active_cams = rtsp_manager.get_active_cameras()
+                logger.warning(
+                    f"MJPEG: No frame for {camera_id} (count={no_frame_count}, "
+                    f"active_cams={active_cams})"
+                )
+            await asyncio.sleep(0.05)  # Slightly longer sleep when no frames
 
 
 async def generate_ffmpeg_mjpeg_frames(camera_id: str, rtsp_url: str, fps: int = 15):
@@ -719,6 +730,8 @@ async def stream_mjpeg(camera_id: str, fps: int = 15):
 
     # Use the FFmpeg-based RTSP reader manager
     rtsp_manager = get_rtsp_manager()
+    active_cams = rtsp_manager.get_active_cameras()
+    logger.info(f"MJPEG: Active cameras: {active_cams}, requested: {camera_id}")
 
     # Check if camera is already being read by detection loop
     if camera_id not in rtsp_manager.get_active_cameras():
@@ -753,8 +766,17 @@ async def stream_mjpeg(camera_id: str, fps: int = 15):
     if frame is None:
         logger.warning(f"No frame available yet for {camera_id}, waiting...")
         await asyncio.sleep(1.0)
+        frame = rtsp_manager.get_frame(camera_id)
 
-    logger.info(f"Starting MJPEG response for {camera_id}")
+    # Log reader stats for debugging
+    reader = rtsp_manager.get_reader(camera_id)
+    if reader:
+        stats = reader.get_stats()
+        logger.info(f"MJPEG: Reader stats for {camera_id}: {stats}")
+    else:
+        logger.warning(f"MJPEG: No reader found for {camera_id}")
+
+    logger.info(f"Starting MJPEG response for {camera_id}, has_frame={frame is not None}")
     return StreamingResponse(
         generate_mjpeg_frames(camera_id, fps),
         media_type="multipart/x-mixed-replace; boundary=frame"
@@ -1829,9 +1851,32 @@ async def startup_event():
 
     logger.info(f"Detection loop config: detection_fps={detection_fps}, stream_fps={stream_fps}, reid_recovery={use_reid_recovery}")
     logger.info(f"Confidence thresholds: yolo={yolo_confidence}, weapon={weapon_confidence}, recovery={recovery_confidence}")
+
+    # Clear backend tracked store on restart to prevent stale data
+    backend_url = os.environ.get("BACKEND_URL", "http://localhost:3000")
+    try:
+        import httpx
+        async with httpx.AsyncClient() as client:
+            response = await client.delete(f"{backend_url}/api/tracked/clear-all", timeout=5.0)
+            if response.status_code == 200:
+                logger.info("✅ Backend tracked store cleared on startup")
+            else:
+                logger.warning(f"⚠️ Failed to clear backend tracked store: HTTP {response.status_code}")
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to clear backend tracked store: {e}")
+
+    # CRITICAL: Initialize ReID Gallery BEFORE detection loop starts
+    # This loads persistent features from local file so matching works from the first frame
+    from services.reid import initialize_reid_gallery
+    try:
+        await initialize_reid_gallery()
+        logger.info("✅ ReID Gallery initialized for persistent re-identification")
+    except Exception as e:
+        logger.warning(f"⚠️ ReID Gallery initialization failed (non-fatal): {e}")
+
     detection_loop = init_detection_loop(yolo, tracker, gemini, loop_config)
 
-    # Start detection loop
+    # Start detection loop (gallery already initialized with persistent data)
     await detection_loop.start()
 
     # Set up RTSP manager to feed frames to detection loop
@@ -2144,6 +2189,10 @@ async def realtime_stats():
             "events_sent": detection_stats.get("events_sent", 0),
             "gemini_calls": gemini.get_call_count() if gemini else 0,
             "frames_dropped": detection_stats.get("frames_dropped_stale", 0),
+            # Event-based processing stats
+            "event_waits": detection_stats.get("event_waits", 0),
+            "event_timeouts": detection_stats.get("event_timeouts", 0),
+            "event_signals": detection_stats.get("event_signals", 0),
         },
 
         # Tracker stats
@@ -2180,7 +2229,20 @@ async def realtime_stats():
 
         # ReID cache stats
         "reid_cache": detection_stats.get("reid_cache", {}),
+
+        # Backend sync stats (rate limiting, retries, sync operations)
+        "backend_sync": _get_backend_sync_stats(),
     }
+
+
+def _get_backend_sync_stats() -> dict:
+    """Get backend sync statistics safely."""
+    try:
+        from services import backend_sync
+        return backend_sync.get_sync_stats()
+    except Exception as e:
+        logger.debug(f"Failed to get backend sync stats: {e}")
+        return {}
 
 
 @app.get("/detection/fps")
@@ -2412,37 +2474,87 @@ async def start_camera_detection(
     GO2RTC_URL = os.getenv("GO2RTC_URL", "http://localhost:1984")
     GO2RTC_RTSP_PORT = os.getenv("GO2RTC_RTSP_PORT", "8554")
 
-    async def check_go2rtc_available():
-        """Check if go2rtc is running."""
-        try:
-            async with httpx.AsyncClient(timeout=2.0) as client:
-                response = await client.get(f"{GO2RTC_URL}/api")
-                return response.status_code == 200
-        except:
-            return False
+    async def check_go2rtc_available(max_retries: int = 3, retry_delay: float = 1.0):
+        """Check if go2rtc is running with retry logic.
 
-    async def register_with_go2rtc(cam_id: str, original_url: str):
-        """Register stream with go2rtc and return the re-stream URL."""
-        try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                # Add TCP transport for more reliable streaming over network
-                # This prevents packet loss and stream freezing
-                src_url = original_url
-                if original_url.startswith("rtsp://") and "#" not in original_url:
-                    src_url = f"{original_url}#transport=tcp"
-                elif original_url.startswith("rtsp://") and "transport=" not in original_url:
-                    src_url = f"{original_url}&transport=tcp"
+        Args:
+            max_retries: Number of retries if connection fails
+            retry_delay: Delay between retries in seconds
 
-                # Add stream to go2rtc
-                response = await client.put(
-                    f"{GO2RTC_URL}/api/streams",
-                    params={"name": cam_id, "src": src_url}
-                )
-                if response.status_code in [200, 201]:
-                    # Return go2rtc's RTSP re-stream URL
-                    return f"rtsp://localhost:{GO2RTC_RTSP_PORT}/{cam_id}"
-        except Exception as e:
-            logger.warning(f"Failed to register {cam_id} with go2rtc: {e}")
+        Returns:
+            True if go2rtc is available, False otherwise
+        """
+        for attempt in range(max_retries):
+            try:
+                async with httpx.AsyncClient(timeout=2.0) as client:
+                    response = await client.get(f"{GO2RTC_URL}/api")
+                    if response.status_code == 200:
+                        return True
+                    elif response.status_code in [500, 502, 503, 504]:
+                        # Server error - might be starting up, retry
+                        logger.debug(f"go2rtc returned {response.status_code}, attempt {attempt + 1}/{max_retries}")
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(retry_delay)
+                            continue
+                    else:
+                        # Other error (400, 404, etc.) - don't retry
+                        logger.debug(f"go2rtc returned {response.status_code}")
+                        return False
+            except (httpx.ConnectError, httpx.TimeoutException) as e:
+                # Connection failed - might be starting up, retry
+                logger.debug(f"go2rtc connection failed (attempt {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay)
+                    continue
+            except Exception as e:
+                logger.debug(f"go2rtc check error: {e}")
+                return False
+        return False
+
+    async def register_with_go2rtc(cam_id: str, original_url: str, max_retries: int = 2):
+        """Register stream with go2rtc and return the re-stream URL.
+
+        Args:
+            cam_id: Camera ID to register
+            original_url: Original RTSP URL
+            max_retries: Number of retries on failure
+
+        Returns:
+            go2rtc re-stream URL or None if registration failed
+        """
+        for attempt in range(max_retries):
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    # Add TCP transport for more reliable streaming over network
+                    # This prevents packet loss and stream freezing
+                    src_url = original_url
+                    if original_url.startswith("rtsp://") and "#" not in original_url:
+                        src_url = f"{original_url}#transport=tcp"
+                    elif original_url.startswith("rtsp://") and "transport=" not in original_url:
+                        src_url = f"{original_url}&transport=tcp"
+
+                    # Add stream to go2rtc
+                    response = await client.put(
+                        f"{GO2RTC_URL}/api/streams",
+                        params={"name": cam_id, "src": src_url}
+                    )
+                    if response.status_code in [200, 201]:
+                        # Return go2rtc's RTSP re-stream URL
+                        return f"rtsp://localhost:{GO2RTC_RTSP_PORT}/{cam_id}"
+                    elif response.status_code in [500, 502, 503, 504]:
+                        # Server error - retry
+                        logger.warning(f"go2rtc registration returned {response.status_code} for {cam_id}, attempt {attempt + 1}/{max_retries}")
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(1.0)
+                            continue
+                    else:
+                        logger.warning(f"go2rtc registration failed for {cam_id}: {response.status_code}")
+                        return None
+            except Exception as e:
+                logger.warning(f"Failed to register {cam_id} with go2rtc (attempt {attempt + 1}): {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(1.0)
+                    continue
         return None
 
     try:

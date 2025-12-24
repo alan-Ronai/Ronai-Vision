@@ -14,6 +14,7 @@ Key features:
 import numpy as np
 import logging
 import time
+import re
 from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
 from scipy.optimize import linear_sum_assignment
@@ -164,8 +165,9 @@ class KalmanBoxTracker:
 class Track:
     """Single object track with state management."""
 
-    track_id_counter = 0
-    vehicle_id_counter = 0
+    # CRITICAL: Single global counter for GID to prevent conflicts between persons/vehicles
+    # Previously had separate counters which caused v_0_3 and p_0_3 to share GID=3
+    global_id_counter = 0
     # Session counter increments on each tracker reset to prevent ID collisions
     # This ensures v_1 from session 1 is different from v_1 from session 2
     session_counter = 0
@@ -181,14 +183,12 @@ class Track:
         """
 
         # Generate unique track ID with session prefix to prevent collisions after restart
-        # Format: v_<session>_<id> or p_<session>_<id>
+        # Format: v_<session>_<gid> or p_<session>_<gid>
+        # CRITICAL: Use single global counter for GID to prevent conflicts
         if track_id is None:
-            if object_type == "vehicle":
-                Track.vehicle_id_counter += 1
-                self.track_id = f"v_{Track.session_counter}_{Track.vehicle_id_counter}"
-            else:
-                Track.track_id_counter += 1
-                self.track_id = f"p_{Track.session_counter}_{Track.track_id_counter}"
+            Track.global_id_counter += 1
+            prefix = "v" if object_type == "vehicle" else "p"
+            self.track_id = f"{prefix}_{Track.session_counter}_{Track.global_id_counter}"
         else:
             self.track_id = track_id
 
@@ -333,17 +333,31 @@ class Track:
 class BoTSORTTracker:
     """BoT-SORT tracker with Hungarian assignment and ReID."""
 
-    def __init__(self):
-        """Initialize tracker."""
+    def __init__(self, gallery=None):
+        """Initialize tracker.
+
+        Args:
+            gallery: Optional ReIDGallery instance for persistent re-identification
+        """
         self._persons: Dict[str, Track] = {}
         self._vehicles: Dict[str, Track] = {}
+
+        # ReID Gallery for persistent matching across video loops
+        self._gallery = gallery
 
         # Stats
         self._stats = {
             "total_tracks": 0,
             "active_tracks": 0,
-            "deleted_tracks": 0
+            "deleted_tracks": 0,
+            "gallery_matches": 0,  # Tracks recovered from gallery
         }
+
+    def set_gallery(self, gallery):
+        """Set the ReID gallery for persistent matching."""
+        self._gallery = gallery
+        if gallery:
+            logger.info("ReID Gallery attached to BoT-SORT tracker")
 
     def update(
         self,
@@ -391,10 +405,53 @@ class BoTSORTTracker:
             matched_detections = set()
 
         # STEP 4: Create new tracks for unmatched detections
+        # CHECK GALLERY FIRST: Try to match against persistent gallery before creating new track
         new_tracks = []
+        # Only exclude GIDs active in THIS camera - allows cross-camera re-identification
+        active_gids_this_camera = self._get_active_gids(object_type, camera_id)
+
         for i, detection in enumerate(detections):
             if i not in matched_detections:
-                track = Track(detection, camera_id=camera_id, object_type=object_type)
+                reused_track_id = None
+
+                # Check gallery for match if detection has a feature
+                has_gallery = self._gallery is not None
+                has_feature = detection.feature is not None
+
+                if has_gallery and has_feature:
+                    gallery_stats = self._gallery.get_stats()
+                    logger.debug(
+                        f"Gallery check: {object_type}, gallery_size={gallery_stats['total']}, "
+                        f"feature_dim={len(detection.feature)}, excluding={len(active_gids_this_camera)} GIDs"
+                    )
+                    gallery_match = self._gallery.find_match(
+                        feature=detection.feature,
+                        object_type=object_type,
+                        exclude_gids=list(active_gids_this_camera),  # Only exclude GIDs in same camera
+                    )
+
+                    if gallery_match:
+                        matched_gid, similarity = gallery_match
+                        # Create track with existing GID from gallery
+                        prefix = "v" if object_type == "vehicle" else "p"
+                        reused_track_id = f"{prefix}_{Track.session_counter}_{matched_gid}"
+                        logger.info(
+                            f"Gallery re-identification: {object_type} GID {matched_gid} "
+                            f"recovered (similarity={similarity:.3f})"
+                        )
+                        self._stats["gallery_matches"] += 1
+
+                        # Update gallery with new appearance
+                        self._gallery.add_or_update(
+                            gid=matched_gid,
+                            feature=detection.feature,
+                            object_type=object_type,
+                            camera_id=camera_id,
+                            confidence=detection.confidence,
+                        )
+
+                # Create track (with reused ID if gallery matched)
+                track = Track(detection, track_id=reused_track_id, camera_id=camera_id, object_type=object_type)
                 tracks[track.track_id] = track
                 self._stats["total_tracks"] += 1
 
@@ -407,6 +464,10 @@ class BoTSORTTracker:
             if tracks[track_id].should_delete():
                 del tracks[track_id]
                 self._stats["deleted_tracks"] += 1
+
+        # STEP 5.5: Consolidate overlapping tracks (merge duplicates)
+        # This catches cases where multiple tracks were created for the same object
+        self._consolidate_overlapping_tracks(tracks, object_type)
 
         # STEP 6: Find newly confirmed tracks
         for track_id in matched_tracks:
@@ -527,6 +588,82 @@ class BoTSORTTracker:
                     cost_matrix[i, j] = motion_cost
 
         return cost_matrix
+
+    def _consolidate_overlapping_tracks(
+        self,
+        tracks: Dict[str, Track],
+        object_type: str,
+        iou_threshold: float = 0.5,
+        reid_threshold: float = 0.6,
+    ) -> None:
+        """Merge overlapping tracks that are clearly the same object.
+
+        This catches cases where multiple tracks were accidentally created
+        for the same object (e.g., due to detection flicker or failed matching).
+
+        Keeps the older track (more established) and deletes the newer one.
+
+        Args:
+            tracks: Dictionary of active tracks (modified in place)
+            object_type: 'person' or 'vehicle'
+            iou_threshold: IoU threshold for considering tracks as overlapping
+            reid_threshold: ReID similarity threshold for confirming same object
+        """
+        if len(tracks) < 2:
+            return
+
+        track_list = list(tracks.values())
+        to_delete = set()
+
+        for i, track1 in enumerate(track_list):
+            if track1.track_id in to_delete:
+                continue
+
+            for j, track2 in enumerate(track_list):
+                if i >= j or track2.track_id in to_delete:
+                    continue
+
+                # Check IoU overlap
+                iou = self._calculate_iou(track1.last_detection_bbox, track2.last_detection_bbox)
+
+                if iou < iou_threshold:
+                    continue
+
+                # High IoU - check if they're the same object
+                should_merge = False
+
+                # If both have ReID features, check similarity
+                if track1.feature is not None and track2.feature is not None:
+                    if track1.feature.shape == track2.feature.shape:
+                        similarity = self._cosine_similarity(track1.feature, track2.feature)
+                        if similarity > reid_threshold:
+                            should_merge = True
+                            logger.info(
+                                f"Merging overlapping {object_type} tracks: "
+                                f"{track1.track_id} and {track2.track_id} "
+                                f"(IoU={iou:.2f}, similarity={similarity:.2f})"
+                            )
+                else:
+                    # No ReID features but very high IoU - likely same object
+                    if iou > 0.7:
+                        should_merge = True
+                        logger.info(
+                            f"Merging overlapping {object_type} tracks (no ReID): "
+                            f"{track1.track_id} and {track2.track_id} (IoU={iou:.2f})"
+                        )
+
+                if should_merge:
+                    # Keep the older track (track1 if it has more hits, else track2)
+                    if track1.hit_count >= track2.hit_count:
+                        to_delete.add(track2.track_id)
+                    else:
+                        to_delete.add(track1.track_id)
+
+        # Delete merged tracks
+        for track_id in to_delete:
+            if track_id in tracks:
+                del tracks[track_id]
+                self._stats["deleted_tracks"] += 1
 
     @staticmethod
     def _calculate_iou(bbox1: Tuple[float, float, float, float],
@@ -701,17 +838,85 @@ class BoTSORTTracker:
         """Reset tracker (clear all tracks)."""
         self._persons.clear()
         self._vehicles.clear()
-        # Increment session counter BEFORE resetting ID counters
+        # Increment session counter BEFORE resetting ID counter
         # This ensures new IDs don't collide with old ones in frontend stores
         Track.session_counter += 1
-        Track.track_id_counter = 0
-        Track.vehicle_id_counter = 0
+        Track.global_id_counter = 0  # Single global counter for all GIDs
         self._stats = {
             "total_tracks": 0,
             "active_tracks": 0,
-            "deleted_tracks": 0
+            "deleted_tracks": 0,
+            "gallery_matches": 0,
         }
         logger.info("BoT-SORT tracker reset")
+
+    def _get_active_gids(self, object_type: str, camera_id: Optional[str] = None) -> set:
+        """Get set of currently active GIDs for a given object type.
+
+        Used by gallery matching to avoid re-identifying objects
+        that are already being tracked IN THE SAME CAMERA.
+
+        IMPORTANT: For cross-camera re-identification, we only exclude GIDs
+        that are active in the SAME camera. This allows a person tracked in
+        Camera A to be re-identified when they appear in Camera B.
+
+        Args:
+            object_type: 'person' or 'vehicle'
+            camera_id: If provided, only return GIDs active in this camera
+
+        Returns:
+            Set of active GID integers
+        """
+        tracks = self._persons if object_type == 'person' else self._vehicles
+        gids = set()
+
+        for track_id, track in tracks.items():
+            # If camera_id specified, only include GIDs from that camera
+            if camera_id is not None and track.camera_id != camera_id:
+                continue
+
+            # Extract GID from track_id format: v_0_2 or p_1_5
+            match = re.search(r'[vpt]_\d+_(\d+)', track_id)
+            if match:
+                gids.add(int(match.group(1)))
+
+        return gids
+
+    def sync_track_to_gallery(self, track: Track):
+        """Sync a track's feature to the gallery for persistent storage.
+
+        Called after ReID features are extracted for a track.
+
+        Args:
+            track: Track with feature to sync
+        """
+        if not self._gallery:
+            logger.debug(f"sync_track_to_gallery: no gallery attached")
+            return
+        if track.feature is None:
+            logger.debug(f"sync_track_to_gallery: track {track.track_id} has no feature")
+            return
+
+        # Extract GID from track_id
+        match = re.search(r'[vpt]_\d+_(\d+)', track.track_id)
+        if not match:
+            logger.debug(f"sync_track_to_gallery: could not extract GID from {track.track_id}")
+            return
+
+        gid = int(match.group(1))
+
+        logger.info(
+            f"📝 Gallery sync: {track.object_type} GID {gid} "
+            f"(track={track.track_id}, feature_dim={len(track.feature)})"
+        )
+
+        self._gallery.add_or_update(
+            gid=gid,
+            feature=track.feature,
+            object_type=track.object_type,
+            camera_id=track.camera_id,
+            confidence=track.confidence,
+        )
 
     def clear_camera_tracks(self, camera_id: str):
         """Clear all tracks for a specific camera.

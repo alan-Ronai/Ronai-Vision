@@ -20,17 +20,18 @@ export async function syncCamerasToGo2rtc() {
         await go2rtcService.clearAllStreams();
 
         const cameras = await cameraStorage.find();
-        const camerasWithRtsp = cameras.filter(c => c.rtspUrl);
+        // Include cameras with rtspUrl, filePath, or sourceUrl
+        const camerasWithSource = cameras.filter(c => c.rtspUrl || c.filePath || c.sourceUrl);
 
-        if (camerasWithRtsp.length === 0) {
-            console.log("[Cameras] No cameras with RTSP URLs to sync");
+        if (camerasWithSource.length === 0) {
+            console.log("[Cameras] No cameras with source URLs to sync");
             return;
         }
 
-        console.log(`[Cameras] Syncing ${camerasWithRtsp.length} cameras to go2rtc...`);
-        const results = await go2rtcService.syncCameras(camerasWithRtsp);
+        console.log(`[Cameras] Syncing ${camerasWithSource.length} cameras to go2rtc...`);
+        const results = await go2rtcService.syncCameras(camerasWithSource);
         const successful = results.filter(r => r.success).length;
-        console.log(`[Cameras] Synced ${successful}/${camerasWithRtsp.length} cameras to go2rtc`);
+        console.log(`[Cameras] Synced ${successful}/${camerasWithSource.length} cameras to go2rtc`);
     } catch (error) {
         console.warn("[Cameras] Failed to sync cameras to go2rtc:", error.message);
     }
@@ -106,31 +107,67 @@ router.post("/", async (req, res) => {
         const io = req.app.get("io");
         io.emit("camera:added", camera);
 
-        // Register camera with go2rtc for WebRTC streaming
-        if (camera.rtspUrl) {
+        // Get the source URL - can be rtspUrl, filePath, or sourceUrl
+        const sourceUrl = camera.rtspUrl || camera.filePath || camera.sourceUrl;
+        const isLocalFile = go2rtcService.isLocalFile(sourceUrl);
+        const aiServiceUrl = process.env.AI_SERVICE_URL || "http://localhost:8000";
+
+        // For local files: Start AI service first (it will read the file),
+        // then register with go2rtc (which will pull from AI service's MJPEG)
+        // For RTSP: Register with go2rtc first, then start AI service
+
+        if (isLocalFile && sourceUrl) {
+            // Step 1: Start AI service detection for local file
+            if (camera.aiEnabled !== false) {
+                try {
+                    const response = await fetch(
+                        `${aiServiceUrl}/detection/start/${camera.cameraId}?rtsp_url=${encodeURIComponent(sourceUrl)}`,
+                        { method: "POST" }
+                    );
+                    if (response.ok) {
+                        console.log(`[Cameras] Started AI detection for local file: ${camera.cameraId}`);
+                    } else {
+                        console.warn(`[Cameras] Failed to start AI detection for ${camera.cameraId}: ${response.status}`);
+                    }
+                } catch (aiError) {
+                    console.warn(`[Cameras] Could not notify AI service: ${aiError.message}`);
+                }
+            }
+
+            // Step 2: Wait a moment for AI service to start streaming
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
+            // Step 3: Register with go2rtc (will pull from AI service MJPEG)
             try {
-                await go2rtcService.addStream(camera.cameraId, camera.rtspUrl);
-                console.log(`[Cameras] Registered ${camera.cameraId} with go2rtc`);
+                await go2rtcService.addStream(camera.cameraId, sourceUrl);
+                console.log(`[Cameras] Registered ${camera.cameraId} with go2rtc (via AI service MJPEG)`);
             } catch (go2rtcError) {
                 console.warn(`[Cameras] Could not register with go2rtc: ${go2rtcError.message}`);
             }
-        }
-
-        // Notify AI service to start detection for new camera
-        if (camera.aiEnabled !== false && camera.rtspUrl) {
-            const aiServiceUrl = process.env.AI_SERVICE_URL || "http://localhost:8000";
+        } else if (sourceUrl) {
+            // RTSP source: Register with go2rtc first
             try {
-                const response = await fetch(
-                    `${aiServiceUrl}/detection/start/${camera.cameraId}?rtsp_url=${encodeURIComponent(camera.rtspUrl)}`,
-                    { method: "POST" }
-                );
-                if (response.ok) {
-                    console.log(`[Cameras] Started AI detection for new camera: ${camera.cameraId}`);
-                } else {
-                    console.warn(`[Cameras] Failed to start AI detection for ${camera.cameraId}: ${response.status}`);
+                await go2rtcService.addStream(camera.cameraId, sourceUrl);
+                console.log(`[Cameras] Registered ${camera.cameraId} with go2rtc (RTSP)`);
+            } catch (go2rtcError) {
+                console.warn(`[Cameras] Could not register with go2rtc: ${go2rtcError.message}`);
+            }
+
+            // Then start AI detection
+            if (camera.aiEnabled !== false) {
+                try {
+                    const response = await fetch(
+                        `${aiServiceUrl}/detection/start/${camera.cameraId}?rtsp_url=${encodeURIComponent(sourceUrl)}`,
+                        { method: "POST" }
+                    );
+                    if (response.ok) {
+                        console.log(`[Cameras] Started AI detection for RTSP camera: ${camera.cameraId}`);
+                    } else {
+                        console.warn(`[Cameras] Failed to start AI detection for ${camera.cameraId}: ${response.status}`);
+                    }
+                } catch (aiError) {
+                    console.warn(`[Cameras] Could not notify AI service: ${aiError.message}`);
                 }
-            } catch (aiError) {
-                console.warn(`[Cameras] Could not notify AI service: ${aiError.message}`);
             }
         }
 

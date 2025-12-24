@@ -1,1 +1,18 @@
-[]
+[
+  {
+    "_id": "cam-1766600305484-ewzy8q7kl",
+    "cameraId": "test2",
+    "name": "test2",
+    "location": "",
+    "rtspUrl": "assets/test2.mp4",
+    "username": "",
+    "password": "",
+    "type": "simulator",
+    "aiEnabled": true,
+    "createdAt": "2025-12-24T18:18:25.484Z",
+    "updatedAt": "2025-12-24T21:33:05.830Z",
+    "status": "online",
+    "lastSeen": "2025-12-24T21:33:05.830Z",
+    "errorMessage": "No frames received"
+  }
+]

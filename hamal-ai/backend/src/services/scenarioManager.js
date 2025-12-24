@@ -558,10 +558,9 @@ class ScenarioManager extends EventEmitter {
       return false;
     }
 
-    // Check if plate is stolen
+    // Check if plate is stolen (silent check - don't log every vehicle)
     const stolenInfo = isPlateStolen(vehicleData.licensePlate);
     if (!stolenInfo) {
-      console.log(`[ScenarioManager] Plate ${vehicleData.licensePlate} not in stolen list`);
       return false;
     }
 
@@ -583,9 +582,8 @@ class ScenarioManager extends EventEmitter {
    * Handle armed person detection (from AI service)
    */
   async handleArmedPerson(personData) {
-    // Must be in VEHICLE_ALERT stage
+    // Must be in VEHICLE_ALERT stage (silent check - don't log every ignored person)
     if (!this.scenario || this.scenario.stage !== STAGES.VEHICLE_ALERT) {
-      console.log('[ScenarioManager] Not in VEHICLE_ALERT stage, ignoring armed person');
       return false;
     }
 

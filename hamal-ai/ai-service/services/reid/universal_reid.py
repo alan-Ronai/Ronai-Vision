@@ -10,6 +10,7 @@ import os
 import numpy as np
 from typing import Optional
 import torch
+from PIL import Image
 import logging
 from .base_reid import BaseReID
 
@@ -192,8 +193,6 @@ class UniversalReID(BaseReID):
             crops.append(crop)
 
         try:
-            from PIL import Image
-
             # Convert crops to RGB (CLIP expects RGB)
             pil_images = []
             for crop in crops:

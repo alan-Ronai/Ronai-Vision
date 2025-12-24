@@ -29,7 +29,7 @@ from collections import OrderedDict
 from fastapi import WebSocket
 
 from .detection import get_bot_sort_tracker, reset_bot_sort_tracker, Detection, Track
-from .reid import OSNetReID, TransReIDVehicle, UniversalReID
+from .reid import OSNetReID, TransReIDVehicle, UniversalReID, get_reid_gallery, initialize_reid_gallery
 from . import backend_sync
 from .rules import RuleEngine, RuleContext, get_rule_engine
 from .recording import get_frame_buffer, get_recording_manager
@@ -127,6 +127,8 @@ class ReIDFeatureCache:
 # Class Filtering Configuration
 ALLOWED_CLASSES = {"person", "car", "truck", "bus", "motorcycle", "bicycle"}
 MIN_BOX_AREA = 500  # Minimum pixels squared to filter noise
+MAX_BOX_RATIO = 0.40  # Maximum ratio of box area to frame area (reject boxes > 40% of frame)
+# Note: 40% is still very large - a typical vehicle/person should be 5-25% of frame
 
 
 class DetectionWebSocketManager:
@@ -608,8 +610,14 @@ class DetectionLoop:
         if self.config.use_bot_sort:
             self.bot_sort = reset_bot_sort_tracker()
             logger.info("✅ BoT-SORT tracker created fresh - no ghost tracks")
+
+            # Attach ReID Gallery for persistent re-identification across video loops
+            self._reid_gallery = get_reid_gallery()
+            self.bot_sort.set_gallery(self._reid_gallery)
+            logger.info("✅ ReID Gallery attached to BoT-SORT tracker")
         else:
             self.bot_sort = None
+            self._reid_gallery = None
 
         self._running = False
 
@@ -621,6 +629,8 @@ class DetectionLoop:
         # This ensures we always process the most recent frame, not stale frames from 3 seconds ago
         self._latest_frames: Dict[str, Tuple[np.ndarray, float]] = {}  # {camera_id: (frame, timestamp)}
         self._latest_frames_lock = threading.Lock()
+        # Event-based notification for new frames (replaces polling)
+        self._frame_available = threading.Event()
 
         self._result_queue: Queue = Queue(maxsize=20)
         self._last_alert: Dict[str, float] = {}
@@ -653,6 +663,10 @@ class DetectionLoop:
             "frames_dropped_stale": 0,  # Count of stale frames dropped
             "reid_extractions": 0,  # ReID feature extractions
             "reid_recoveries": 0,  # Successful ReID recoveries
+            # Event-based processing stats
+            "event_waits": 0,  # Number of times we waited for frame event
+            "event_timeouts": 0,  # Number of event wait timeouts
+            "event_signals": 0,  # Number of times frame event was signaled
             # Note: gemini_calls is tracked in GeminiAnalyzer.get_call_count()
         }
 
@@ -776,6 +790,10 @@ class DetectionLoop:
 
         with self._latest_frames_lock:
             self._latest_frames[camera_id] = (frame.copy(), timestamp)
+
+        # Signal that a new frame is available (event-driven, not polling)
+        self._frame_available.set()
+        self._stats["event_signals"] += 1
 
         # Add to frame buffer for pre-recording support
         try:
@@ -937,12 +955,20 @@ class DetectionLoop:
 
         while self._running:
             try:
+                # Wait for a frame to be available (event-driven, no polling)
+                # Timeout ensures we can exit cleanly when _running becomes False
+                self._stats["event_waits"] += 1
+                if not self._frame_available.wait(timeout=0.1):
+                    self._stats["event_timeouts"] += 1
+                    continue  # Timeout - check _running and wait again
+
                 # Get list of cameras that have frames waiting
                 with self._latest_frames_lock:
                     cameras_with_frames = list(self._latest_frames.keys())
+                    # Clear the event - will be set again when new frames arrive
+                    self._frame_available.clear()
 
                 if not cameras_with_frames:
-                    time.sleep(0.01)  # Small sleep if no frames
                     continue
 
                 # Process each camera's latest frame
@@ -977,10 +1003,8 @@ class DetectionLoop:
                             )
                             with self._frame_lock:
                                 self._annotated_frames[camera_id] = annotated
-                        # Sleep remaining time to avoid busy-waiting
-                        remaining = frame_interval - time_since_last
-                        if remaining > 0.001:
-                            time.sleep(remaining * 0.5)  # Sleep half the remaining time
+                        # Skip this frame - event-based system will notify when next frame arrives
+                        # No need to sleep, next frame will trigger the event
                         continue
 
                     last_process_time[camera_id] = time.time()
@@ -1091,6 +1115,17 @@ class DetectionLoop:
                 if box_area < MIN_BOX_AREA:
                     continue
 
+                # FILTER 4: Skip boxes that are too large (likely false positives)
+                # E.g., detections that cover the entire frame
+                frame_h, frame_w = frame.shape[:2]
+                frame_area = frame_h * frame_w
+                box_ratio = box_area / frame_area if frame_area > 0 else 0
+                if box_ratio > MAX_BOX_RATIO:
+                    logger.debug(
+                        f"Filtered {label}: box too large ({box_ratio:.1%} of frame > {MAX_BOX_RATIO:.0%} threshold)"
+                    )
+                    continue
+
                 # ReID Feature Extraction Strategy:
                 # - ReID extraction is SLOW on CPU (~100ms per detection)
                 # - Instead of extracting for ALL detections, we defer to post-tracking
@@ -1116,8 +1151,10 @@ class DetectionLoop:
 
             # ADDITIONAL NMS: Merge highly overlapping detections within each class
             # YOLO's NMS may not catch all duplicates (e.g., partial body + full body detections)
-            person_detections = self._merge_overlapping_detections(person_detections, iou_threshold=0.5)
-            vehicle_detections = self._merge_overlapping_detections(vehicle_detections, iou_threshold=0.5)
+            # Use lower threshold for persons (0.25) - they often have overlapping partial detections
+            # Vehicles use 0.35 threshold
+            person_detections = self._merge_overlapping_detections(person_detections, iou_threshold=0.25, containment_threshold=0.5)
+            vehicle_detections = self._merge_overlapping_detections(vehicle_detections, iou_threshold=0.35)
 
             postprocess_elapsed = (time.time() - postprocess_start) * 1000
             self._update_timing("yolo_postprocess_ms", postprocess_elapsed)
@@ -1139,54 +1176,49 @@ class DetectionLoop:
             reid_extract_count = 0
 
             if self.use_reid_features and self.bot_sort and should_run_reid:
-                # Get all active tracks with ReID features (not just lost ones)
-                active_persons = [t for t in self.bot_sort.get_active_tracks("person", camera_id)
-                                 if t.feature is not None]
-                active_vehicles = [t for t in self.bot_sort.get_active_tracks("vehicle", camera_id)
-                                  if t.feature is not None]
-
-                # If there are tracked objects with ReID, extract features for detections
-                # This is the key fix for track fragmentation - we need features to match against
-                # OPTIMIZATION: Use BATCH extraction instead of one-by-one (6x faster!)
-                # OPTIMIZATION 2: Limit to 5 detections max (not 10) - most scenes don't need more
+                # ALWAYS extract features for detections - even when no active tracks exist
+                # This is critical for gallery matching to work on NEW detections
+                # Without this, new objects never get features and can't match against gallery
                 MAX_REID_BATCH = int(os.environ.get("MAX_REID_BATCH", "5"))
+                reid_pre_count = 0
 
-                if active_persons or active_vehicles:
-                    reid_pre_count = 0
-
-                    # BATCH extract ReID for person detections (single forward pass)
-                    if active_persons and person_detections:
-                        # Get detections that need features (up to limit)
-                        dets_needing_features = [d for d in person_detections if d.feature is None][:MAX_REID_BATCH]
+                # BATCH extract ReID for person detections (single forward pass)
+                if person_detections:
+                    # Get detections that need features (up to limit)
+                    dets_needing_features = [d for d in person_detections if d.feature is None][:MAX_REID_BATCH]
+                    if dets_needing_features:
+                        person_features = self._extract_reid_features_batch(
+                            frame, dets_needing_features, class_type="person"
+                        )
+                        # Assign features back to original detections
+                        for i, det in enumerate(dets_needing_features):
+                            if i in person_features:
+                                det.feature = person_features[i]
+                                reid_pre_count += 1
+                                self._stats["reid_extractions"] += 1
                         if dets_needing_features:
-                            person_features = self._extract_reid_features_batch(
-                                frame, dets_needing_features, class_type="person"
-                            )
-                            # Assign features back to original detections
-                            for i, det in enumerate(dets_needing_features):
-                                if i in person_features:
-                                    det.feature = person_features[i]
-                                    reid_pre_count += 1
-                                    self._stats["reid_extractions"] += 1
+                            logger.debug(f"Pre-track ReID: extracted {len([d for d in dets_needing_features if d.feature is not None])} person features")
 
-                    # BATCH extract ReID for vehicle detections (single forward pass)
-                    if active_vehicles and vehicle_detections:
-                        # Get detections that need features (up to limit)
-                        dets_needing_features = [d for d in vehicle_detections if d.feature is None][:MAX_REID_BATCH]
+                # BATCH extract ReID for vehicle detections (single forward pass)
+                if vehicle_detections:
+                    # Get detections that need features (up to limit)
+                    dets_needing_features = [d for d in vehicle_detections if d.feature is None][:MAX_REID_BATCH]
+                    if dets_needing_features:
+                        vehicle_features = self._extract_reid_features_batch(
+                            frame, dets_needing_features, class_type="vehicle"
+                        )
+                        # Assign features back to original detections
+                        for i, det in enumerate(dets_needing_features):
+                            if i in vehicle_features:
+                                det.feature = vehicle_features[i]
+                                reid_pre_count += 1
+                                self._stats["reid_extractions"] += 1
                         if dets_needing_features:
-                            vehicle_features = self._extract_reid_features_batch(
-                                frame, dets_needing_features, class_type="vehicle"
-                            )
-                            # Assign features back to original detections
-                            for i, det in enumerate(dets_needing_features):
-                                if i in vehicle_features:
-                                    det.feature = vehicle_features[i]
-                                    reid_pre_count += 1
-                                    self._stats["reid_extractions"] += 1
+                            logger.debug(f"Pre-track ReID: extracted {len([d for d in dets_needing_features if d.feature is not None])} vehicle features")
 
-                    reid_extract_count += reid_pre_count
-                    if reid_pre_count > 0:
-                        logger.debug(f"Pre-tracking ReID (BATCHED): extracted {reid_pre_count} features")
+                reid_extract_count += reid_pre_count
+                if reid_pre_count > 0:
+                    logger.debug(f"Pre-tracking ReID (BATCHED): extracted {reid_pre_count} features total")
 
             reid_extract_elapsed = (time.time() - reid_extract_start) * 1000
             self._update_timing("reid_extract_ms", reid_extract_elapsed)
@@ -1298,7 +1330,7 @@ class DetectionLoop:
                                 class_name=track_dict.get("class", "unknown"),
                                 max_size=300,  # Smaller for initial cutout
                                 jpeg_quality=85,  # Slightly lower quality for speed
-                                margin_percent=0.20,  # Less margin for quick cutout
+                                margin_percent=0.40,  # Increased margin for better context
                                 is_pre_cropped=False,  # Frame is full-size here
                             )
                             if cutout:
@@ -1328,10 +1360,11 @@ class DetectionLoop:
             self._update_timing("tracker_ms", tracker_elapsed)
 
             # STEP 3.5: Post-tracking ReID extraction (only for NEW tracks)
-            # OPTIMIZATION: Only extract for new tracks every N frames (sync with pre-tracking)
-            # New tracks need features, but not urgently - can wait a few frames
+            # CRITICAL: New tracks ALWAYS need features for gallery matching to work
+            # Don't skip based on frame counter - new tracks need immediate ReID
             reid_post_start = time.time()
-            if self.use_reid_features and self.bot_sort and should_run_reid:
+            has_new_tracks = len(new_person_tracks) > 0 or len(new_vehicle_tracks) > 0
+            if self.use_reid_features and self.bot_sort and has_new_tracks:
                 reid_count = 0
                 # OPTIMIZATION: Reduced limit - 3 tracks per type is usually enough
                 max_reid = self.max_reid_per_frame if self.max_reid_per_frame > 0 else 3  # Reduced from 10
@@ -1354,17 +1387,33 @@ class DetectionLoop:
                             track.feature = person_features[i]
                             self._stats["reid_extractions"] += 1
                             reid_count += 1
+                            # Sync to gallery for persistent storage
+                            if self.bot_sort:
+                                self.bot_sort.sync_track_to_gallery(track)
 
                 # BATCH extract for new vehicle tracks (single forward pass)
                 if new_vehicle_tracks_needing_features:
+                    logger.info(
+                        f"🚗 Vehicle ReID: {len(new_vehicle_tracks_needing_features)} new tracks needing features"
+                    )
                     vehicle_features = self._extract_reid_features_batch(
                         frame, new_vehicle_tracks_needing_features, class_type="vehicle"
                     )
+                    logger.info(f"🚗 Vehicle ReID: extracted {len(vehicle_features)} features")
                     for i, track in enumerate(new_vehicle_tracks_needing_features):
                         if i in vehicle_features:
                             track.feature = vehicle_features[i]
                             self._stats["reid_extractions"] += 1
                             reid_count += 1
+                            logger.info(
+                                f"🚗 Vehicle ReID: assigned feature to {track.track_id} "
+                                f"(dim={len(track.feature)}, type={track.object_type})"
+                            )
+                            # Sync to gallery for persistent storage
+                            if self.bot_sort:
+                                self.bot_sort.sync_track_to_gallery(track)
+                        else:
+                            logger.warning(f"🚗 Vehicle ReID: no feature for track index {i}")
 
                 if reid_count > 0:
                     logger.debug(f"Post-tracking ReID (BATCHED): extracted {reid_count} features for new tracks")
@@ -1597,8 +1646,15 @@ class DetectionLoop:
                 encoder = self.osnet
                 encoder_name = "OSNet"
             elif class_name in vehicle_classes:
-                encoder = self.vehicle_reid
-                encoder_name = "TransReID"
+                # Use TransReID if available, otherwise fall back to CLIP
+                # (OSNet is person-specific, not suitable for vehicles)
+                if self.vehicle_reid is not None:
+                    encoder = self.vehicle_reid
+                    encoder_name = "TransReID"
+                else:
+                    encoder = self.universal_reid
+                    encoder_name = "CLIP"
+                    logger.debug(f"Using CLIP fallback for vehicle ReID (TransReID not available)")
             else:
                 encoder = self.universal_reid
                 encoder_name = "CLIP"
@@ -1704,8 +1760,15 @@ class DetectionLoop:
             encoder = self.osnet
             encoder_name = "OSNet"
         else:  # vehicle
-            encoder = self.vehicle_reid
-            encoder_name = "TransReID"
+            # Use TransReID if available, otherwise fall back to CLIP
+            # (OSNet is person-specific, not suitable for vehicles)
+            if self.vehicle_reid is not None:
+                encoder = self.vehicle_reid
+                encoder_name = "TransReID"
+            else:
+                encoder = self.universal_reid
+                encoder_name = "CLIP"
+                logger.debug(f"Using CLIP fallback for vehicle ReID (TransReID not available)")
 
         if encoder is None:
             logger.debug(f"{encoder_name} encoder not available for batch extraction")
@@ -1825,7 +1888,7 @@ class DetectionLoop:
         class_name: str = "unknown",
         max_size: int = 400,
         jpeg_quality: int = 90,
-        margin_percent: float = 0.25,
+        margin_percent: float = 0.40,  # Increased from 0.25 for better context
         is_pre_cropped: bool = False,
     ) -> Optional[str]:
         """Generate an enhanced cutout image for frontend display.
@@ -1948,7 +2011,8 @@ class DetectionLoop:
     def _merge_overlapping_detections(
         self,
         detections: List[Detection],
-        iou_threshold: float = 0.5
+        iou_threshold: float = 0.5,
+        containment_threshold: float = 0.7,
     ) -> List[Detection]:
         """Merge overlapping detections within the same class.
 
@@ -1959,6 +2023,7 @@ class DetectionLoop:
         Args:
             detections: List of Detection objects
             iou_threshold: IoU threshold for merging
+            containment_threshold: If this much of a box is inside another, merge them
 
         Returns:
             Filtered list with overlapping detections merged
@@ -1981,6 +2046,13 @@ class DetectionLoop:
                     should_keep = False
                     break
 
+                # Also check containment - if smaller box is mostly inside larger box
+                # This catches cases where IoU is low but one box is inside another
+                containment = self._compute_containment(det.bbox, kept_det.bbox)
+                if containment >= containment_threshold:
+                    should_keep = False
+                    break
+
             if should_keep:
                 kept.append(det)
 
@@ -1988,6 +2060,36 @@ class DetectionLoop:
             logger.debug(f"Post-NMS merged {len(detections)} -> {len(kept)} detections")
 
         return kept
+
+    @staticmethod
+    def _compute_containment(bbox1: Tuple, bbox2: Tuple) -> float:
+        """Compute how much of bbox1 is contained within bbox2.
+
+        Returns ratio of intersection to bbox1 area (0-1).
+        """
+        x1, y1, w1, h1 = bbox1
+        x2, y2, w2, h2 = bbox2
+
+        # Convert to xyxy format
+        b1_x1, b1_y1, b1_x2, b1_y2 = x1, y1, x1 + w1, y1 + h1
+        b2_x1, b2_y1, b2_x2, b2_y2 = x2, y2, x2 + w2, y2 + h2
+
+        # Intersection
+        inter_x1 = max(b1_x1, b2_x1)
+        inter_y1 = max(b1_y1, b2_y1)
+        inter_x2 = min(b1_x2, b2_x2)
+        inter_y2 = min(b1_y2, b2_y2)
+
+        if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
+            return 0.0
+
+        inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+        bbox1_area = w1 * h1
+
+        if bbox1_area <= 0:
+            return 0.0
+
+        return inter_area / bbox1_area
 
     @staticmethod
     def _compute_iou_xywh(bbox1: Tuple, bbox2: Tuple) -> float:
@@ -2355,19 +2457,18 @@ class DetectionLoop:
                 # Process events through Rule Engine
                 await self._process_with_rules(result)
 
-                # Sync tracked objects to backend for persistence
-                try:
-                    await backend_sync.sync_from_detection_result(
-                        camera_id=result.camera_id,
-                        camera_name=result.camera_id,  # Use camera_id as name for now
-                        tracked_persons=result.tracked_persons,
-                        tracked_vehicles=result.tracked_vehicles,
-                        new_persons=result.new_persons,
-                        new_vehicles=result.new_vehicles,
-                        armed_persons=result.armed_persons,
-                    )
-                except Exception as sync_error:
-                    logger.debug(f"Backend sync error (non-critical): {sync_error}")
+                # Sync NEW objects to backend for persistence (event-driven)
+                # Note: Analysis and armed status are synced separately by Gemini callbacks
+                if result.new_persons or result.new_vehicles:
+                    try:
+                        await backend_sync.sync_new_objects(
+                            camera_id=result.camera_id,
+                            camera_name=result.camera_id,
+                            new_persons=result.new_persons,
+                            new_vehicles=result.new_vehicles,
+                        )
+                    except Exception as sync_error:
+                        logger.debug(f"Backend sync error (non-critical): {sync_error}")
 
             except Exception as e:
                 logger.error(f"Result handler error: {e}")
@@ -2442,6 +2543,7 @@ class DetectionLoop:
                 frame=result.frame,
                 bbox=tuple(v.get("bbox", [0, 0, 0, 0])),
                 confidence=v.get("confidence", 0.5),
+                object_class=v.get("class", "vehicle"),  # Pass class for consistency check
             )
             quality_elapsed = (time.time() - quality_start) * 1000
             self._update_timing("frame_quality_ms", quality_elapsed)
@@ -2478,6 +2580,7 @@ class DetectionLoop:
                 frame=result.frame,
                 bbox=tuple(p.get("bbox", [0, 0, 0, 0])),
                 confidence=p.get("confidence", 0.5),
+                object_class="person",  # Pass class for consistency check
             )
             quality_elapsed = (time.time() - quality_start) * 1000
             self._update_timing("frame_quality_ms", quality_elapsed)
@@ -2535,15 +2638,33 @@ class DetectionLoop:
             self._update_timing("image_enhance_ms", enhance_elapsed)
 
             # Run Gemini analysis on the ENHANCED optimal frame
+            # Pass is_pre_cropped so Gemini knows not to crop again
+            is_pre_cropped = frame_metadata.get("is_crop", False)
             gemini_start = time.time()
-            analysis = await self.gemini.analyze_vehicle(enhanced_frame, list(bbox))
+            analysis = await self.gemini.analyze_vehicle(enhanced_frame, list(bbox), is_pre_cropped=is_pre_cropped)
             gemini_elapsed = (time.time() - gemini_start) * 1000
             self._update_timing("gemini_vehicle_ms", gemini_elapsed)
+
+            # TYPE CORRECTION: Check if Gemini detected wrong object type
+            is_correct_type = analysis.get("isCorrectType", True)
+            actual_type = analysis.get("actualObjectType", "vehicle")
+            if not is_correct_type and actual_type == "person":
+                logger.warning(
+                    f"TYPE CORRECTION: Track {track_id} was classified as vehicle but Gemini says it's a person. "
+                    f"Marking for type correction."
+                )
+                # Add type correction flag for backend
+                analysis["_typeCorrection"] = {
+                    "originalType": "vehicle",
+                    "correctedType": "person",
+                    "reason": "gemini_verification"
+                }
+                # Include type in analysis so backend can update the object type
+                analysis["type"] = "person"
 
             # CRITICAL: Generate enhanced cutout for frontend display
             # This is the image that will appear in GlobalIDStore UI
             cutout_start = time.time()
-            is_pre_cropped = frame_metadata.get("is_crop", False)
             enhanced_cutout_b64 = self._generate_enhanced_cutout(
                 enhanced_frame, bbox, class_name="vehicle", is_pre_cropped=is_pre_cropped
             )
@@ -2646,15 +2767,33 @@ class DetectionLoop:
             self._update_timing("image_enhance_ms", enhance_elapsed)
 
             # Run Gemini analysis on the ENHANCED optimal frame
+            # Pass is_pre_cropped so Gemini knows not to crop again
+            is_pre_cropped = frame_metadata.get("is_crop", False)
             gemini_start = time.time()
-            analysis = await self.gemini.analyze_person(enhanced_frame, list(bbox))
+            analysis = await self.gemini.analyze_person(enhanced_frame, list(bbox), is_pre_cropped=is_pre_cropped)
             gemini_elapsed = (time.time() - gemini_start) * 1000
             self._update_timing("gemini_person_ms", gemini_elapsed)
+
+            # TYPE CORRECTION: Check if Gemini detected wrong object type
+            is_correct_type = analysis.get("isCorrectType", True)
+            actual_type = analysis.get("actualObjectType", "person")
+            if not is_correct_type and actual_type == "vehicle":
+                logger.warning(
+                    f"TYPE CORRECTION: Track {track_id} was classified as person but Gemini says it's a vehicle. "
+                    f"Marking for type correction."
+                )
+                # Add type correction flag for backend
+                analysis["_typeCorrection"] = {
+                    "originalType": "person",
+                    "correctedType": "vehicle",
+                    "reason": "gemini_verification"
+                }
+                # Include type in analysis so backend can update the object type
+                analysis["type"] = "vehicle"
 
             # CRITICAL: Generate enhanced cutout for frontend display
             # This is the image that will appear in GlobalIDStore UI
             cutout_start = time.time()
-            is_pre_cropped = frame_metadata.get("is_crop", False)
             enhanced_cutout_b64 = self._generate_enhanced_cutout(
                 enhanced_frame, bbox, class_name="person", is_pre_cropped=is_pre_cropped
             )
@@ -2715,9 +2854,9 @@ class DetectionLoop:
                         result.armed_persons.append(p)
                         break
 
-                # Immediately sync armed status to backend
+                # Immediately sync armed status to backend (throttled to avoid spam)
                 try:
-                    await backend_sync.mark_armed(
+                    await backend_sync.mark_armed_throttled(
                         gid=track_id,
                         weapon_type=analysis.get("weaponType", analysis.get("סוג_נשק")),
                     )
