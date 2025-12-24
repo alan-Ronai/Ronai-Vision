@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hebrew Whisper Transcription Service.
+"""Hebrew Transcription Service.
 
 Run with: python main.py
 
@@ -26,15 +26,15 @@ try:
 except ImportError:
     pass
 
-from whisper_transcriber import WhisperTranscriber, TranscriptionResult
+from transcriber import WhisperTranscriber, TranscriptionResult
 from rtp_client import RTPTCPClient
 
 # ============== CONFIGURATION ==============
 # Edit these or use .env file
 
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "ivrit-ai/whisper-large-v3-turbo-ct2")
-WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "auto")
-WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
+WHISPER_MODEL = os.getenv("MODEL", "ivrit-ai/whisper-large-v3-hebrew-ct2")
+WHISPER_DEVICE = os.getenv("WDEVICE", "auto")
+WHISPER_COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "int8")
 
 RTP_HOST = os.getenv("RTP_HOST", "34.232.67.91")  # Your EC2 relay IP
 RTP_PORT = int(os.getenv("RTP_PORT", "5005"))
@@ -206,7 +206,7 @@ def main():
     setup_logging()
 
     print("\n" + "=" * 70)
-    print("🎙️  HEBREW WHISPER TRANSCRIPTION SERVICE")
+    print("🎙️  HEBREW TRANSCRIPTION SERVICE")
     print("=" * 70)
 
     # Create output directory

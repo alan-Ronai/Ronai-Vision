@@ -1,9 +1,14 @@
 {
     "cameras": {
         "cam1": {
-            "type": "rtsp",
-            "source": "URL_to_your_RTSP_stream_1",
-            "description": "Real RTSP camera"
+            "type": "simulator",
+            "source": "assets/sample_video3.mp4",
+            "description": "Test video file (development)"
+        },
+        "cam2": {
+            "type": "simulator",
+            "source": "assets/sample_video4.mp4",
+            "description": "Test video file (development)"
         }
     },
     "notes": {

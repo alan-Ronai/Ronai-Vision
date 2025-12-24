@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 # Try to import faster-whisper
 try:
     from faster_whisper import WhisperModel
+
     WHISPER_AVAILABLE = True
 except ImportError:
     WhisperModel = None
@@ -26,6 +27,7 @@ except ImportError:
 @dataclass
 class TranscriptionResult:
     """Result of transcription."""
+
     text: str
     timestamp: datetime
     duration_seconds: float
@@ -57,8 +59,8 @@ class WhisperTranscriber:
         self.model = None
         self._initialized = False
 
-        logger.info(f"WhisperTranscriber initialized")
-        logger.info(f"  Model: {model_path}")
+        logger.info(f"  Transcriber initialized")
+        # logger.info(f"  Model: {model_path}")
         logger.info(f"  Device: {self.device}")
         logger.info(f"  Compute type: {compute_type}")
 
@@ -67,6 +69,7 @@ class WhisperTranscriber:
         if device == "auto":
             try:
                 import torch
+
                 if torch.cuda.is_available():
                     return "cuda"
             except ImportError:
@@ -82,14 +85,14 @@ class WhisperTranscriber:
         if not WHISPER_AVAILABLE:
             raise RuntimeError("faster-whisper not installed")
 
-        logger.info("Loading faster-whisper model...")
+        # logger.info("Loading faster-whisper model...")
         start_time = time.time()
 
         self.model = WhisperModel(
             self.model_path,
             device=self.device,
             compute_type=self.compute_type,
-            local_files_only=False,  # Allow downloading from HuggingFace
+            local_files_only=True,  # Allow downloading from HuggingFace
         )
 
         load_time = time.time() - start_time
@@ -117,33 +120,36 @@ class WhisperTranscriber:
 
             # VAD parameters for Hebrew military radio
             vad_params = {
-                "threshold": 0.3,
-                "min_speech_duration_ms": 250,
-                "min_silence_duration_ms": 200,
-                "speech_pad_ms": 400,
+                "threshold": 0.02,  # Speech probability threshold (very sensitive)
+                "min_speech_duration_ms": 7,  # Minimum 7ms to count as speech
+                "min_silence_duration_ms": 130,  # 130ms silence to split segments
+                "speech_pad_ms": 400,  # Add padding around detected speech
+                "max_speech_duration_s": 20.0,  # Max continuous speech before forcing split
             }
 
             segments_iter, info = self.model.transcribe(
                 filepath,
                 language="he",
                 beam_size=1,
-                best_of=1,
-                temperature=0.0,
+                best_of=5,
+                temperature=[0.0, 0.2, 0.4, 0.6, 0.8],
                 vad_filter=True,
                 vad_parameters=vad_params,
                 condition_on_previous_text=False,
-                initial_prompt="תמלול אודיו בעברית.",
+                initial_prompt="תמלול אודיו בעברית של שיח צבאי בין מספר אנשים.",
             )
 
             # Collect segments
             segments = []
             full_text = []
             for segment in segments_iter:
-                segments.append({
-                    "start": segment.start,
-                    "end": segment.end,
-                    "text": segment.text.strip(),
-                })
+                segments.append(
+                    {
+                        "start": segment.start,
+                        "end": segment.end,
+                        "text": segment.text.strip(),
+                    }
+                )
                 full_text.append(segment.text.strip())
 
             text = " ".join(full_text)
@@ -180,7 +186,9 @@ class WhisperTranscriber:
 
         try:
             duration = len(audio_bytes) / (2 * self.sample_rate)
-            logger.info(f"Transcribing audio buffer: {len(audio_bytes)} bytes, {duration:.2f}s")
+            logger.info(
+                f"Transcribing audio buffer: {len(audio_bytes)} bytes, {duration:.2f}s"
+            )
             start_time = time.time()
 
             # Convert bytes to float32 numpy array
@@ -189,40 +197,45 @@ class WhisperTranscriber:
 
             # VAD parameters
             vad_params = {
-                "threshold": 0.3,
-                "min_speech_duration_ms": 250,
-                "min_silence_duration_ms": 200,
-                "speech_pad_ms": 400,
+                "threshold": 0.02,  # Speech probability threshold (very sensitive)
+                "min_speech_duration_ms": 7,  # Minimum 7ms to count as speech
+                "min_silence_duration_ms": 130,  # 130ms silence to split segments
+                "speech_pad_ms": 400,  # Add padding around detected speech
+                "max_speech_duration_s": 20.0,  # Max continuous speech before forcing split
             }
 
             segments_iter, _info = self.model.transcribe(
                 audio_float,
                 language="he",
                 beam_size=1,
-                best_of=1,
-                temperature=0.0,
+                best_of=5,
+                temperature=[0.0, 0.2, 0.4, 0.6, 0.8],
                 vad_filter=True,
                 vad_parameters=vad_params,
                 condition_on_previous_text=False,
-                initial_prompt="תמלול אודיו בעברית.",
+                initial_prompt="תמלול אודיו בעברית של שיח צבאי בין מספר אנשים.",
             )
 
             # Collect segments
             segments = []
             full_text = []
             for segment in segments_iter:
-                segments.append({
-                    "start": segment.start,
-                    "end": segment.end,
-                    "text": segment.text.strip(),
-                })
+                segments.append(
+                    {
+                        "start": segment.start,
+                        "end": segment.end,
+                        "text": segment.text.strip(),
+                    }
+                )
                 full_text.append(segment.text.strip())
 
             text = " ".join(full_text)
             elapsed = time.time() - start_time
 
             if text:
-                logger.info(f"Transcription complete in {elapsed:.1f}s: '{text[:100]}...'")
+                logger.info(
+                    f"Transcription complete in {elapsed:.1f}s: '{text[:100]}...'"
+                )
             else:
                 logger.info(f"No speech detected in {duration:.1f}s audio")
 
