@@ -3531,8 +3531,26 @@ class DetectionLoop:
         """
         if yolo_confidence is not None:
             yolo_confidence = max(0.0, min(1.0, yolo_confidence))
+            old_conf = self.config.yolo_confidence
             self.config.yolo_confidence = yolo_confidence
-            logger.info(f"YOLO confidence changed to: {yolo_confidence}")
+
+            # CRITICAL: Also update class_confidence dict which is used in run_detection
+            # Without this, the dynamic confidence change wouldn't take effect!
+            if hasattr(self, 'class_confidence') and self.class_confidence:
+                for class_name in self.class_confidence:
+                    # Scale class thresholds proportionally to the new base
+                    if old_conf > 0:
+                        ratio = self.class_confidence[class_name] / old_conf
+                        self.class_confidence[class_name] = yolo_confidence * ratio
+                    else:
+                        self.class_confidence[class_name] = yolo_confidence
+
+                logger.info(
+                    f"YOLO confidence changed to: {yolo_confidence} "
+                    f"(class thresholds scaled: {self.class_confidence})"
+                )
+            else:
+                logger.info(f"YOLO confidence changed to: {yolo_confidence}")
 
         if weapon_confidence is not None:
             weapon_confidence = max(0.0, min(1.0, weapon_confidence))
