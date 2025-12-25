@@ -661,6 +661,10 @@ router.post("/browser-webcam/:id/connected", async (req, res) => {
         }
 
         if (hasRealProducer) {
+            // Wait a moment for go2rtc to fully establish the WebRTC producer
+            // This prevents race conditions where AI service connects before producer is ready
+            await new Promise(r => setTimeout(r, 1000));
+
             // Now start AI detection
             const rtspUrl = `rtsp://localhost:8554/${cameraId}`;
             try {
