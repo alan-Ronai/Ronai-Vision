@@ -25,12 +25,11 @@ rtsp:
   listen: ":8554"      # go2rtc's RTSP output port
 
 # Streams - managed dynamically via API by the backend
-# Do NOT add static streams here - they will cause errors on servers without webcams
 streams:
-  # Webcam template - can be used as reference (only works on machines with webcams)
-  # webcam: "ffmpeg:device?video=0&video_size=1280x720&framerate=30#video=h264"
-  # test:
-  #   - ffmpeg:device?video=0&video_size=1280x720&framerate=30#video=h264
+  # Browser webcam stream - self-referencing for WHIP ingestion
+  # Browsers can push their webcam via WebRTC to this stream
+  browser-webcam:
+    - browser-webcam
 
 # FFmpeg configuration for transcoding (if needed)
 ffmpeg:

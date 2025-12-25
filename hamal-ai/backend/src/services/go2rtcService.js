@@ -208,46 +208,29 @@ class Go2rtcService {
   }
 
   /**
-   * Create a stream slot for browser webcam ingestion via WHIP
-   * @param {string} streamId - Stream identifier
-   * @returns {Promise<object>} - WHIP connection info
+   * Get WHIP info for the pre-configured browser webcam stream
+   * The stream is defined in go2rtc.yaml as a self-referencing stream
+   * @returns {object} - WHIP connection info
    */
-  async createBrowserWebcamStream(streamId) {
-    try {
-      // For WHIP ingestion, go2rtc needs a self-referencing stream
-      // This creates an empty "slot" that accepts WebRTC push via WHIP
-      // See: https://github.com/AlexxIT/go2rtc/issues/693
+  getBrowserWebcamStreamInfo() {
+    // Use the fixed stream name from go2rtc.yaml
+    const streamId = 'browser-webcam';
 
-      await axios.put(
-        `${this.baseUrl}/api/streams`,
-        null,
-        {
-          params: {
-            name: streamId,
-            src: streamId  // Self-reference creates WHIP-ready stream
-          }
-        }
-      );
+    console.log(`[go2rtc] Using pre-configured browser-webcam stream for WHIP`);
 
-      console.log(`[go2rtc] Created self-referencing stream for WHIP: ${streamId}`);
+    const whipInfo = this.getWHIPInfo(streamId);
 
-      const whipInfo = this.getWHIPInfo(streamId);
+    this.streams.set(streamId, {
+      type: 'browser-webcam',
+      addedAt: new Date(),
+      status: 'waiting'
+    });
 
-      this.streams.set(streamId, {
-        type: 'browser-webcam',
-        addedAt: new Date(),
-        status: 'waiting'  // Waiting for browser to connect
-      });
-
-      return {
-        success: true,
-        streamId,
-        ...whipInfo
-      };
-    } catch (error) {
-      console.error(`[go2rtc] Error creating browser webcam stream ${streamId}:`, error.message);
-      throw error;
-    }
+    return {
+      success: true,
+      streamId,
+      ...whipInfo
+    };
   }
 
   /**

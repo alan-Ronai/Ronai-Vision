@@ -538,42 +538,43 @@ router.post("/auto-focus/cancel", (req, res) => {
 
 /**
  * POST /api/cameras/browser-webcam/start
- * Start sharing browser webcam - creates stream slot and returns WHIP URL
+ * Start sharing browser webcam - uses pre-configured stream in go2rtc.yaml
  * The browser will use WHIP to push its webcam stream to go2rtc
  */
 router.post("/browser-webcam/start", async (req, res) => {
     try {
-        const { name, clientId } = req.body;
+        const { name } = req.body;
 
-        // Generate unique camera ID for this browser webcam
-        const cameraId = `browser-webcam-${clientId || Date.now()}`;
+        // Use the fixed stream ID from go2rtc.yaml (self-referencing stream)
+        const cameraId = 'browser-webcam';
 
-        // Check if already exists
+        // Check if already exists in our database
         const existing = await cameraStorage.findOne({ cameraId });
         if (existing) {
-            // Return existing stream info
-            const whipInfo = go2rtcService.getWHIPInfo(cameraId);
+            // Update status and return existing stream info
+            await cameraStorage.update({ cameraId }, { status: 'connecting' });
+            const streamInfo = go2rtcService.getBrowserWebcamStreamInfo();
             return res.json({
                 success: true,
                 exists: true,
-                camera: existing,
-                ...whipInfo
+                camera: { ...existing, status: 'connecting' },
+                ...streamInfo
             });
         }
 
-        // Create WHIP stream slot in go2rtc
-        const streamInfo = await go2rtcService.createBrowserWebcamStream(cameraId);
+        // Get WHIP info for the pre-configured stream
+        const streamInfo = go2rtcService.getBrowserWebcamStreamInfo();
 
         // Create camera entry in database
         const camera = await cameraStorage.create({
             cameraId,
-            name: name || `מצלמת דפדפן (${clientId || 'anonymous'})`,
+            name: name || 'מצלמת דפדפן',
             location: 'Browser',
             type: 'browser-webcam',
             status: 'connecting',
             aiEnabled: true,
-            sourceUrl: `whip://${cameraId}`,  // Virtual URL indicating WHIP source
-            order: 100  // Browser webcams appear at end
+            sourceUrl: `whip://${cameraId}`,
+            order: 100
         });
 
         // Notify clients
