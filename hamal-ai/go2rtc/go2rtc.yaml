@@ -9,7 +9,8 @@
 api:
   listen: ":1984"      # Web UI and API port
   origin: "*"          # Allow CORS from any origin (for dev)
-  readonly: true
+  # readonly: false is required for WHIP (browser webcam ingestion)
+  readonly: false
 
 # WebRTC configuration
 webrtc:
@@ -23,12 +24,13 @@ webrtc:
 rtsp:
   listen: ":8554"      # go2rtc's RTSP output port
 
-# Streams - webcams are defined here, other streams added via API
+# Streams - managed dynamically via API by the backend
+# Do NOT add static streams here - they will cause errors on servers without webcams
 streams:
-  # Webcam template - can be used as reference
+  # Webcam template - can be used as reference (only works on machines with webcams)
   # webcam: "ffmpeg:device?video=0&video_size=1280x720&framerate=30#video=h264"
-  test:
-    - ffmpeg:device?video=0&video_size=1280x720&framerate=30#video=h264
+  # test:
+  #   - ffmpeg:device?video=0&video_size=1280x720&framerate=30#video=h264
 
 # FFmpeg configuration for transcoding (if needed)
 ffmpeg:

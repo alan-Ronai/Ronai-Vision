@@ -190,6 +190,56 @@ class Go2rtcService {
   }
 
   /**
+   * Get WHIP URL for browser webcam ingestion
+   * WHIP = WebRTC-HTTP Ingestion Protocol (browser pushes stream TO server)
+   * @param {string} streamId - Stream identifier for the browser webcam
+   * @returns {object} - WHIP connection info
+   */
+  getWHIPInfo(streamId) {
+    return {
+      // WHIP endpoint - browser sends its webcam stream here
+      whip: `${this.baseUrl}/api/webrtc?dst=${streamId}`,
+      // Once published, the stream can be consumed via these URLs
+      whep: `${this.baseUrl}/api/webrtc?src=${streamId}`,
+      mse: `${this.baseUrl}/api/ws?src=${streamId}`,
+      rtsp: `rtsp://localhost:8554/${streamId}`,
+      hls: `${this.baseUrl}/api/stream.m3u8?src=${streamId}`
+    };
+  }
+
+  /**
+   * Create a stream slot for browser webcam ingestion via WHIP
+   * @param {string} streamId - Stream identifier
+   * @returns {Promise<object>} - WHIP connection info
+   */
+  async createBrowserWebcamStream(streamId) {
+    try {
+      // Create an empty stream that will receive WHIP input
+      // go2rtc creates the stream when the first WHIP connection arrives
+      // We just need to prepare the endpoint info
+
+      const whipInfo = this.getWHIPInfo(streamId);
+
+      this.streams.set(streamId, {
+        type: 'browser-webcam',
+        addedAt: new Date(),
+        status: 'waiting'  // Waiting for browser to connect
+      });
+
+      console.log(`[go2rtc] Created browser webcam slot: ${streamId}`);
+
+      return {
+        success: true,
+        streamId,
+        ...whipInfo
+      };
+    } catch (error) {
+      console.error(`[go2rtc] Error creating browser webcam stream ${streamId}:`, error.message);
+      throw error;
+    }
+  }
+
+  /**
    * Clear all streams from go2rtc
    * Called on startup to ensure clean state
    */

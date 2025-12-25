@@ -534,6 +534,235 @@ router.post("/auto-focus/cancel", (req, res) => {
     });
 });
 
+// ============== BROWSER WEBCAM SHARING ==============
+
+/**
+ * POST /api/cameras/browser-webcam/start
+ * Start sharing browser webcam - creates stream slot and returns WHIP URL
+ * The browser will use WHIP to push its webcam stream to go2rtc
+ */
+router.post("/browser-webcam/start", async (req, res) => {
+    try {
+        const { name, clientId } = req.body;
+
+        // Generate unique camera ID for this browser webcam
+        const cameraId = `browser-webcam-${clientId || Date.now()}`;
+
+        // Check if already exists
+        const existing = await cameraStorage.findOne({ cameraId });
+        if (existing) {
+            // Return existing stream info
+            const whipInfo = go2rtcService.getWHIPInfo(cameraId);
+            return res.json({
+                success: true,
+                exists: true,
+                camera: existing,
+                ...whipInfo
+            });
+        }
+
+        // Create WHIP stream slot in go2rtc
+        const streamInfo = await go2rtcService.createBrowserWebcamStream(cameraId);
+
+        // Create camera entry in database
+        const camera = await cameraStorage.create({
+            cameraId,
+            name: name || `מצלמת דפדפן (${clientId || 'anonymous'})`,
+            location: 'Browser',
+            type: 'browser-webcam',
+            status: 'connecting',
+            aiEnabled: true,
+            sourceUrl: `whip://${cameraId}`,  // Virtual URL indicating WHIP source
+            order: 100  // Browser webcams appear at end
+        });
+
+        // Notify clients
+        const io = req.app.get("io");
+        io.emit("camera:added", camera);
+
+        console.log(`[Cameras] Browser webcam registered: ${cameraId}`);
+
+        res.json({
+            success: true,
+            camera,
+            ...streamInfo
+        });
+    } catch (error) {
+        console.error('[Cameras] Browser webcam start error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+/**
+ * POST /api/cameras/browser-webcam/:id/connected
+ * Called when browser successfully connects via WHIP
+ */
+router.post("/browser-webcam/:id/connected", async (req, res) => {
+    try {
+        const cameraId = req.params.id;
+
+        const camera = await cameraStorage.update(
+            { cameraId },
+            {
+                status: 'online',
+                lastSeen: new Date().toISOString()
+            }
+        );
+
+        if (!camera) {
+            return res.status(404).json({ error: "Camera not found" });
+        }
+
+        // Notify clients
+        const io = req.app.get("io");
+        io.emit("camera:status", {
+            cameraId,
+            status: 'online',
+            lastSeen: camera.lastSeen
+        });
+
+        // Start AI detection on this stream
+        const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://localhost:8000';
+        const GO2RTC_URL = process.env.GO2RTC_URL || 'http://localhost:1984';
+
+        // AI service will consume from go2rtc's RTSP output
+        const rtspUrl = `rtsp://localhost:8554/${cameraId}`;
+
+        try {
+            const response = await fetch(
+                `${AI_SERVICE_URL}/detection/start/${cameraId}?rtsp_url=${encodeURIComponent(rtspUrl)}&camera_type=rtsp`,
+                { method: "POST" }
+            );
+            if (response.ok) {
+                console.log(`[Cameras] Started AI detection for browser webcam: ${cameraId}`);
+            }
+        } catch (aiError) {
+            console.warn(`[Cameras] Could not start AI detection: ${aiError.message}`);
+        }
+
+        console.log(`[Cameras] Browser webcam connected: ${cameraId}`);
+
+        res.json({ success: true, camera });
+    } catch (error) {
+        console.error('[Cameras] Browser webcam connected error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+/**
+ * POST /api/cameras/browser-webcam/:id/disconnected
+ * Called when browser webcam disconnects
+ */
+router.post("/browser-webcam/:id/disconnected", async (req, res) => {
+    try {
+        const cameraId = req.params.id;
+
+        const camera = await cameraStorage.update(
+            { cameraId },
+            {
+                status: 'offline',
+                lastSeen: new Date().toISOString()
+            }
+        );
+
+        if (!camera) {
+            return res.status(404).json({ error: "Camera not found" });
+        }
+
+        // Stop AI detection
+        const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://localhost:8000';
+        try {
+            await fetch(`${AI_SERVICE_URL}/detection/camera/${cameraId}`, { method: 'DELETE' });
+        } catch (e) {
+            // Ignore
+        }
+
+        // Notify clients
+        const io = req.app.get("io");
+        io.emit("camera:status", {
+            cameraId,
+            status: 'offline',
+            lastSeen: camera.lastSeen
+        });
+
+        console.log(`[Cameras] Browser webcam disconnected: ${cameraId}`);
+
+        res.json({ success: true, camera });
+    } catch (error) {
+        console.error('[Cameras] Browser webcam disconnected error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+/**
+ * DELETE /api/cameras/browser-webcam/:id
+ * Stop sharing browser webcam completely
+ */
+router.delete("/browser-webcam/:id", async (req, res) => {
+    try {
+        const cameraId = req.params.id;
+
+        // Remove from go2rtc
+        try {
+            await go2rtcService.removeStream(cameraId);
+        } catch (e) {
+            console.warn(`[Cameras] Could not remove from go2rtc: ${e.message}`);
+        }
+
+        // Stop AI detection
+        const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://localhost:8000';
+        try {
+            await fetch(`${AI_SERVICE_URL}/detection/camera/${cameraId}`, { method: 'DELETE' });
+        } catch (e) {
+            // Ignore
+        }
+
+        // Remove from database
+        const camera = await cameraStorage.delete({ cameraId });
+
+        // Notify clients
+        const io = req.app.get("io");
+        io.emit("camera:removed", { cameraId });
+
+        console.log(`[Cameras] Browser webcam removed: ${cameraId}`);
+
+        res.json({
+            success: true,
+            message: "Browser webcam removed",
+            cameraId
+        });
+    } catch (error) {
+        console.error('[Cameras] Browser webcam delete error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+/**
+ * GET /api/cameras/browser-webcam/info/:id
+ * Get WHIP/WHEP info for a browser webcam stream
+ */
+router.get("/browser-webcam/info/:id", async (req, res) => {
+    try {
+        const cameraId = req.params.id;
+        const camera = await cameraStorage.findOne({ cameraId });
+
+        if (!camera) {
+            return res.status(404).json({ error: "Camera not found" });
+        }
+
+        const whipInfo = go2rtcService.getWHIPInfo(cameraId);
+
+        res.json({
+            camera,
+            ...whipInfo
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ============== DEMO CAMERAS ==============
+
 /**
  * POST /api/cameras/seed
  * Seed demo cameras (development only)

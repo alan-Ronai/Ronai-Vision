@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import WebcamShare from './WebcamShare';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
 const AI_SERVICE_URL = import.meta.env.VITE_AI_SERVICE_URL || 'http://localhost:8000';
@@ -153,7 +154,8 @@ export default function CameraManager({ isOpen, onClose }) {
       rtsp: 'RTSP',
       simulator: 'סימולטור',
       file: 'קובץ',
-      webcam: 'מצלמת רשת'
+      webcam: 'מצלמת רשת',
+      'browser-webcam': 'מצלמת דפדפן'
     };
     return labels[type] || type;
   };
@@ -218,6 +220,14 @@ export default function CameraManager({ isOpen, onClose }) {
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-6">
+          {/* Browser Webcam Share Section */}
+          <div className="mb-6">
+            <WebcamShare
+              onStreamStarted={() => fetchCameras()}
+              onStreamStopped={() => fetchCameras()}
+            />
+          </div>
+
           {/* Add Camera Button */}
           {!showForm && (
             <button
