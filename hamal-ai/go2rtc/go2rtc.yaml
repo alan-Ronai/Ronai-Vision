@@ -16,8 +16,9 @@ api:
 webrtc:
   listen: ":8555"      # WebRTC UDP port
   candidates:
-    # Auto-detect public IP via STUN, use port 8555
-    - stun:8555
+    # IMPORTANT: Replace with your actual EC2 public IP!
+    # Run: curl -s ifconfig.me
+    - 100.51.235.63:8555
   ice_servers:
     - urls:
         - stun:stun.l.google.com:19302

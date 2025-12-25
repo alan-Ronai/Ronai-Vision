@@ -123,21 +123,34 @@ export default function WebcamShare({ onStreamStarted, onStreamStopped }) {
       setStreamInfo(regData);
 
       // Step 3: Create WebRTC peer connection
+      console.log('[WebcamShare] Creating RTCPeerConnection...');
       const pc = new RTCPeerConnection({
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' }
+        ]
       });
       peerConnectionRef.current = pc;
 
+      // Monitor connection states
+      pc.oniceconnectionstatechange = () => console.log('[WebcamShare] ICE state:', pc.iceConnectionState);
+      pc.onconnectionstatechange = () => console.log('[WebcamShare] Connection state:', pc.connectionState);
+      pc.onicegatheringstatechange = () => console.log('[WebcamShare] ICE gathering:', pc.iceGatheringState);
+
       // Add tracks to peer connection
       stream.getTracks().forEach(track => {
+        console.log('[WebcamShare] Adding track:', track.kind, track.label);
         pc.addTrack(track, stream);
       });
 
       // Create offer
+      console.log('[WebcamShare] Creating offer...');
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
+      console.log('[WebcamShare] Local description set');
 
       // Wait for ICE gathering to complete
+      console.log('[WebcamShare] Waiting for ICE gathering...');
       await new Promise((resolve) => {
         if (pc.iceGatheringState === 'complete') {
           resolve();
@@ -148,30 +161,45 @@ export default function WebcamShare({ onStreamStarted, onStreamStopped }) {
             }
           });
           // Timeout after 5 seconds
-          setTimeout(resolve, 5000);
+          setTimeout(() => {
+            console.log('[WebcamShare] ICE gathering timeout, proceeding...');
+            resolve();
+          }, 5000);
         }
       });
+      console.log('[WebcamShare] ICE gathering complete');
 
       // Step 4: Send offer to go2rtc WHIP endpoint (via proxy to avoid mixed content)
       // Use ?src= for PUBLISHING to go2rtc (not ?dst= which is for PLAYING)
       const streamId = regData.camera.cameraId;
       const whipUrl = `${GO2RTC_PROXY}/api/webrtc?src=${streamId}`;
+
+      console.log('[WebcamShare] Sending SDP to:', whipUrl);
+      console.log('[WebcamShare] SDP (first 300 chars):', pc.localDescription.sdp.substring(0, 300));
+
       const whipResponse = await fetch(whipUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/sdp' },
         body: pc.localDescription.sdp
       });
 
+      console.log('[WebcamShare] WHIP response status:', whipResponse.status);
+
       if (!whipResponse.ok) {
-        throw new Error(`WHIP connection failed: ${whipResponse.status}`);
+        const errorText = await whipResponse.text();
+        console.error('[WebcamShare] WHIP error response:', errorText);
+        throw new Error(`WHIP connection failed: ${whipResponse.status} - ${errorText}`);
       }
 
       // Get answer from go2rtc
       const answerSdp = await whipResponse.text();
+      console.log('[WebcamShare] Got answer SDP (first 300 chars):', answerSdp.substring(0, 300));
+
       await pc.setRemoteDescription({
         type: 'answer',
         sdp: answerSdp
       });
+      console.log('[WebcamShare] Remote description set');
 
       // Step 5: Notify backend that connection is established
       await fetch(`${API_URL}/api/cameras/browser-webcam/${regData.camera.cameraId}/connected`, {
