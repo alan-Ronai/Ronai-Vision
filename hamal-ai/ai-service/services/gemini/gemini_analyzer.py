@@ -280,6 +280,63 @@ class GeminiAnalyzer:
 
         return Image.fromarray(rgb)
 
+    def _map_person_fields(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        """Map Gemini person analysis fields to frontend-expected format.
+
+        The Gemini prompt returns detailed fields like shirtColor, pantsColor, etc.
+        The frontend expects aggregated fields like clothing, clothingColor, ageRange.
+
+        This method creates the expected fields from the detailed Gemini response.
+        """
+        # Helper to check if a value is meaningful (not "לא נראה" or similar)
+        def is_valid(val):
+            if not val:
+                return False
+            invalid = ["לא נראה", "לא זוהה", "לא ידוע", "לא ניתן לקבוע", "null", "none"]
+            return str(val).lower().strip() not in invalid
+
+        # Build clothing description from shirt and pants
+        clothing_parts = []
+        if is_valid(result.get("shirtType")):
+            clothing_parts.append(result["shirtType"])
+        if is_valid(result.get("pantsType")):
+            clothing_parts.append(result["pantsType"])
+        if is_valid(result.get("headwear")) and result["headwear"] != "ללא":
+            clothing_parts.append(result["headwear"])
+        if is_valid(result.get("footwear")):
+            clothing_parts.append(result["footwear"])
+
+        # Build clothing color description
+        color_parts = []
+        if is_valid(result.get("shirtColor")):
+            color_parts.append(f"חולצה {result['shirtColor']}")
+        if is_valid(result.get("pantsColor")):
+            color_parts.append(f"מכנסיים {result['pantsColor']}")
+
+        # Set the aggregated fields
+        result["clothing"] = ", ".join(clothing_parts) if clothing_parts else "לא זוהה"
+        result["clothingColor"] = ", ".join(color_parts) if color_parts else "לא זוהה"
+
+        # Map approximateAge to ageRange
+        if is_valid(result.get("approximateAge")):
+            result["ageRange"] = result["approximateAge"]
+        else:
+            result["ageRange"] = "לא זוהה"
+
+        # Ensure armed field is boolean (frontend expects true/false)
+        result["armed"] = bool(result.get("armed", False))
+
+        # Map suspiciousLevel to suspicious boolean
+        suspicious_level = result.get("suspiciousLevel", 1)
+        result["suspicious"] = suspicious_level >= 3 if isinstance(suspicious_level, int) else False
+
+        # Map suspiciousIndicators to suspiciousReason
+        indicators = result.get("suspiciousIndicators", [])
+        if indicators and len(indicators) > 0:
+            result["suspiciousReason"] = ", ".join(indicators)
+
+        return result
+
     def _get_cutout_base64(self, frame, bbox: List[float], max_size: int = 400, margin_percent: float = 0.40) -> Optional[str]:
         """
         Get a base64 encoded JPEG of the cropped bbox area WITH MARGIN.
@@ -688,6 +745,9 @@ class GeminiAnalyzer:
 
             response = await self._generate_content([prompt, img], analysis_type="person")
             result = self._parse_json(response.text)
+
+            # Post-process: Map Gemini fields to frontend-expected fields
+            result = self._map_person_fields(result)
 
             # Add cutout image if requested
             if include_cutout:
