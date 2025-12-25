@@ -294,6 +294,18 @@ class Go2rtcService {
         continue;
       }
 
+      // Skip browser-webcam type - these receive WebRTC WHIP input, don't add a source
+      if (camera.type === 'browser-webcam') {
+        console.log(`[go2rtc] Skipping ${streamId}: browser-webcam (receives WHIP input)`);
+        results.push({
+          camera: streamId,
+          success: true,
+          skipped: true,
+          reason: 'browser-webcam receives WHIP input'
+        });
+        continue;
+      }
+
       // Get source URL - can be rtspUrl, filePath, or sourceUrl
       const sourceUrl = camera.rtspUrl || camera.filePath || camera.sourceUrl;
 
