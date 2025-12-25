@@ -29,9 +29,9 @@ rtsp:
 
 # Streams - managed dynamically via API by the backend
 streams:
-  # Browser webcam stream - empty source, accepts WHIP input
-  # Browsers can push their webcam via WebRTC to this stream
-  browser-webcam:
+  # Browser webcam stream - EMPTY source accepts WebRTC WHIP input
+  # DO NOT add any source here - browser publishes via WebRTC
+  browser-webcam: []
 
 # FFmpeg configuration for transcoding (if needed)
 ffmpeg:

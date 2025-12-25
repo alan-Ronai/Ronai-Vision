@@ -153,9 +153,9 @@ export default function WebcamShare({ onStreamStarted, onStreamStopped }) {
       });
 
       // Step 4: Send offer to go2rtc WHIP endpoint (via proxy to avoid mixed content)
-      // Construct proxy URL instead of using the direct URL from backend
+      // Use ?src= for PUBLISHING to go2rtc (not ?dst= which is for PLAYING)
       const streamId = regData.camera.cameraId;
-      const whipUrl = `${GO2RTC_PROXY}/api/webrtc?dst=${streamId}`;
+      const whipUrl = `${GO2RTC_PROXY}/api/webrtc?src=${streamId}`;
       const whipResponse = await fetch(whipUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/sdp' },
