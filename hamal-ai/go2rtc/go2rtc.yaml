@@ -16,9 +16,12 @@ api:
 webrtc:
   listen: ":8555"      # WebRTC UDP port
   candidates:
-    - 100.51.235.63:8555
-  iceServers:
-    - urls: [stun:stun.l.google.com:19302]  # Google STUN server for NAT traversal
+    # Auto-detect public IP via STUN, use port 8555
+    - stun:8555
+  ice_servers:
+    - urls:
+        - stun:stun.l.google.com:19302
+        - stun:stun1.l.google.com:19302
 
 # RTSP server (allows other apps to pull streams)
 rtsp:
@@ -26,10 +29,9 @@ rtsp:
 
 # Streams - managed dynamically via API by the backend
 streams:
-  # Browser webcam stream - self-referencing for WHIP ingestion
+  # Browser webcam stream - empty source, accepts WHIP input
   # Browsers can push their webcam via WebRTC to this stream
   browser-webcam:
-    - browser-webcam
 
 # FFmpeg configuration for transcoding (if needed)
 ffmpeg:
