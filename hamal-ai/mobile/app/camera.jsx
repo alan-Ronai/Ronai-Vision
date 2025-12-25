@@ -53,6 +53,11 @@ export default function CameraScreen() {
             // Ensure the URI is a local file path with file:// prefix
             const fileUri = uri.startsWith("file://") ? uri : `file://${uri}`;
 
+            const fileName = fileUri.split("/").pop() || "video.mov";
+            const mimeType = fileName.toLowerCase().endsWith(".mov")
+                ? "video/quicktime"
+                : "video/mp4";
+
             const response = await FileSystem.uploadAsync(
                 `${SERVER_URL}/api/scenario/soldier-video`,
                 fileUri,
@@ -60,11 +65,12 @@ export default function CameraScreen() {
                     fieldName: "video",
                     httpMethod: "POST",
                     uploadType: FileSystem.FileSystemUploadType.MULTIPART,
-                    mimeType: "video/mp4",
+                    mimeType,
                     parameters: {
                         soldierId: "soldier-1",
                         location: "field",
                         timestamp: new Date().toISOString(),
+                        filename: fileName,
                     },
                 }
             );
@@ -263,6 +269,7 @@ export default function CameraScreen() {
                             style={styles.videoPreview}
                             useNativeControls
                             resizeMode="contain"
+                            shouldPlay
                             isLooping
                         />
                     )}
@@ -492,10 +499,14 @@ const styles = StyleSheet.create({
     previewContainer: {
         flex: 1,
         backgroundColor: "#000",
+        alignItems: "center",
+        justifyContent: "center",
     },
     videoPreview: {
-        flex: 1,
         width: "100%",
+        maxHeight: height * 0.8,
+        aspectRatio: 9 / 16,
+        backgroundColor: "#000",
     },
     previewActions: {
         flexDirection: "row",

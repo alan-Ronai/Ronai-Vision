@@ -75,6 +75,7 @@ logs/
 hamal-ai/ai-service/data/
 node_modules/
 weights/
+package-lock.json
 models/
 output/
 config/camera_settings.json
