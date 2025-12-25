@@ -3,8 +3,10 @@ import { io } from 'socket.io-client';
 
 const AppContext = createContext();
 
-const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:3000';
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+// Use relative URLs to leverage Vite proxy (avoids mixed content issues with HTTPS)
+// Empty string means connect to same origin, which Vite will proxy
+const SOCKET_URL = '';
+const API_URL = '';
 
 export function AppProvider({ children }) {
   const [socket, setSocket] = useState(null);
@@ -40,8 +42,9 @@ export function AppProvider({ children }) {
 
   // Initialize socket connection
   useEffect(() => {
-    console.log('Connecting to socket server:', SOCKET_URL);
-    const newSocket = io(SOCKET_URL, {
+    // Connect to same origin (Vite proxy handles the routing)
+    console.log('Connecting to socket server via proxy');
+    const newSocket = io({
       transports: ['websocket', 'polling'],
       reconnectionAttempts: 5,
       reconnectionDelay: 1000

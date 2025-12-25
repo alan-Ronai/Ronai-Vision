@@ -11,7 +11,8 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react';
 
-const GO2RTC_URL = import.meta.env.VITE_GO2RTC_URL || 'http://localhost:1984';
+// Use proxy to avoid mixed content issues with HTTPS
+const GO2RTC_PROXY = '/go2rtc';
 
 export default function WebRTCPlayer({
   streamId,
@@ -141,8 +142,8 @@ export default function WebRTCPlayer({
         }
       });
 
-      // Send offer to go2rtc WHEP endpoint
-      const response = await fetch(`${GO2RTC_URL}/api/webrtc?src=${streamId}`, {
+      // Send offer to go2rtc WHEP endpoint (via proxy)
+      const response = await fetch(`${GO2RTC_PROXY}/api/webrtc?src=${streamId}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/sdp'
@@ -187,7 +188,9 @@ export default function WebRTCPlayer({
       setConnectionState('connecting');
       setError(null);
 
-      const wsUrl = `${GO2RTC_URL.replace('http', 'ws')}/api/ws?src=${streamId}`;
+      // Construct WebSocket URL using current page's protocol (ws:// or wss://)
+      const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${wsProtocol}//${window.location.host}${GO2RTC_PROXY}/api/ws?src=${streamId}`;
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 

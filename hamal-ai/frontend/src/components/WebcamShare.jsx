@@ -1,7 +1,9 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
-const GO2RTC_URL = import.meta.env.VITE_GO2RTC_URL || 'http://localhost:1984';
+// Use relative URLs to leverage Vite proxy (avoids mixed content issues with HTTPS)
+const API_URL = '';
+// go2rtc via proxy to avoid mixed content
+const GO2RTC_PROXY = '/go2rtc';
 
 /**
  * Check if we're in a secure context (HTTPS or localhost)
@@ -150,8 +152,10 @@ export default function WebcamShare({ onStreamStarted, onStreamStopped }) {
         }
       });
 
-      // Step 4: Send offer to go2rtc WHIP endpoint
-      const whipUrl = regData.whip;
+      // Step 4: Send offer to go2rtc WHIP endpoint (via proxy to avoid mixed content)
+      // Construct proxy URL instead of using the direct URL from backend
+      const streamId = regData.camera.cameraId;
+      const whipUrl = `${GO2RTC_PROXY}/api/webrtc?dst=${streamId}`;
       const whipResponse = await fetch(whipUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/sdp' },
