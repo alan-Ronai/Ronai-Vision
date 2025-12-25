@@ -2,7 +2,8 @@ import { useApp } from "../context/AppContext";
 import { useRef, useEffect, useState } from "react";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3000";
-const AI_SERVICE_URL = import.meta.env.VITE_AI_SERVICE_URL || "http://localhost:8000";
+const AI_SERVICE_URL =
+    import.meta.env.VITE_AI_SERVICE_URL || "http://localhost:8000";
 
 export default function RadioTranscript() {
     const {
@@ -18,14 +19,19 @@ export default function RadioTranscript() {
     const [isUploading, setIsUploading] = useState(false);
     const [uploadError, setUploadError] = useState(null);
     const [activeTab, setActiveTab] = useState(null); // Will be set based on available transcribers
-    const [availableTranscribers, setAvailableTranscribers] = useState(["whisper", "gemini"]); // Default to both
+    const [availableTranscribers, setAvailableTranscribers] = useState([
+        "whisper",
+        "gemini",
+    ]); // Default to both
     const [transcribersLoading, setTranscribersLoading] = useState(true);
 
     // Fetch available transcribers on mount
     useEffect(() => {
         const fetchTranscribers = async () => {
             try {
-                const response = await fetch(`${AI_SERVICE_URL}/radio/transcribers`);
+                const response = await fetch(
+                    `${AI_SERVICE_URL}/radio/transcribers`
+                );
                 if (response.ok) {
                     const data = await response.json();
                     const available = data.available_transcribers || [];
@@ -47,7 +53,11 @@ export default function RadioTranscript() {
 
     // Set default tab once transcribers are loaded
     useEffect(() => {
-        if (!transcribersLoading && !activeTab && availableTranscribers.length > 0) {
+        if (
+            !transcribersLoading &&
+            !activeTab &&
+            availableTranscribers.length > 0
+        ) {
             setActiveTab(availableTranscribers[0]);
         }
     }, [transcribersLoading, availableTranscribers, activeTab]);
@@ -222,11 +232,11 @@ export default function RadioTranscript() {
             <div className="flex-1 flex min-h-0">
                 {/* Vertical tabs on the left (appears on right in RTL) - only show if multiple transcribers */}
                 {availableTranscribers.length > 1 && (
-                <div className="flex flex-col border-l border-gray-600 bg-gray-750">
-                    {availableTranscribers.includes("whisper") && (
-                    <button
-                        onClick={() => setActiveTab("whisper")}
-                        className={`
+                    <div className="flex flex-col border-l border-gray-600 bg-gray-750">
+                        {availableTranscribers.includes("whisper") && (
+                            <button
+                                onClick={() => setActiveTab("whisper")}
+                                className={`
               flex-1 px-2 text-xs font-medium transition-colors flex items-center justify-center
               ${
                   activeTab === "whisper"
@@ -234,26 +244,26 @@ export default function RadioTranscript() {
                       : "bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-gray-200"
               }
             `}
-                        style={{
-                            writingMode: "vertical-rl",
-                            textOrientation: "mixed",
-                        }}
-                        title="מתמלל 1 (Whisper)"
-                    >
-                        <div className="flex items-center gap-1">
-                            <span>מתמלל 1</span>
-                            {whisperTranscript.length > 0 && (
-                                <span className="bg-blue-500 text-white text-xs px-1 rounded">
-                                    {whisperTranscript.length}
-                                </span>
-                            )}
-                        </div>
-                    </button>
-                    )}
-                    {availableTranscribers.includes("gemini") && (
-                    <button
-                        onClick={() => setActiveTab("gemini")}
-                        className={`
+                                style={{
+                                    writingMode: "vertical-rl",
+                                    textOrientation: "mixed",
+                                }}
+                                title="מתמלל 1 (Whisper)"
+                            >
+                                <div className="flex items-center gap-1">
+                                    <span>מתמלל 1</span>
+                                    {whisperTranscript.length > 0 && (
+                                        <span className="bg-blue-500 text-white text-xs px-1 rounded">
+                                            {whisperTranscript.length}
+                                        </span>
+                                    )}
+                                </div>
+                            </button>
+                        )}
+                        {availableTranscribers.includes("gemini") && (
+                            <button
+                                onClick={() => setActiveTab("gemini")}
+                                className={`
               flex-1 px-2 text-xs font-medium transition-colors flex items-center justify-center
               ${
                   activeTab === "gemini"
@@ -261,23 +271,23 @@ export default function RadioTranscript() {
                       : "bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-gray-200"
               }
             `}
-                        style={{
-                            writingMode: "vertical-rl",
-                            textOrientation: "mixed",
-                        }}
-                        title="מתמלל 2 (Gemini)"
-                    >
-                        <div className="flex items-center gap-1">
-                            <span>מתמלל 2</span>
-                            {geminiTranscript.length > 0 && (
-                                <span className="bg-purple-500 text-white text-xs px-1 rounded">
-                                    {geminiTranscript.length}
-                                </span>
-                            )}
-                        </div>
-                    </button>
-                    )}
-                </div>
+                                style={{
+                                    writingMode: "vertical-rl",
+                                    textOrientation: "mixed",
+                                }}
+                                title="מתמלל 2 (Gemini)"
+                            >
+                                <div className="flex items-center gap-1">
+                                    <span>מתמלל 2</span>
+                                    {geminiTranscript.length > 0 && (
+                                        <span className="bg-purple-500 text-white text-xs px-1 rounded">
+                                            {geminiTranscript.length}
+                                        </span>
+                                    )}
+                                </div>
+                            </button>
+                        )}
+                    </div>
                 )}
 
                 {/* Transcript content */}
@@ -302,8 +312,12 @@ export default function RadioTranscript() {
                                 <p>ממתין לשידורים...</p>
                                 <p className="text-xs mt-1 text-gray-600">
                                     {availableTranscribers.length === 1
-                                        ? (activeTab === "whisper" ? "Whisper" : "Gemini")
-                                        : (activeTab === "whisper" ? "מתמלל 1" : "מתמלל 2")}
+                                        ? activeTab === "whisper"
+                                            ? "מתמלל"
+                                            : "מתמלל"
+                                        : activeTab === "whisper"
+                                        ? "מתמלל 1"
+                                        : "מתמלל 2"}
                                 </p>
                             </div>
                         </div>
@@ -325,32 +339,38 @@ export default function RadioTranscript() {
             </div>
 
             {/* Latest transcription highlight */}
-            {currentTranscript.length > 0 && availableTranscribers.length > 0 && (
-                <div className="bg-gray-700/50 px-4 py-2 border-t border-gray-600 flex-shrink-0">
-                    <div className="flex items-center gap-2">
-                        <span className="text-yellow-400">⚡</span>
-                        <span className="text-sm text-gray-300">אחרון:</span>
-                        <span className="text-sm font-medium truncate">
-                            {
-                                currentTranscript[currentTranscript.length - 1]
-                                    ?.text
-                            }
-                        </span>
-                        {/* Only show transcriber badge if multiple transcribers available */}
-                        {availableTranscribers.length > 1 && (
-                        <span
-                            className={`text-xs px-1 rounded ${
-                                activeTab === "whisper"
-                                    ? "bg-blue-600"
-                                    : "bg-purple-600"
-                            }`}
-                        >
-                            {activeTab === "whisper" ? "מתמלל 1" : "מתמלל 2"}
-                        </span>
-                        )}
+            {currentTranscript.length > 0 &&
+                availableTranscribers.length > 0 && (
+                    <div className="bg-gray-700/50 px-4 py-2 border-t border-gray-600 flex-shrink-0">
+                        <div className="flex items-center gap-2">
+                            <span className="text-yellow-400">⚡</span>
+                            <span className="text-sm text-gray-300">
+                                אחרון:
+                            </span>
+                            <span className="text-sm font-medium truncate">
+                                {
+                                    currentTranscript[
+                                        currentTranscript.length - 1
+                                    ]?.text
+                                }
+                            </span>
+                            {/* Only show transcriber badge if multiple transcribers available */}
+                            {availableTranscribers.length > 1 && (
+                                <span
+                                    className={`text-xs px-1 rounded ${
+                                        activeTab === "whisper"
+                                            ? "bg-blue-600"
+                                            : "bg-purple-600"
+                                    }`}
+                                >
+                                    {activeTab === "whisper"
+                                        ? "מתמלל 1"
+                                        : "מתמלל 2"}
+                                </span>
+                            )}
+                        </div>
                     </div>
-                </div>
-            )}
+                )}
         </div>
     );
 }
@@ -366,7 +386,9 @@ function TranscriptItem({ item, formatTime, isLatest }) {
             item.text.includes("רחפן"));
 
     // Determine transcriber from item data
-    const transcriber = item.transcriber || (item.source?.includes('whisper') ? 'whisper' : 'gemini');
+    const transcriber =
+        item.transcriber ||
+        (item.source?.includes("whisper") ? "whisper" : "gemini");
 
     return (
         <div
@@ -386,10 +408,14 @@ function TranscriptItem({ item, formatTime, isLatest }) {
                     </span>
                 )}
                 {/* Show transcriber badge */}
-                <span className={`text-xs px-1 rounded ${
-                    transcriber === 'whisper' ? 'bg-blue-600' : 'bg-purple-600'
-                }`}>
-                    {transcriber === 'whisper' ? 'W' : 'G'}
+                <span
+                    className={`text-xs px-1 rounded ${
+                        transcriber === "whisper"
+                            ? "bg-blue-600"
+                            : "bg-purple-600"
+                    }`}
+                >
+                    {transcriber === "whisper" ? "W" : "G"}
                 </span>
                 {isImportant && <span className="text-yellow-400">⚠️</span>}
             </div>

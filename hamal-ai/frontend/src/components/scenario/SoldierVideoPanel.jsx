@@ -203,7 +203,7 @@ export default function SoldierVideoPanel() {
             {/* Main content - split view (flex-row-reverse for RTL: video on right, transcription on left) */}
             <div className="flex-1 flex flex-row-reverse">
                 {/* Video player - right side in RTL (60%) */}
-                <div className="w-3/5 p-4 flex items-center justify-center bg-black">
+                <div className="w-3/5 h-full p-4 flex items-center justify-center bg-black overflow-hidden">
                     {hasVideo ? (
                         <video
                             ref={videoRef}
@@ -212,7 +212,8 @@ export default function SoldierVideoPanel() {
                             autoPlay
                             playsInline
                             preload="metadata"
-                            className="w-full h-full object-contain bg-black rounded shadow-lg"
+                            className="w-full h-auto max-h-full object-contain bg-black rounded shadow-lg"
+                            style={{ maxHeight: "calc(100vh - 140px)" }}
                             onError={(e) => {
                                 console.error("Video error:", e);
                             }}
