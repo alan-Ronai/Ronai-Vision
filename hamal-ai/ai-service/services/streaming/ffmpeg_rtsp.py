@@ -166,17 +166,15 @@ class FFmpegStream:
             self._process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,  # Discard stderr to prevent buffer blocking
                 bufsize=10**7  # 10MB buffer for large frames (was 0 - too small)
             )
 
             # Wait briefly and check if running
             time.sleep(0.5)
             if self._process.poll() is not None:
-                stderr = ""
-                if self._process.stderr:
-                    stderr = self._process.stderr.read().decode()
-                logger.error(f"FFmpeg failed for {self.camera_id}: {stderr[:200]}")
+                exit_code = self._process.returncode
+                logger.error(f"FFmpeg failed for {self.camera_id}: exit code {exit_code}")
                 return False
 
             self._connected = True
