@@ -11,8 +11,9 @@
 
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3000';
-const AI_SERVICE_URL = import.meta.env.VITE_AI_SERVICE_URL || 'http://localhost:8000';
+// Use relative URLs to leverage Vite proxy (avoids mixed content issues with HTTPS)
+const BACKEND_URL = '';
+const AI_SERVICE_PROXY = '';  // /tts endpoint is proxied to AI service
 
 // Audio processing constants
 const SAMPLE_RATE = 16000;
@@ -420,7 +421,7 @@ export default function AudioTransmitter({ isOpen, onClose }) {
 
     try {
       // Call TTS service to convert text to audio
-      const ttsResponse = await fetch(`${AI_SERVICE_URL}/tts/generate`, {
+      const ttsResponse = await fetch(`${AI_SERVICE_PROXY}/tts/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

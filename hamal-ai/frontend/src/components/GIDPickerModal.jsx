@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useApp } from '../context/AppContext';
 
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3000';
+// Use relative URLs to leverage Vite proxy (avoids mixed content issues with HTTPS)
+const BACKEND_URL = '';
 
 export default function GIDPickerModal({ isOpen, onClose, onSelect, type }) {
   const [objects, setObjects] = useState([]);

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 
-const AI_SERVICE_URL =
-    import.meta.env.VITE_AI_SERVICE_URL || "http://localhost:8000";
+// Use relative URLs to leverage Vite proxy (avoids mixed content issues with HTTPS)
+const AI_SERVICE_PROXY = "";  // /detection endpoint is proxied to AI service
 
 // Progress bar component for timing stats
 function TimingBar({
@@ -93,13 +93,13 @@ export default function AIStatsPanel({ isOpen, onClose }) {
         try {
             console.log(
                 "Fetching stats from:",
-                `${AI_SERVICE_URL}/api/stats/realtime`
+                `${AI_SERVICE_PROXY}/api/stats/realtime`
             );
 
             // Fetch main stats and radio stats in parallel
             const [mainRes, radioRes] = await Promise.all([
-                fetch(`${AI_SERVICE_URL}/api/stats/realtime`),
-                fetch(`${AI_SERVICE_URL}/radio/stats`).catch(() => null),
+                fetch(`${AI_SERVICE_PROXY}/api/stats/realtime`),
+                fetch(`${AI_SERVICE_PROXY}/radio/stats`).catch(() => null),
             ]);
 
             if (!mainRes.ok) throw new Error("Failed to fetch stats");

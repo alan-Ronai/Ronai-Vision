@@ -6,7 +6,8 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { io } from 'socket.io-client';
 
-const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:3000';
+// Use relative URL to leverage Vite proxy (avoids mixed content issues with HTTPS)
+const SOCKET_URL = '';
 
 export function useSocket(options = {}) {
   const [connected, setConnected] = useState(false);

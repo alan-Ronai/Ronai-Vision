@@ -2,8 +2,9 @@ import { useState, useEffect, useRef } from 'react';
 import { useApp } from '../context/AppContext';
 import { useScenario } from '../context/ScenarioContext';
 
-const API_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3000';
-const AI_SERVICE_URL = import.meta.env.VITE_AI_SERVICE_URL || 'http://localhost:8000';
+// Use relative URLs to leverage Vite proxy (avoids mixed content issues with HTTPS)
+const API_URL = '';
+const AI_SERVICE_PROXY = '';  // /scenario-rules endpoint is proxied to AI service
 
 // Available placeholders that can be used in templates
 const AVAILABLE_PLACEHOLDERS = [
@@ -98,7 +99,7 @@ export default function EventRuleManager({ isOpen, onClose }) {
   const fetchScenarioRules = async () => {
     try {
       setScenarioLoading(true);
-      const res = await fetch(`${AI_SERVICE_URL}/scenario-rules`);
+      const res = await fetch(`${AI_SERVICE_PROXY}/scenario-rules`);
       if (res.ok) {
         const data = await res.json();
         setScenarioRules(data.scenarios || []);

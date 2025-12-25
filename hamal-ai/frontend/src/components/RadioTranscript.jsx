@@ -1,9 +1,9 @@
 import { useApp } from "../context/AppContext";
 import { useRef, useEffect, useState } from "react";
 
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3000";
-const AI_SERVICE_URL =
-    import.meta.env.VITE_AI_SERVICE_URL || "http://localhost:8000";
+// Use relative URLs to leverage Vite proxy (avoids mixed content issues with HTTPS)
+const API_URL = '';
+const AI_SERVICE_PROXY = '';  // /radio endpoint is proxied to AI service
 
 export default function RadioTranscript() {
     const {
@@ -30,7 +30,7 @@ export default function RadioTranscript() {
         const fetchTranscribers = async () => {
             try {
                 const response = await fetch(
-                    `${AI_SERVICE_URL}/radio/transcribers`
+                    `${AI_SERVICE_PROXY}/radio/transcribers`
                 );
                 if (response.ok) {
                     const data = await response.json();

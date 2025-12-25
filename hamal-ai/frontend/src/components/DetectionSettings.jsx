@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 
-const AI_SERVICE_URL = import.meta.env.VITE_AI_SERVICE_URL || 'http://localhost:8000';
+// Use relative URLs to leverage Vite proxy (avoids mixed content issues with HTTPS)
+const AI_SERVICE_PROXY = '';  // /detection endpoint is proxied to AI service
 
 export default function DetectionSettings({ isOpen, onClose }) {
   const [config, setConfig] = useState({
@@ -25,7 +26,7 @@ export default function DetectionSettings({ isOpen, onClose }) {
   const fetchConfig = async () => {
     try {
       setLoading(true);
-      const res = await fetch(`${AI_SERVICE_URL}/detection/config`);
+      const res = await fetch(`${AI_SERVICE_PROXY}/detection/config`);
       const data = await res.json();
       setConfig({
         detection_fps: data.detection_fps || 15,
@@ -54,7 +55,7 @@ export default function DetectionSettings({ isOpen, onClose }) {
         recording_fps: config.recording_fps,
       });
 
-      const res = await fetch(`${AI_SERVICE_URL}/detection/config/fps?${params}`, {
+      const res = await fetch(`${AI_SERVICE_PROXY}/detection/config/fps?${params}`, {
         method: 'POST',
       });
 
@@ -80,7 +81,7 @@ export default function DetectionSettings({ isOpen, onClose }) {
         recovery_confidence: config.recovery_confidence,
       });
 
-      const res = await fetch(`${AI_SERVICE_URL}/detection/config/confidence?${params}`, {
+      const res = await fetch(`${AI_SERVICE_PROXY}/detection/config/confidence?${params}`, {
         method: 'POST',
       });
 
@@ -99,7 +100,7 @@ export default function DetectionSettings({ isOpen, onClose }) {
     try {
       setSaving(true);
       const res = await fetch(
-        `${AI_SERVICE_URL}/detection/config/reid-recovery?enabled=${enabled}`,
+        `${AI_SERVICE_PROXY}/detection/config/reid-recovery?enabled=${enabled}`,
         { method: 'POST' }
       );
 

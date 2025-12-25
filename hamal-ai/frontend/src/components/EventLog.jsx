@@ -1,7 +1,8 @@
 import { useApp } from '../context/AppContext';
 import { useState } from 'react';
 
-const AI_SERVICE_URL = import.meta.env.VITE_AI_SERVICE_URL || 'http://localhost:8000';
+// Use relative URLs to leverage Vite proxy (avoids mixed content issues with HTTPS)
+const AI_SERVICE_PROXY = '';  // /detection endpoint is proxied to AI service
 
 // Armed indicator badge
 const ArmedBadge = ({ armed, weaponType }) => {
@@ -171,7 +172,7 @@ function EventItem({ event, severityColors, typeIcons, formatTime }) {
     // If it's already a full URL, use it directly
     if (videoClip.startsWith('http')) return videoClip;
     // If it's a relative path starting with /recordings, point to AI service
-    return `${AI_SERVICE_URL}${videoClip}`;
+    return `${AI_SERVICE_PROXY}${videoClip}`;
   };
 
   return (
@@ -360,13 +361,11 @@ function getSimulationLabel(type) {
 
 // Video card for the video tab - shows video directly without needing to expand
 function VideoCard({ event, formatTime }) {
-  const { API_URL } = useApp();
-
   const getVideoUrl = (videoClip) => {
     if (!videoClip) return null;
     if (videoClip.startsWith('http')) return videoClip;
-    const aiServiceUrl = API_URL?.replace(':3000', ':8000') || 'http://localhost:8000';
-    return `${aiServiceUrl}${videoClip}`;
+    // Use relative URL - Vite proxy handles routing to correct service
+    return videoClip;
   };
 
   const videoUrl = getVideoUrl(event.videoClip || event.details?.video_url);

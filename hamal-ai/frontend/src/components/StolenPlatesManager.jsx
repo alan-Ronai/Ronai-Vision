@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+// Use relative URLs to leverage Vite proxy (avoids mixed content issues with HTTPS)
+const API_URL = '';
 
 /**
  * Stolen Plates Manager Component

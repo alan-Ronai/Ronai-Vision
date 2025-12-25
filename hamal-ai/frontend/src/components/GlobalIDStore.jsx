@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useApp } from '../context/AppContext';
 
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3000';
-const AI_SERVICE_URL_BASE = import.meta.env.VITE_AI_SERVICE_URL || 'http://localhost:8000';
+// Use relative URLs to leverage Vite proxy (avoids mixed content issues with HTTPS)
+const BACKEND_URL = '';
+const AI_SERVICE_PROXY = '';  // /tracker endpoint is proxied to AI service
 
 // Helper to check if a value is a valid analysis result (not a placeholder)
 const isValidValue = (value) => {
@@ -90,7 +91,7 @@ export default function GlobalIDStore({ isOpen, onClose }) {
 
     setClearing(true);
     try {
-      const response = await fetch(`${AI_SERVICE_URL_BASE}/tracker/clear-all`, {
+      const response = await fetch(`${AI_SERVICE_PROXY}/tracker/clear-all`, {
         method: 'DELETE',
       });
 
@@ -402,8 +403,6 @@ export default function GlobalIDStore({ isOpen, onClose }) {
   );
 }
 
-const AI_SERVICE_URL = import.meta.env.VITE_AI_SERVICE_URL || 'http://localhost:8000';
-
 // Detail component for selected object
 function ObjectDetail({ object, onRefreshAnalysis }) {
   const [refreshing, setRefreshing] = useState(false);
@@ -426,7 +425,7 @@ function ObjectDetail({ object, onRefreshAnalysis }) {
       const cameraId = object.cameraId || '';
 
       const response = await fetch(
-        `${AI_SERVICE_URL}/tracker/refresh-analysis/${trackId}?camera_id=${cameraId}`,
+        `${AI_SERVICE_PROXY}/tracker/refresh-analysis/${trackId}?camera_id=${cameraId}`,
         { method: 'POST' }
       );
 

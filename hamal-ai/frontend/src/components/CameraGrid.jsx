@@ -2,7 +2,8 @@ import { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import CameraManager from './CameraManager';
 
-const AI_SERVICE_URL = import.meta.env.VITE_AI_SERVICE_URL || 'http://localhost:8000';
+// Use Vite proxy to avoid mixed content issues with HTTPS
+const AI_API_PROXY = '/ai-api';  // Proxied to AI service /api
 
 export default function CameraGrid() {
   const { cameras, selectedCamera, selectCamera, isEmergency, API_URL } = useApp();
@@ -41,7 +42,7 @@ export default function CameraGrid() {
               camera={camera}
               isSelected={selectedCamera === camera.cameraId}
               onSelect={() => selectCamera(camera.cameraId)}
-              aiServiceUrl={AI_SERVICE_URL}
+              aiApiProxy={AI_API_PROXY}
             />
           ))}
 
@@ -63,7 +64,7 @@ export default function CameraGrid() {
   );
 }
 
-function CameraThumbnail({ camera, isSelected, onSelect, aiServiceUrl }) {
+function CameraThumbnail({ camera, isSelected, onSelect, aiApiProxy }) {
   const [imgError, setImgError] = useState(false);
   const [imgLoaded, setImgLoaded] = useState(false);
 
@@ -74,9 +75,9 @@ function CameraThumbnail({ camera, isSelected, onSelect, aiServiceUrl }) {
     connecting: 'bg-yellow-500 animate-pulse'
   };
 
-  // Use AI service URL for a single frame snapshot instead of MJPEG stream
+  // Use AI service via proxy for a single frame snapshot instead of MJPEG stream
   // This is more reliable for thumbnails and doesn't keep connections open
-  const snapshotUrl = `${aiServiceUrl}/api/stream/snapshot/${camera.cameraId}?t=${Date.now()}`;
+  const snapshotUrl = `${aiApiProxy}/stream/snapshot/${camera.cameraId}?t=${Date.now()}`;
 
   // Reset error state when camera changes or comes online
   useEffect(() => {

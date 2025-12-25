@@ -197,7 +197,8 @@ function Dashboard() {
 }
 
 // Scenario Test Controls - Dynamic demo buttons based on config and active variant
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3000';
+// Use relative URLs to leverage Vite proxy (avoids mixed content issues with HTTPS)
+const BACKEND_URL = '';
 
 // Stage display names in Hebrew
 const STAGE_NAMES = {

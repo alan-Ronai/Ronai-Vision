@@ -3,7 +3,7 @@ import WebcamShare from './WebcamShare';
 
 // Use relative URLs to leverage Vite proxy (avoids mixed content issues with HTTPS)
 const API_URL = '';
-const AI_SERVICE_URL = import.meta.env.VITE_AI_SERVICE_URL || '';
+const AI_API_PROXY = '/ai-api';  // Proxied to AI service /api
 
 export default function CameraManager({ isOpen, onClose }) {
   const [cameras, setCameras] = useState([]);
@@ -32,7 +32,7 @@ export default function CameraManager({ isOpen, onClose }) {
 
   const fetchAvailableWebcams = async () => {
     try {
-      const res = await fetch(`${AI_SERVICE_URL}/detection/webcams`);
+      const res = await fetch(`/detection/webcams`);
       const data = await res.json();
       if (data.devices) {
         setAvailableWebcams(data.devices);
@@ -169,7 +169,7 @@ export default function CameraManager({ isOpen, onClose }) {
 
     useEffect(() => {
       // Generate a new URL with timestamp to avoid caching
-      const url = `${AI_SERVICE_URL}/api/stream/snapshot/${cameraId}?t=${Date.now()}`;
+      const url = `${AI_API_PROXY}/stream/snapshot/${cameraId}?t=${Date.now()}`;
       setPreviewUrl(url);
       setPreviewError(false);
       setLoading(true);

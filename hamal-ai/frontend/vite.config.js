@@ -17,24 +17,13 @@ export default defineConfig(({ mode }) => {
       port: 5173,
       host: '0.0.0.0',  // Allow external connections
       proxy: {
-        // Backend API
-        '/api': {
-          target: backendUrl,
-          changeOrigin: true
+        // AI Service endpoints (must come before generic /api)
+        '/ai-api': {
+          target: aiServiceUrl,
+          changeOrigin: true,
+          ws: true,  // Enable WebSocket for /api/detections/*/ws
+          rewrite: (path) => path.replace(/^\/ai-api/, '/api')
         },
-        '/socket.io': {
-          target: backendUrl,
-          ws: true
-        },
-        '/hls': {
-          target: backendUrl,
-          changeOrigin: true
-        },
-        '/clips': {
-          target: backendUrl,
-          changeOrigin: true
-        },
-        // AI Service endpoints
         '/detection': {
           target: aiServiceUrl,
           changeOrigin: true
@@ -51,12 +40,37 @@ export default defineConfig(({ mode }) => {
           target: aiServiceUrl,
           changeOrigin: true
         },
+        '/tracker': {
+          target: aiServiceUrl,
+          changeOrigin: true
+        },
+        '/radio': {
+          target: aiServiceUrl,
+          changeOrigin: true
+        },
         // go2rtc endpoints (for WebRTC/WHIP)
         '/go2rtc': {
           target: go2rtcUrl,
           changeOrigin: true,
           ws: true,  // Enable WebSocket proxying
           rewrite: (path) => path.replace(/^\/go2rtc/, '')
+        },
+        // Backend API (generic - must come after more specific AI routes)
+        '/api': {
+          target: backendUrl,
+          changeOrigin: true
+        },
+        '/socket.io': {
+          target: backendUrl,
+          ws: true
+        },
+        '/hls': {
+          target: backendUrl,
+          changeOrigin: true
+        },
+        '/clips': {
+          target: backendUrl,
+          changeOrigin: true
         }
       }
     }

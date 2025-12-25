@@ -1,8 +1,9 @@
 import { useApp } from '../context/AppContext';
 import { useState, useEffect, useRef } from 'react';
 
-const AI_SERVICE_URL = import.meta.env.VITE_AI_SERVICE_URL || 'http://localhost:8000';
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3000';
+// Use relative URLs to leverage Vite proxy (avoids mixed content issues with HTTPS)
+const AI_SERVICE_PROXY = '';  // /detection endpoint is proxied to AI service
+const BACKEND_URL = '';
 
 /**
  * Demo controls for testing the system
@@ -23,7 +24,7 @@ export default function DemoControls() {
   useEffect(() => {
     const fetchDemoMode = async () => {
       try {
-        const response = await fetch(`${AI_SERVICE_URL}/detection/stats`);
+        const response = await fetch(`${AI_SERVICE_PROXY}/detection/stats`);
         if (response.ok) {
           const data = await response.json();
           // Check if FPS is low (demo mode)
@@ -63,7 +64,7 @@ export default function DemoControls() {
     setLoading(true);
     try {
       const response = await fetch(
-        `${AI_SERVICE_URL}/detection/config/demo-mode?enabled=${!demoMode}`,
+        `${AI_SERVICE_PROXY}/detection/config/demo-mode?enabled=${!demoMode}`,
         { method: 'POST' }
       );
       if (response.ok) {

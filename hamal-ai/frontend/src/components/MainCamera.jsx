@@ -1,10 +1,9 @@
 import { useApp } from '../context/AppContext';
 import { useEffect, useRef, useState, useCallback } from 'react';
 
-// Service URLs
-const AI_SERVICE_URL = import.meta.env.VITE_AI_SERVICE_URL || 'http://localhost:8000';
-const AI_SERVICE_WS = AI_SERVICE_URL.replace('http://', 'ws://').replace('https://', 'wss://');
-const GO2RTC_URL = import.meta.env.VITE_GO2RTC_URL || 'http://localhost:1984';
+// Use Vite proxy to avoid mixed content issues with HTTPS
+const GO2RTC_PROXY = '/go2rtc';
+const AI_API_PROXY = '/ai-api';  // Proxied to AI service /api
 
 export default function MainCamera() {
   const { selectedCamera, cameras, isEmergency } = useApp();
@@ -74,8 +73,8 @@ export default function MainCamera() {
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
-      // Send offer to go2rtc
-      const response = await fetch(`${GO2RTC_URL}/api/webrtc?src=${encodeURIComponent(cameraId)}`, {
+      // Send offer to go2rtc via proxy
+      const response = await fetch(`${GO2RTC_PROXY}/api/webrtc?src=${encodeURIComponent(cameraId)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/sdp' },
         body: offer.sdp
@@ -101,7 +100,9 @@ export default function MainCamera() {
       websocketRef.current.close();
     }
 
-    const wsUrl = `${AI_SERVICE_WS}/api/detections/${encodeURIComponent(cameraId)}/ws`;
+    // Use WebSocket through Vite proxy to avoid mixed content issues
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${wsProtocol}//${window.location.host}${AI_API_PROXY}/detections/${encodeURIComponent(cameraId)}/ws`;
     console.log('Connecting to detection WebSocket:', wsUrl);
 
     const ws = new WebSocket(wsUrl);
