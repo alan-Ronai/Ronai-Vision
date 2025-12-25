@@ -160,11 +160,11 @@ export default function WebcamShare({ onStreamStarted, onStreamStopped }) {
               resolve();
             }
           });
-          // Timeout after 5 seconds
+          // Timeout after 10 seconds (give more time for STUN/TURN)
           setTimeout(() => {
-            console.log('[WebcamShare] ICE gathering timeout, proceeding...');
+            console.log('[WebcamShare] ICE gathering timeout, proceeding with gathered candidates...');
             resolve();
-          }, 5000);
+          }, 10000);
         }
       });
       console.log('[WebcamShare] ICE gathering complete');

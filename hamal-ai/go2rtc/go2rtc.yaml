@@ -14,11 +14,11 @@ api:
 
 # WebRTC configuration
 webrtc:
-  listen: ":8555"      # WebRTC UDP port
+  listen: ":8555"
   candidates:
-    # IMPORTANT: Replace with your actual EC2 public IP!
-    # Run: curl -s ifconfig.me
+    # Tailscale IP with TCP fallback
     - 100.51.235.63:8555
+    - 100.51.235.63:8555/tcp
   ice_servers:
     - urls:
         - stun:stun.l.google.com:19302
