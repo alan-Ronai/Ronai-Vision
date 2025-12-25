@@ -34,6 +34,11 @@ GALLERY_MATCH_THRESHOLD_VEHICLE = float(os.environ.get("REID_MATCH_THRESHOLD_VEH
 GALLERY_SYNC_INTERVAL = int(os.environ.get("REID_GALLERY_SYNC_INTERVAL", "60"))  # seconds
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:3001")
 
+# Recency-based threshold boost: if entry was updated within this window, require higher similarity
+# This prevents GID collision when different people appear shortly after someone leaves
+GALLERY_RECENCY_WINDOW_SECONDS = int(os.environ.get("REID_RECENCY_WINDOW", "30"))  # seconds
+GALLERY_RECENCY_THRESHOLD_BOOST = float(os.environ.get("REID_RECENCY_BOOST", "0.25"))  # add to threshold
+
 # Local file persistence (for development without backend)
 GALLERY_LOCAL_FILE = os.environ.get("REID_GALLERY_LOCAL_FILE", "./data/reid_gallery.json")
 GALLERY_USE_LOCAL = os.environ.get("REID_GALLERY_USE_LOCAL", "true").lower() in ("true", "1", "yes")
@@ -360,15 +365,18 @@ class ReIDGallery:
             (gid, similarity) if match found, None otherwise
         """
         gallery = self._get_gallery(object_type)
-        threshold = min_threshold or self._get_threshold(object_type)
+        base_threshold = min_threshold or self._get_threshold(object_type)
         exclude_gids = set(exclude_gids or [])
 
         if not gallery:
             return None
 
         best_match = None
-        best_similarity = threshold  # Must exceed threshold
+        best_similarity = 0.0
+        best_effective_threshold = base_threshold
         all_similarities = []  # Debug: track all similarities
+        now = datetime.now()
+        recency_window = timedelta(seconds=GALLERY_RECENCY_WINDOW_SECONDS)
 
         for gid, entry in gallery.items():
             if gid in exclude_gids:
@@ -385,17 +393,31 @@ class ReIDGallery:
                 continue
 
             similarity = self.cosine_similarity(feature, entry.feature)
-            all_similarities.append((gid, similarity))
 
-            if similarity > best_similarity:
+            # RECENCY BOOST: If entry was updated recently, require higher similarity
+            # This prevents GID collision when different people appear shortly after someone leaves
+            time_since_update = now - entry.last_seen
+            if time_since_update < recency_window:
+                # Apply boost proportional to recency (more recent = higher boost)
+                recency_factor = 1.0 - (time_since_update.total_seconds() / GALLERY_RECENCY_WINDOW_SECONDS)
+                threshold_boost = GALLERY_RECENCY_THRESHOLD_BOOST * recency_factor
+                effective_threshold = base_threshold + threshold_boost
+            else:
+                effective_threshold = base_threshold
+
+            all_similarities.append((gid, similarity, effective_threshold))
+
+            # Check if this candidate beats the best AND exceeds its threshold
+            if similarity > effective_threshold and similarity > best_similarity:
                 best_similarity = similarity
                 best_match = gid
+                best_effective_threshold = effective_threshold
 
         if best_match is not None:
             self._stats["matches_found"] += 1
             logger.info(
                 f"Gallery match found: {object_type} GID {best_match} "
-                f"(similarity={best_similarity:.3f}, threshold={threshold})"
+                f"(similarity={best_similarity:.3f}, threshold={best_effective_threshold:.3f})"
             )
             return (best_match, best_similarity)
 
@@ -404,8 +426,8 @@ class ReIDGallery:
         if all_similarities:
             top_3 = sorted(all_similarities, key=lambda x: x[1], reverse=True)[:3]
             logger.debug(
-                f"Gallery miss for {object_type}: threshold={threshold}, "
-                f"top candidates: {[(gid, f'{sim:.3f}') for gid, sim in top_3]}"
+                f"Gallery miss for {object_type}: base_threshold={base_threshold}, "
+                f"top candidates: {[(gid, f'{sim:.3f} (thr={thr:.3f})') for gid, sim, thr in top_3]}"
             )
         else:
             logger.debug(f"Gallery miss for {object_type}: no valid candidates in gallery")
