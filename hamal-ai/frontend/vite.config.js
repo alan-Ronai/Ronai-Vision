@@ -9,6 +9,8 @@ export default defineConfig(({ mode }) => {
     plugins: [react()],
     server: {
       port: 5173,
+      host: '0.0.0.0',  // Allow external connections
+      https: true,      // Enable HTTPS with self-signed certificate
       proxy: {
         '/api': {
           target: backendUrl,

@@ -4,6 +4,24 @@ const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
 const GO2RTC_URL = import.meta.env.VITE_GO2RTC_URL || 'http://localhost:1984';
 
 /**
+ * Check if we're in a secure context (HTTPS or localhost)
+ * getUserMedia requires secure context
+ */
+function isSecureContext() {
+  return window.isSecureContext ||
+         window.location.protocol === 'https:' ||
+         window.location.hostname === 'localhost' ||
+         window.location.hostname === '127.0.0.1';
+}
+
+/**
+ * Check if getUserMedia is available
+ */
+function isGetUserMediaSupported() {
+  return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+}
+
+/**
  * WebcamShare Component
  * Allows users to share their browser webcam with the HAMAL-AI system
  * Uses WebRTC WHIP (WebRTC-HTTP Ingestion Protocol) to stream to go2rtc
@@ -15,14 +33,29 @@ export default function WebcamShare({ onStreamStarted, onStreamStopped }) {
   const [streamInfo, setStreamInfo] = useState(null);
   const [devices, setDevices] = useState([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState('');
+  const [isSupported, setIsSupported] = useState(true);
+  const [unsupportedReason, setUnsupportedReason] = useState('');
 
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const peerConnectionRef = useRef(null);
 
+  // Check for support on mount
+  useEffect(() => {
+    if (!isSecureContext()) {
+      setIsSupported(false);
+      setUnsupportedReason('https');
+    } else if (!isGetUserMediaSupported()) {
+      setIsSupported(false);
+      setUnsupportedReason('browser');
+    }
+  }, []);
+
   // Fetch available video devices
   useEffect(() => {
     async function getDevices() {
+      if (!isSupported) return;
+
       try {
         // Request permission first to get device labels
         const tempStream = await navigator.mediaDevices.getUserMedia({ video: true });
@@ -39,7 +72,7 @@ export default function WebcamShare({ onStreamStarted, onStreamStopped }) {
       }
     }
     getDevices();
-  }, []);
+  }, [isSupported]);
 
   // Clean up on unmount
   useEffect(() => {
@@ -200,6 +233,47 @@ export default function WebcamShare({ onStreamStarted, onStreamStopped }) {
       onStreamStopped();
     }
   }, [streamInfo, onStreamStopped]);
+
+  // Show unsupported message if needed
+  if (!isSupported) {
+    return (
+      <div className="bg-gray-700 rounded-lg p-4">
+        <h3 className="font-bold mb-3 flex items-center gap-2">
+          <span>📷</span>
+          <span>שתף את המצלמה שלך</span>
+        </h3>
+
+        <div className="bg-yellow-900/30 border border-yellow-600/50 rounded-lg p-4 text-yellow-200">
+          {unsupportedReason === 'https' ? (
+            <>
+              <div className="font-bold mb-2 flex items-center gap-2">
+                <span>🔒</span>
+                <span>נדרש חיבור מאובטח (HTTPS)</span>
+              </div>
+              <p className="text-sm mb-3">
+                שיתוף מצלמה דורש חיבור HTTPS מאובטח.
+                הדפדפן חוסם גישה למצלמה בחיבור HTTP רגיל.
+              </p>
+              <div className="text-xs bg-gray-800 rounded p-2 font-mono" dir="ltr">
+                <div className="mb-1">Options to enable:</div>
+                <div>1. Access via HTTPS (requires SSL certificate)</div>
+                <div>2. Access via localhost (always secure)</div>
+                <div>3. Chrome flag: chrome://flags/#unsafely-treat-insecure-origin-as-secure</div>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="font-bold mb-2">הדפדפן אינו תומך</div>
+              <p className="text-sm">
+                הדפדפן שלך אינו תומך בגישה למצלמה.
+                נסה להשתמש ב-Chrome, Firefox או Edge.
+              </p>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="bg-gray-700 rounded-lg p-4">
