@@ -48,6 +48,10 @@ export default defineConfig(({ mode }) => {
           target: aiServiceUrl,
           changeOrigin: true
         },
+        '/recordings': {
+          target: aiServiceUrl,
+          changeOrigin: true
+        },
         // go2rtc endpoints (for WebRTC/WHIP)
         '/go2rtc': {
           target: go2rtcUrl,

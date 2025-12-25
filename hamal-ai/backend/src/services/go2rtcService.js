@@ -214,9 +214,20 @@ class Go2rtcService {
    */
   async createBrowserWebcamStream(streamId) {
     try {
-      // Create an empty stream that will receive WHIP input
-      // go2rtc creates the stream when the first WHIP connection arrives
-      // We just need to prepare the endpoint info
+      // Create an empty stream in go2rtc that will receive WHIP input
+      // go2rtc needs the stream to exist before it can accept WHIP connections
+      // We create it with an empty source array - it will be populated when browser connects
+
+      const response = await axios.put(
+        `${this.baseUrl}/api/streams`,
+        null,
+        {
+          params: {
+            name: streamId,
+            src: ''  // Empty source - will receive WHIP input
+          }
+        }
+      );
 
       const whipInfo = this.getWHIPInfo(streamId);
 
@@ -226,7 +237,7 @@ class Go2rtcService {
         status: 'waiting'  // Waiting for browser to connect
       });
 
-      console.log(`[go2rtc] Created browser webcam slot: ${streamId}`);
+      console.log(`[go2rtc] Created browser webcam stream slot: ${streamId}`);
 
       return {
         success: true,
