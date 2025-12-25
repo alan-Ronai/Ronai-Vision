@@ -126,7 +126,15 @@ class ScenarioRuleEngine:
         Handle vehicle detection event.
 
         Returns True if this triggered a scenario start or transition.
+
+        If vehicle_data contains '_realData: true' or 'forceStolen: true',
+        the stolen vehicle check is bypassed (for demo scenarios).
         """
+        plate = vehicle_data.get('licensePlate', '')
+
+        # Check if this is a demo/forced stolen vehicle
+        force_stolen = vehicle_data.get('_realData') or vehicle_data.get('forceStolen')
+
         # Check if plate is in stolen list for any enabled scenario
         for scenario_id, scenario in self.scenarios.items():
             if not scenario.get('enabled', True):
@@ -137,11 +145,22 @@ class ScenarioRuleEngine:
                 # Already have an active scenario
                 continue
 
-            # Check stolen vehicles list
+            # For demo/forced stolen vehicles, skip the stolen list check
+            if force_stolen:
+                logger.info(f"Demo/forced stolen vehicle detected: {plate}, starting scenario {scenario_id}")
+
+                enriched_vehicle = {
+                    **vehicle_data,
+                    'stolenMatch': True
+                }
+
+                await self._start_scenario(scenario_id, enriched_vehicle)
+                return True
+
+            # Check stolen vehicles list from config
             config = scenario.get('config', {})
             stolen_vehicles = config.get('stolenVehicles', [])
 
-            plate = vehicle_data.get('licensePlate', '')
             for stolen in stolen_vehicles:
                 if stolen.get('plate', '').upper() == plate.upper():
                     # Found a match! Start the scenario
@@ -613,9 +632,10 @@ class ScenarioRuleEngine:
                 await self._send_action_to_backend(action_type, params)
                 await self._send_tts(params.get('message', ''))
 
-            # Handle journal (via engine-event)
+            # Handle journal (via engine-event AND create actual database entry)
             elif action_type == 'journal':
                 await self._send_action_to_backend(action_type, params)
+                await self._create_journal_entry(params)
 
             # Handle delays
             elif action_type == 'delay':

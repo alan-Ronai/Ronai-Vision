@@ -905,11 +905,23 @@ async def stream_status():
 @app.get("/api/stream/snapshot/{camera_id}")
 async def get_snapshot(camera_id: str):
     """Get a single JPEG snapshot from a stream"""
-    frame = stream_manager.get_frame(camera_id)
+    # First try FFmpeg-based rtsp_manager (handles webcams and main detection streams)
+    from services.streaming.rtsp_reader import get_rtsp_manager
+    rtsp_mgr = get_rtsp_manager()
+    frame = rtsp_mgr.get_frame(camera_id)
+
+    # Fallback to legacy stream_manager
     if frame is None:
-        # Try to start stream first
+        frame = stream_manager.get_frame(camera_id)
+
+    if frame is None:
+        # Try to start stream first (only for non-webcam cameras)
         camera_config = stream_manager.get_camera_config(camera_id)
         if camera_config and camera_config.get("rtspUrl"):
+            # Skip webcams - they should be started via /detection/start
+            if camera_config.get("type") == "webcam":
+                raise HTTPException(503, f"Webcam {camera_id} not started. Use detection/start first.")
+
             stream_manager.start_stream(
                 camera_id,
                 camera_config["rtspUrl"],
@@ -1775,13 +1787,13 @@ async def clear_all_tracking():
     except Exception as e:
         logger.warning(f"Error clearing tracker: {e}")
 
-    # 2. Clear detection loop state (Gemini cooldowns, etc.)
+    # 2. Clear detection loop state (analysis buffer, cooldowns, ReID cache, etc.)
     try:
         loop = get_detection_loop()
         if loop:
-            loop.reset_gemini_state(reset_tracker=False)  # Tracker already cleared above
+            loop.clear_state()  # Full state reset including analysis buffer and analyzed GIDs
             stats["detection_loop_cleared"] = True
-            logger.info("Cleared detection loop state (Gemini cooldowns, etc.)")
+            logger.info("Cleared detection loop state (analysis buffer, cooldowns, ReID cache)")
     except Exception as e:
         logger.warning(f"Error clearing detection loop: {e}")
 
@@ -2084,16 +2096,50 @@ async def auto_load_cameras():
                     continue
 
                 camera_id = camera.get('cameraId') or str(camera.get('_id'))
+                camera_type = camera.get('type', 'rtsp')
                 ai_enabled = camera.get('aiEnabled', True)
 
                 if not ai_enabled:
                     logger.info(f"Skipping camera {camera_id} (AI disabled)")
                     continue
 
-                logger.info(f"📹 Starting camera: {camera.get('name', camera_id)}")
+                logger.info(f"📹 Starting camera: {camera.get('name', camera_id)} (type: {camera_type})")
 
                 # Set status to connecting
                 await update_camera_status(camera_id, "connecting")
+
+                # Handle webcam type - use go2rtc stream
+                stream_url = rtsp_url
+                if camera_type == 'webcam':
+                    from services.streaming.webcam_reader import get_best_webcam_settings
+                    device_index = int(rtsp_url) if rtsp_url.isdigit() else 0
+
+                    # Get best settings for this webcam
+                    webcam_width, webcam_height, webcam_fps = get_best_webcam_settings(device_index)
+                    logger.info(f"Webcam {camera_id}: Detected settings {webcam_width}x{webcam_height}@{webcam_fps}fps")
+
+                    # Register with go2rtc
+                    ffmpeg_source = f"ffmpeg:device?video={device_index}&video_size={webcam_width}x{webcam_height}&framerate={webcam_fps}#video=h264"
+                    GO2RTC_URL = os.getenv("GO2RTC_URL", "http://localhost:1984")
+                    GO2RTC_RTSP_PORT = os.getenv("GO2RTC_RTSP_PORT", "8554")
+
+                    try:
+                        async with httpx.AsyncClient(timeout=5.0) as go2rtc_client:
+                            response = await go2rtc_client.put(
+                                f"{GO2RTC_URL}/api/streams",
+                                params={"name": camera_id, "src": ffmpeg_source}
+                            )
+                            if response.status_code in [200, 201]:
+                                stream_url = f"rtsp://localhost:{GO2RTC_RTSP_PORT}/{camera_id}"
+                                logger.info(f"Webcam {camera_id}: Registered with go2rtc -> {stream_url}")
+                            else:
+                                logger.warning(f"Webcam {camera_id}: go2rtc registration failed: {response.status_code}")
+                                await update_camera_status(camera_id, "error", "go2rtc registration failed")
+                                continue
+                    except Exception as e:
+                        logger.warning(f"Webcam {camera_id}: go2rtc error: {e}")
+                        await update_camera_status(camera_id, "error", str(e))
+                        continue
 
                 config = RTSPConfig(
                     width=1280,
@@ -2103,7 +2149,7 @@ async def auto_load_cameras():
                 )
 
                 try:
-                    rtsp_manager.add_camera(camera_id, rtsp_url, config)
+                    rtsp_manager.add_camera(camera_id, stream_url, config)
                     # Wait a bit for connection to establish
                     await asyncio.sleep(1.0)
                     # Check if we got a frame
@@ -2556,19 +2602,22 @@ async def stop_camera(camera_id: str):
 async def start_camera_detection(
     camera_id: str,
     rtsp_url: Optional[str] = None,
+    camera_type: Optional[str] = None,
     use_go2rtc: Optional[bool] = True
 ):
     """Start detection for a specific camera.
 
     Args:
         camera_id: Camera identifier
-        rtsp_url: Optional RTSP URL or video file path. If not provided, fetches from backend.
+        rtsp_url: Optional RTSP URL, video file path, or webcam device index. If not provided, fetches from backend.
+        camera_type: Camera type - "rtsp", "file", "webcam", or "simulator". If not provided, fetches from backend.
         use_go2rtc: If True and go2rtc is available, use go2rtc's RTSP re-stream (default: True)
                     This prevents multiple connections to the camera.
 
     Examples:
         POST /detection/start/cam-1?rtsp_url=assets/test2.mp4
         POST /detection/start/cam-1?rtsp_url=rtsp://192.168.1.100/stream
+        POST /detection/start/webcam-1?camera_type=webcam&rtsp_url=0
     """
     import httpx
 
@@ -2617,7 +2666,7 @@ async def start_camera_detection(
 
         Args:
             cam_id: Camera ID to register
-            original_url: Original RTSP URL
+            original_url: Original RTSP URL or FFmpeg source
             max_retries: Number of retries on failure
 
         Returns:
@@ -2626,8 +2675,7 @@ async def start_camera_detection(
         for attempt in range(max_retries):
             try:
                 async with httpx.AsyncClient(timeout=5.0) as client:
-                    # Add TCP transport for more reliable streaming over network
-                    # This prevents packet loss and stream freezing
+                    # Add TCP transport for RTSP URLs
                     src_url = original_url
                     if original_url.startswith("rtsp://") and "#" not in original_url:
                         src_url = f"{original_url}#transport=tcp"
@@ -2639,6 +2687,7 @@ async def start_camera_detection(
                         f"{GO2RTC_URL}/api/streams",
                         params={"name": cam_id, "src": src_url}
                     )
+
                     if response.status_code in [200, 201]:
                         # Return go2rtc's RTSP re-stream URL
                         return f"rtsp://localhost:{GO2RTC_RTSP_PORT}/{cam_id}"
@@ -2649,7 +2698,9 @@ async def start_camera_detection(
                             await asyncio.sleep(1.0)
                             continue
                     else:
-                        logger.warning(f"go2rtc registration failed for {cam_id}: {response.status_code}")
+                        # Log response body to understand the error
+                        error_body = response.text[:500] if response.text else "No response body"
+                        logger.warning(f"go2rtc registration failed for {cam_id}: {response.status_code} - {error_body}")
                         return None
             except Exception as e:
                 logger.warning(f"Failed to register {cam_id} with go2rtc (attempt {attempt + 1}): {e}")
@@ -2667,10 +2718,11 @@ async def start_camera_detection(
             rtsp_manager.add_frame_callback(detection_loop.on_frame)
             logger.info(f"Re-registered detection loop frame callback")
 
-        # If rtsp_url provided directly, use it
-        if rtsp_url:
-            original_url = rtsp_url
-        else:
+        # If rtsp_url provided directly, use it; otherwise fetch from backend
+        original_url = rtsp_url
+        resolved_type = camera_type
+
+        if not rtsp_url or not camera_type:
             # Fetch from backend
             async with httpx.AsyncClient() as client:
                 response = await client.get(f"{BACKEND_URL}/api/cameras/{camera_id}")
@@ -2678,9 +2730,61 @@ async def start_camera_detection(
                     raise HTTPException(404, f"Camera {camera_id} not found in backend. Use ?rtsp_url= to provide URL directly.")
 
                 camera = response.json()
-                original_url = camera.get('rtspUrl')
                 if not original_url:
-                    raise HTTPException(400, f"Camera {camera_id} has no RTSP URL")
+                    original_url = camera.get('rtspUrl', '')
+                if not resolved_type:
+                    resolved_type = camera.get('type', 'rtsp')
+
+        # Default to rtsp type
+        resolved_type = resolved_type or 'rtsp'
+
+        # Handle webcam type - register with go2rtc using FFmpeg device capture
+        if resolved_type == 'webcam':
+            from services.streaming.webcam_reader import get_best_webcam_settings
+
+            # Parse device index from original_url (default "0")
+            device_index = int(original_url) if original_url and original_url.isdigit() else 0
+
+            # Get best settings for this webcam (auto-detect resolution and framerate)
+            webcam_width, webcam_height, webcam_fps = get_best_webcam_settings(device_index)
+            logger.info(f"Webcam {camera_id}: Detected best settings: {webcam_width}x{webcam_height}@{webcam_fps}fps")
+
+            # go2rtc device source format: ffmpeg:device?video={index}&video_size={w}x{h}&framerate={fps}#video=h264
+            ffmpeg_source = f"ffmpeg:device?video={device_index}&video_size={webcam_width}x{webcam_height}&framerate={webcam_fps}#video=h264"
+            logger.info(f"Webcam {camera_id}: FFmpeg source for go2rtc: {ffmpeg_source}")
+
+            # Register webcam with go2rtc
+            stream_url = None
+            using_go2rtc = False
+
+            if use_go2rtc and await check_go2rtc_available():
+                go2rtc_url = await register_with_go2rtc(camera_id, ffmpeg_source)
+                if go2rtc_url:
+                    stream_url = go2rtc_url
+                    using_go2rtc = True
+                    logger.info(f"Webcam {camera_id}: Using go2rtc re-stream: {go2rtc_url}")
+
+            if not stream_url:
+                raise HTTPException(500, f"Failed to register webcam with go2rtc. Ensure go2rtc is running.")
+
+            # Use the go2rtc RTSP stream (same flow as regular cameras)
+            config = RTSPConfig(width=1280, height=720, fps=TARGET_FPS, tcp_transport=True)
+            rtsp_manager.add_camera(camera_id, stream_url, config)
+
+            logger.info(f"Started webcam {camera_id} (device {device_index}) via go2rtc")
+            return {
+                "status": "started",
+                "camera_id": camera_id,
+                "camera_type": "webcam",
+                "device_index": device_index,
+                "rtsp_url": stream_url,
+                "ffmpeg_source": ffmpeg_source,
+                "using_go2rtc": using_go2rtc
+            }
+
+        # For non-webcam types, require a URL
+        if not original_url:
+            raise HTTPException(400, f"Camera {camera_id} has no URL configured")
 
         # Determine the URL to use for AI service
         stream_url = original_url
@@ -2698,10 +2802,11 @@ async def start_camera_detection(
         config = RTSPConfig(width=1280, height=720, fps=TARGET_FPS, tcp_transport=True)
         rtsp_manager.add_camera(camera_id, stream_url, config)
 
-        logger.info(f"Started camera {camera_id} with URL: {stream_url}")
+        logger.info(f"Started camera {camera_id} ({resolved_type}) with URL: {stream_url}")
         return {
             "status": "started",
             "camera_id": camera_id,
+            "camera_type": resolved_type,
             "rtsp_url": stream_url,
             "original_url": original_url,
             "using_go2rtc": using_go2rtc
@@ -2735,6 +2840,29 @@ async def stop_camera_detection(camera_id: str):
         logger.info(f"Stopped recording for disconnected camera {camera_id}")
 
     return {"status": "stopped", "camera_id": camera_id}
+
+
+@app.get("/detection/webcams")
+async def list_available_webcams():
+    """List available webcam devices.
+
+    Returns a list of webcam devices that can be used with camera_type=webcam.
+    """
+    try:
+        from services.streaming.webcam_reader import list_available_webcams
+        devices = list_available_webcams()
+        return {
+            "status": "success",
+            "devices": devices,
+            "count": len(devices)
+        }
+    except Exception as e:
+        logger.error(f"Error listing webcams: {e}")
+        return {
+            "status": "error",
+            "error": str(e),
+            "devices": []
+        }
 
 
 @app.get("/detection/config")
@@ -3361,6 +3489,136 @@ async def reload_scenario_rules():
         return {"message": "Scenario rules reloaded", "count": len(engine.get_all_scenarios())}
     except Exception as e:
         logger.error(f"Failed to reload scenario rules: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/scenario-rules/armed-person")
+async def trigger_armed_person(person_data: dict):
+    """
+    Trigger armed person event on the ScenarioRuleEngine.
+
+    This endpoint allows the backend to notify the AI service about armed persons
+    detected via demo or other means that bypass the normal detection flow.
+
+    Required fields in person_data:
+    - trackId: Track ID of the person
+    - armed: Boolean (should be True)
+    - cameraId: Camera ID where detected
+
+    Optional fields:
+    - clothing, clothingColor, weaponType, confidence, bbox, etc.
+    """
+    try:
+        from services.scenario import get_scenario_rule_engine
+        engine = get_scenario_rule_engine()
+
+        # Ensure armed is set
+        person_data['armed'] = True
+
+        # Trigger the rule engine
+        triggered = await engine.handle_armed_person(person_data)
+
+        return {
+            "success": True,
+            "triggered": triggered,
+            "scenarioActive": engine.is_active(),
+            "activeScenario": engine.get_active_scenario()
+        }
+    except Exception as e:
+        logger.error(f"Failed to trigger armed person: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/scenario-rules/vehicle-detected")
+async def trigger_vehicle_detected(vehicle_data: dict):
+    """
+    Trigger vehicle detection event on the ScenarioRuleEngine.
+
+    This endpoint allows the backend to notify the AI service about stolen vehicles
+    detected via demo or other means that bypass the normal detection flow.
+
+    Required fields in vehicle_data:
+    - licensePlate: License plate of the vehicle
+    - cameraId: Camera ID where detected
+
+    Optional fields:
+    - color, make, model, vehicleType, confidence, bbox, trackId, etc.
+    """
+    try:
+        from services.scenario import get_scenario_rule_engine
+        engine = get_scenario_rule_engine()
+
+        # Trigger the rule engine's vehicle detection handler
+        triggered = await engine.handle_vehicle_detection(vehicle_data)
+
+        return {
+            "success": True,
+            "triggered": triggered,
+            "scenarioActive": engine.is_active(),
+            "activeScenario": engine.get_active_scenario()
+        }
+    except Exception as e:
+        logger.error(f"Failed to trigger vehicle detection: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/scenario-rules/start-recording")
+async def trigger_start_recording(request_data: dict):
+    """
+    Manually trigger recording start for a specific camera.
+
+    This endpoint allows the backend to start recording when the ScenarioRuleEngine
+    is not managing the scenario (e.g., during demo mode).
+
+    Required fields:
+    - cameraId: Camera ID to record
+
+    Optional fields:
+    - duration: Recording duration in seconds (default: 60)
+    - preBuffer: Pre-event buffer in seconds (default: 30)
+    - reason: Trigger reason (default: "manual")
+    """
+    try:
+        from services.recording.recording_manager import get_recording_manager
+
+        recording_manager = get_recording_manager()
+        if not recording_manager:
+            raise HTTPException(status_code=503, detail="Recording manager not available")
+
+        camera_id = request_data.get('cameraId')
+        if not camera_id:
+            raise HTTPException(status_code=400, detail="cameraId is required")
+
+        duration = request_data.get('duration', 60)
+        pre_buffer = request_data.get('preBuffer', 30)
+        reason = request_data.get('reason', 'manual')
+        metadata = request_data.get('metadata', {})
+
+        recording_id = recording_manager.start_recording(
+            camera_id=camera_id,
+            duration=duration,
+            pre_buffer=pre_buffer,
+            trigger_reason=reason,
+            metadata=metadata
+        )
+
+        if recording_id:
+            return {
+                "success": True,
+                "recordingId": recording_id,
+                "cameraId": camera_id,
+                "duration": duration
+            }
+        else:
+            return {
+                "success": False,
+                "message": "Could not start recording (may already be recording)",
+                "cameraId": camera_id
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to start recording: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

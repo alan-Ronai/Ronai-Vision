@@ -16,12 +16,29 @@ export default function CameraManager({ isOpen, onClose }) {
     username: '',
     password: '',
     type: 'rtsp',
-    aiEnabled: true
+    aiEnabled: true,
+    deviceIndex: '0'
   });
+  const [availableWebcams, setAvailableWebcams] = useState([]);
 
   useEffect(() => {
-    if (isOpen) fetchCameras();
+    if (isOpen) {
+      fetchCameras();
+      fetchAvailableWebcams();
+    }
   }, [isOpen]);
+
+  const fetchAvailableWebcams = async () => {
+    try {
+      const res = await fetch(`${AI_SERVICE_URL}/detection/webcams`);
+      const data = await res.json();
+      if (data.devices) {
+        setAvailableWebcams(data.devices);
+      }
+    } catch (error) {
+      console.log('Failed to fetch webcams (AI service may be offline):', error);
+    }
+  };
 
   const fetchCameras = async () => {
     try {
@@ -44,10 +61,16 @@ export default function CameraManager({ isOpen, onClose }) {
         ? `${API_URL}/api/cameras/${editingCamera.cameraId}`
         : `${API_URL}/api/cameras`;
 
+      // For webcam type, use deviceIndex as rtspUrl
+      const submitData = { ...formData };
+      if (submitData.type === 'webcam') {
+        submitData.rtspUrl = submitData.deviceIndex || '0';
+      }
+
       const res = await fetch(url, {
         method: editingCamera ? 'PUT' : 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(formData)
+        body: JSON.stringify(submitData)
       });
 
       if (res.ok) {
@@ -93,7 +116,8 @@ export default function CameraManager({ isOpen, onClose }) {
       username: camera.username || '',
       password: '',
       type: camera.type || 'rtsp',
-      aiEnabled: camera.aiEnabled !== false
+      aiEnabled: camera.aiEnabled !== false,
+      deviceIndex: camera.type === 'webcam' ? (camera.rtspUrl || '0') : '0'
     });
     setShowForm(true);
   };
@@ -108,7 +132,8 @@ export default function CameraManager({ isOpen, onClose }) {
       username: '',
       password: '',
       type: 'rtsp',
-      aiEnabled: true
+      aiEnabled: true,
+      deviceIndex: '0'
     });
     setShowForm(false);
   };
@@ -262,41 +287,71 @@ export default function CameraManager({ isOpen, onClose }) {
                   </select>
                 </div>
 
-                <div className="col-span-2">
-                  <label className="block text-sm text-gray-400 mb-1">כתובת RTSP</label>
-                  <input
-                    type="text"
-                    value={formData.rtspUrl}
-                    onChange={(e) => setFormData({ ...formData, rtspUrl: e.target.value })}
-                    className="w-full bg-gray-600 rounded px-3 py-2 font-mono text-sm text-white"
-                    placeholder="rtsp://192.168.1.100:554/stream1"
-                    dir="ltr"
-                  />
-                </div>
+                {formData.type === 'webcam' ? (
+                  <div className="col-span-2">
+                    <label className="block text-sm text-gray-400 mb-1">מצלמת רשת</label>
+                    <select
+                      value={formData.deviceIndex}
+                      onChange={(e) => setFormData({ ...formData, deviceIndex: e.target.value })}
+                      className="w-full bg-gray-600 rounded px-3 py-2 text-white"
+                    >
+                      {availableWebcams.length > 0 ? (
+                        availableWebcams.map((cam) => (
+                          <option key={cam.index} value={cam.index.toString()}>
+                            {cam.name} {cam.available ? '(זמין)' : '(לא זמין)'}
+                          </option>
+                        ))
+                      ) : (
+                        <>
+                          <option value="0">Webcam 0 (ברירת מחדל)</option>
+                          <option value="1">Webcam 1</option>
+                          <option value="2">Webcam 2</option>
+                        </>
+                      )}
+                    </select>
+                    <p className="text-xs text-gray-500 mt-1">
+                      בחר את מצלמת הרשת המחוברת למחשב
+                    </p>
+                  </div>
+                ) : (
+                  <>
+                    <div className="col-span-2">
+                      <label className="block text-sm text-gray-400 mb-1">כתובת RTSP</label>
+                      <input
+                        type="text"
+                        value={formData.rtspUrl}
+                        onChange={(e) => setFormData({ ...formData, rtspUrl: e.target.value })}
+                        className="w-full bg-gray-600 rounded px-3 py-2 font-mono text-sm text-white"
+                        placeholder={formData.type === 'file' ? 'assets/video.mp4' : 'rtsp://192.168.1.100:554/stream1'}
+                        dir="ltr"
+                      />
+                    </div>
 
-                <div>
-                  <label className="block text-sm text-gray-400 mb-1">שם משתמש</label>
-                  <input
-                    type="text"
-                    value={formData.username}
-                    onChange={(e) => setFormData({ ...formData, username: e.target.value })}
-                    className="w-full bg-gray-600 rounded px-3 py-2 text-white"
-                    placeholder="admin"
-                    dir="ltr"
-                  />
-                </div>
+                    <div>
+                      <label className="block text-sm text-gray-400 mb-1">שם משתמש</label>
+                      <input
+                        type="text"
+                        value={formData.username}
+                        onChange={(e) => setFormData({ ...formData, username: e.target.value })}
+                        className="w-full bg-gray-600 rounded px-3 py-2 text-white"
+                        placeholder="admin"
+                        dir="ltr"
+                      />
+                    </div>
 
-                <div>
-                  <label className="block text-sm text-gray-400 mb-1">סיסמה</label>
-                  <input
-                    type="password"
-                    value={formData.password}
-                    onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                    className="w-full bg-gray-600 rounded px-3 py-2 text-white"
-                    placeholder={editingCamera ? '(ללא שינוי)' : ''}
-                    dir="ltr"
-                  />
-                </div>
+                    <div>
+                      <label className="block text-sm text-gray-400 mb-1">סיסמה</label>
+                      <input
+                        type="password"
+                        value={formData.password}
+                        onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+                        className="w-full bg-gray-600 rounded px-3 py-2 text-white"
+                        placeholder={editingCamera ? '(ללא שינוי)' : ''}
+                        dir="ltr"
+                      />
+                    </div>
+                  </>
+                )}
 
                 <div className="col-span-2 flex items-center gap-2">
                   <input

@@ -9,6 +9,7 @@
 api:
   listen: ":1984"      # Web UI and API port
   origin: "*"          # Allow CORS from any origin (for dev)
+  readonly: true
 
 # WebRTC configuration
 webrtc:
@@ -22,8 +23,12 @@ webrtc:
 rtsp:
   listen: ":8554"      # go2rtc's RTSP output port
 
-# Streams are added dynamically via API - do not define here
-streams: {}
+# Streams - webcams are defined here, other streams added via API
+streams:
+  # Webcam template - can be used as reference
+  # webcam: "ffmpeg:device?video=0&video_size=1280x720&framerate=30#video=h264"
+  test:
+    - ffmpeg:device?video=0&video_size=1280x720&framerate=30#video=h264
 
 # FFmpeg configuration for transcoding (if needed)
 ffmpeg:

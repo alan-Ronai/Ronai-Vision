@@ -143,6 +143,10 @@ class ReIDGallery:
             "syncs_completed": 0,
         }
 
+        # Track changes since last save (for better logging)
+        self._persons_added_since_save = 0
+        self._vehicles_added_since_save = 0
+
         logger.info(
             f"ReID Gallery initialized: max_size={max_size}, ttl={ttl_days}d, "
             f"person_threshold={person_threshold}, vehicle_threshold={vehicle_threshold}"
@@ -323,10 +327,18 @@ class ReIDGallery:
             with open(local_path, 'w') as f:
                 json.dump(data, f, indent=2)
 
-            logger.info(
-                f"💾 Gallery saved: {len(entries)} entries to {local_path} "
-                f"(persons={person_count}, vehicles={vehicle_count})"
-            )
+            # Only log if there were new entries added since last save
+            if self._persons_added_since_save > 0 or self._vehicles_added_since_save > 0:
+                parts = []
+                if self._persons_added_since_save > 0:
+                    parts.append(f"{self._persons_added_since_save} person{'s' if self._persons_added_since_save != 1 else ''}")
+                if self._vehicles_added_since_save > 0:
+                    parts.append(f"{self._vehicles_added_since_save} vehicle{'s' if self._vehicles_added_since_save != 1 else ''}")
+                logger.info(f"💾 Gallery saved: added {' and '.join(parts)} (total: {len(entries)} entries)")
+
+                # Reset counters after logging
+                self._persons_added_since_save = 0
+                self._vehicles_added_since_save = 0
 
         except Exception as e:
             logger.warning(f"Error saving gallery to local file: {e}")
@@ -528,6 +540,12 @@ class ReIDGallery:
             gallery[gid] = entry
             self._stats["entries_added"] += 1
             self._dirty = True  # Mark for save
+
+            # Track new entries for save logging
+            if object_type == "person":
+                self._persons_added_since_save += 1
+            else:
+                self._vehicles_added_since_save += 1
 
             logger.info(
                 f"📥 Gallery NEW entry: {object_type} GID {gid} "

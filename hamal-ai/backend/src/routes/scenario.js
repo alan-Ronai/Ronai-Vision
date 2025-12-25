@@ -1411,9 +1411,28 @@ router.post('/demo/real/stolen-vehicle', async (req, res) => {
 
     const triggered = await manager.handleStolenVehicle(vehicleData);
 
+    // Also notify AI service's ScenarioRuleEngine
+    const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://localhost:8000';
+    let aiTriggered = false;
+    try {
+      const aiResponse = await fetch(`${AI_SERVICE_URL}/scenario-rules/vehicle-detected`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(vehicleData)
+      });
+      if (aiResponse.ok) {
+        const aiResult = await aiResponse.json();
+        aiTriggered = aiResult.triggered;
+        console.log(`[Demo Real] AI service notified for vehicle GID ${vehicle.gid}:`, aiResult);
+      }
+    } catch (aiErr) {
+      console.warn(`[Demo Real] Failed to notify AI service: ${aiErr.message}`);
+    }
+
     res.json({
       success: true,
       triggered,
+      aiTriggered,
       message: 'Used REAL vehicle from scene',
       vehicle: vehicleData,
       state: manager.getState()
@@ -1499,6 +1518,23 @@ router.post('/demo/real/armed-persons', async (req, res) => {
         });
 
         const thresholdReached = await manager.handleArmedPerson(personData);
+
+        // Also notify AI service's ScenarioRuleEngine
+        const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://localhost:8000';
+        try {
+          const aiResponse = await fetch(`${AI_SERVICE_URL}/scenario-rules/armed-person`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(personData)
+          });
+          if (aiResponse.ok) {
+            const aiResult = await aiResponse.json();
+            console.log(`[Demo Real] AI service notified for person GID ${person.gid}:`, aiResult);
+          }
+        } catch (aiErr) {
+          console.warn(`[Demo Real] Failed to notify AI service: ${aiErr.message}`);
+        }
+
         results.push({ person: personData, thresholdReached, success: true });
         console.log(`[Demo Real] Marked person GID ${person.gid} as armed:`, personData);
       } catch (err) {
@@ -1583,6 +1619,23 @@ router.post('/demo/real/full-scenario', async (req, res) => {
 
       console.log('[Demo Real Full] Using real vehicle:', vehicleData);
       await manager.handleStolenVehicle(vehicleData);
+
+      // Also notify AI service's ScenarioRuleEngine
+      const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://localhost:8000';
+      try {
+        const aiResponse = await fetch(`${AI_SERVICE_URL}/scenario-rules/vehicle-detected`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(vehicleData)
+        });
+        if (aiResponse.ok) {
+          const aiResult = await aiResponse.json();
+          console.log(`[Demo Real Full] AI service notified for vehicle GID ${vehicle.gid}:`, aiResult);
+        }
+      } catch (aiErr) {
+        console.warn(`[Demo Real Full] Failed to notify AI service: ${aiErr.message}`);
+      }
+
       results.vehicle = vehicleData;
     } else {
       results.warnings.push('No vehicles in scene - skipping stolen vehicle trigger');
@@ -1628,6 +1681,22 @@ router.post('/demo/real/full-scenario', async (req, res) => {
 
           try {
             await manager.handleArmedPerson(personData);
+
+            // Also notify AI service's ScenarioRuleEngine
+            const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://localhost:8000';
+            try {
+              const aiResponse = await fetch(`${AI_SERVICE_URL}/scenario-rules/armed-person`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(personData)
+              });
+              if (aiResponse.ok) {
+                const aiResult = await aiResponse.json();
+                console.log(`[Demo Real Full] AI service notified for person GID ${person.gid}:`, aiResult);
+              }
+            } catch (aiErr) {
+              console.warn(`[Demo Real Full] Failed to notify AI service: ${aiErr.message}`);
+            }
           } catch (err) {
             console.error('[Demo Real Full] Error adding armed person:', err);
           }

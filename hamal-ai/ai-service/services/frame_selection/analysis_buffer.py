@@ -538,6 +538,46 @@ class AnalysisBuffer:
                 return None
             return self._trigger_analysis(track_id, "forced")
 
+    def check_stale_buffers(self) -> List[Tuple[int, np.ndarray, Tuple, Dict]]:
+        """Check all buffers for timeout and trigger stale ones.
+
+        CRITICAL: This must be called periodically to handle buffers where the
+        tracked object has disappeared. Without this, buffers for lost tracks
+        would never trigger their timeout.
+
+        Returns:
+            List of (track_id, best_frame, best_bbox, metadata) for triggered buffers
+        """
+        triggered = []
+        now = time.time()
+
+        with self._lock:
+            # Collect stale track_ids (can't modify dict during iteration)
+            stale_track_ids = []
+            for track_id, buffer in self._buffers.items():
+                if buffer.analysis_triggered:
+                    continue
+
+                elapsed_ms = (now - buffer.created_at) * 1000
+                if elapsed_ms >= self.config.buffer_timeout_ms and buffer.frames_received >= 1:
+                    stale_track_ids.append(track_id)
+
+            # Trigger analysis for stale buffers
+            for track_id in stale_track_ids:
+                logger.info(
+                    f"Stale buffer timeout: track {track_id} "
+                    f"(buffer had no new frames, forcing analysis)"
+                )
+                result = self._trigger_analysis(track_id, "stale_timeout")
+                if result:
+                    best_frame, best_bbox, metadata = result
+                    triggered.append((track_id, best_frame, best_bbox, metadata))
+
+        if triggered:
+            logger.info(f"Triggered {len(triggered)} stale buffers")
+
+        return triggered
+
     def is_buffering(self, track_id: int) -> bool:
         """Check if a track is currently being buffered.
 

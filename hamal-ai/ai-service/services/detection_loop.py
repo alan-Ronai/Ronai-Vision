@@ -1068,9 +1068,13 @@ class DetectionLoop:
                                 self._annotated_frames[camera_id] = result.annotated_frame
 
                         # Queue result for async processing
+                        # CRITICAL: Must queue results with TRACKED objects too (not just new)
+                        # Otherwise frame selection buffer never receives subsequent frames
                         if (
                             result.new_vehicles
                             or result.new_persons
+                            or result.tracked_vehicles
+                            or result.tracked_persons
                             or result.armed_persons
                         ):
                             try:
@@ -2660,23 +2664,19 @@ class DetectionLoop:
                     self._run_person_analysis(track_id, best_frame, best_bbox, metadata, result)
                 )
 
-        # STEP 3: Run triggered analyses (limit concurrent to avoid overloading Gemini)
+        # STEP 3: Run ALL triggered analyses
+        # Note: We run all tasks because the buffer has already been cleared when analysis was triggered.
+        # If we skip any, they would never be analyzed (the frame data is already gone).
+        # To prevent Gemini overload, we run them sequentially with a small delay.
         if analysis_tasks:
-            # Only run first 3 tasks, cancel the rest to avoid unawaited coroutine warnings
-            tasks_to_run = analysis_tasks[:3]
-            tasks_to_skip = analysis_tasks[3:]
+            logger.info(f"Running {len(analysis_tasks)} Gemini analysis tasks")
 
-            if tasks_to_skip:
-                logger.info(f"Running {len(tasks_to_run)} Gemini analysis tasks, skipping {len(tasks_to_skip)} (limit 3)")
-                # Close unawaited coroutines to prevent warnings
-                for task in tasks_to_skip:
-                    task.close()
-            else:
-                logger.info(f"Running {len(tasks_to_run)} Gemini analysis tasks")
-
-            for i, task in enumerate(tasks_to_run):
+            for i, task in enumerate(analysis_tasks):
                 try:
                     await task
+                    # Small delay between analyses to avoid rate limiting
+                    if i < len(analysis_tasks) - 1:
+                        await asyncio.sleep(0.1)
                 except Exception as e:
                     logger.error(f"Analysis task {i} failed: {e}")
         else:
@@ -2687,6 +2687,30 @@ class DetectionLoop:
                     f"{len(result.tracked_persons)} persons tracked"
                 )
 
+        # STEP 4: Check for stale buffers (objects that disappeared but never triggered)
+        # This is CRITICAL - without this, buffers for lost tracks would never analyze
+        stale_results = self.analysis_buffer.check_stale_buffers()
+        if stale_results:
+            stale_tasks = []
+            for track_id, best_frame, best_bbox, metadata in stale_results:
+                obj_class = metadata.get("object_class", "unknown")
+                if obj_class == "person":
+                    stale_tasks.append(
+                        self._run_person_analysis(track_id, best_frame, best_bbox, metadata, result)
+                    )
+                else:
+                    stale_tasks.append(
+                        self._run_vehicle_analysis(track_id, best_frame, best_bbox, metadata, result)
+                    )
+
+            logger.info(f"Running {len(stale_tasks)} stale buffer analysis tasks")
+            for task in stale_tasks:
+                try:
+                    await task
+                    await asyncio.sleep(0.1)
+                except Exception as e:
+                    logger.error(f"Stale analysis task failed: {e}")
+
     async def _run_vehicle_analysis(
         self,
         track_id: int,
@@ -2695,16 +2719,18 @@ class DetectionLoop:
         frame_metadata: dict,
         result: DetectionResult,
     ):
-        """Run Gemini analysis on optimal vehicle frame with image enhancement."""
+        """Run Gemini analysis on optimal vehicle frame with image enhancement.
+
+        NOTE: This is called when the analysis buffer triggers.
+        The buffer is already cleared at this point, so we MUST complete the analysis.
+        Do NOT return early without analyzing - the frame data would be lost!
+        """
         try:
             logger.info(f"Starting Gemini vehicle analysis for track {track_id}")
             analysis_start = time.time()
 
-            # Cooldown check
-            last_call = self._last_gemini.get(track_id, 0)
-            if time.time() - last_call < self.config.gemini_cooldown:
-                logger.debug(f"Skipping vehicle {track_id}: cooldown ({time.time() - last_call:.1f}s < {self.config.gemini_cooldown}s)")
-                return
+            # NOTE: No cooldown check here - buffer-triggered analysis must complete.
+            # The buffer ensures we only analyze once per track.
 
             # ENHANCEMENT: Enhance the frame before Gemini analysis
             enhance_start = time.time()
@@ -2765,19 +2791,18 @@ class DetectionLoop:
                 "camera_id": result.camera_id,
             }
 
-            # Update tracker with metadata (check if tracker was cleared during analysis)
-            if self.bot_sort:
-                if self.bot_sort.is_clearing():
-                    logger.debug(f"Skipping vehicle {track_id} metadata update: tracker being cleared")
-                    return
+            # Update tracker with metadata (if track still exists)
+            # NOTE: Even if tracker is cleared, we MUST continue to sync analysis to backend
+            tracker_updated = False
+            if self.bot_sort and not self.bot_sort.is_clearing():
                 for track in self.bot_sort.get_active_tracks("vehicle", camera_id=result.camera_id):
                     if track.track_id == track_id:
                         track.metadata.update(metadata)
+                        tracker_updated = True
                         break
-                else:
-                    # Track no longer exists (was cleared)
-                    logger.debug(f"Vehicle track {track_id} no longer exists, skipping metadata update")
-                    return
+
+            if not tracker_updated:
+                logger.debug(f"Vehicle track {track_id} not found in tracker (may have been cleared), but continuing with backend sync")
 
             self._update_gemini_cooldown(track_id)
 
@@ -2836,16 +2861,18 @@ class DetectionLoop:
         frame_metadata: dict,
         result: DetectionResult,
     ):
-        """Run Gemini analysis on optimal person frame with image enhancement."""
+        """Run Gemini analysis on optimal person frame with image enhancement.
+
+        NOTE: This is called when the analysis buffer triggers.
+        The buffer is already cleared at this point, so we MUST complete the analysis.
+        Do NOT return early without analyzing - the frame data would be lost!
+        """
         try:
             logger.info(f"Starting Gemini person analysis for track {track_id}")
             analysis_start = time.time()
 
-            # Cooldown check
-            last_call = self._last_gemini.get(track_id, 0)
-            if time.time() - last_call < self.config.gemini_cooldown:
-                logger.debug(f"Skipping person {track_id}: cooldown ({time.time() - last_call:.1f}s < {self.config.gemini_cooldown}s)")
-                return
+            # NOTE: No cooldown check here - buffer-triggered analysis must complete.
+            # The buffer ensures we only analyze once per track.
 
             # ENHANCEMENT: Enhance the frame before Gemini analysis
             enhance_start = time.time()
@@ -2906,19 +2933,18 @@ class DetectionLoop:
                 "camera_id": result.camera_id,
             }
 
-            # Update tracker with metadata (check if tracker was cleared during analysis)
-            if self.bot_sort:
-                if self.bot_sort.is_clearing():
-                    logger.debug(f"Skipping person {track_id} metadata update: tracker being cleared")
-                    return
+            # Update tracker with metadata (if track still exists)
+            # NOTE: Even if tracker is cleared, we MUST continue to sync analysis to backend
+            tracker_updated = False
+            if self.bot_sort and not self.bot_sort.is_clearing():
                 for track in self.bot_sort.get_active_tracks("person", camera_id=result.camera_id):
                     if track.track_id == track_id:
                         track.metadata.update(metadata)
+                        tracker_updated = True
                         break
-                else:
-                    # Track no longer exists (was cleared)
-                    logger.debug(f"Person track {track_id} no longer exists, skipping metadata update")
-                    return
+
+            if not tracker_updated:
+                logger.debug(f"Person track {track_id} not found in tracker (may have been cleared), but continuing with backend sync")
 
             self._update_gemini_cooldown(track_id)
 
@@ -3049,6 +3075,11 @@ class DetectionLoop:
                 # Sync analysis to backend
                 try:
                     await backend_sync.update_analysis(gid=track_id, analysis=analysis)
+                    # Mark GID as analyzed to prevent re-analysis
+                    gid = self.analysis_buffer.extract_gid_from_track_id(track_id)
+                    if gid:
+                        self.analysis_buffer.mark_gid_analyzed(gid)
+                        logger.debug(f"Marked vehicle GID {gid} as analyzed (direct path)")
                 except Exception as sync_error:
                     logger.debug(f"Backend sync error: {sync_error}")
 
@@ -3109,6 +3140,11 @@ class DetectionLoop:
                 # Sync analysis to backend
                 try:
                     await backend_sync.update_analysis(gid=track_id, analysis=analysis)
+                    # Mark GID as analyzed to prevent re-analysis
+                    gid = self.analysis_buffer.extract_gid_from_track_id(track_id)
+                    if gid:
+                        self.analysis_buffer.mark_gid_analyzed(gid)
+                        logger.debug(f"Marked person GID {gid} as analyzed (direct path)")
                 except Exception as sync_error:
                     logger.debug(f"Backend sync error: {sync_error}")
 

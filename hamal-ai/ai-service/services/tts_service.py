@@ -248,24 +248,47 @@ class TTSService:
             weapon_type = details.get("weapon_type", "לא ידוע")
             parts.append(f"המחבלים חמושים! סוג נשק: {weapon_type}.")
 
-        # Person descriptions
+        # Person descriptions - use rich Gemini analysis data
         persons = details.get("persons", [])
         for i, person in enumerate(persons[:3], 1):
             if isinstance(person, dict):
-                shirt = person.get("shirtColor", "")
-                pants = person.get("pantsColor", "")
-                headwear = person.get("headwear", "")
+                # Priority 1: Use the full description from Gemini (most detailed)
+                description = person.get("description", "")
+                if description and description not in ["לא זוהה", "null", ""]:
+                    parts.append(f"אדם {i}: {description}.")
+                    continue
 
+                # Priority 2: Use aggregated clothing info
                 desc_parts = []
-                if shirt:
-                    desc_parts.append(f"חולצה {shirt}")
-                if pants:
-                    desc_parts.append(f"מכנס {pants}")
-                if headwear and headwear != "ללא":
-                    desc_parts.append(headwear)
+                clothing = person.get("clothing", "")
+                clothing_color = person.get("clothingColor", "")
+                age_range = person.get("ageRange", "")
+                gender = person.get("gender", "")
+
+                if gender and gender not in ["לא ניתן לקבוע", "לא זוהה"]:
+                    desc_parts.append(gender)
+                if age_range and age_range not in ["לא זוהה", "null"]:
+                    desc_parts.append(age_range)
+                if clothing_color and clothing_color not in ["לא זוהה", "null"]:
+                    desc_parts.append(clothing_color)
+                elif clothing and clothing not in ["לא זוהה", "null"]:
+                    desc_parts.append(f"לבוש {clothing}")
+
+                # Priority 3: Fallback to raw fields
+                if not desc_parts:
+                    shirt = person.get("shirtColor", "")
+                    pants = person.get("pantsColor", "")
+                    headwear = person.get("headwear", "")
+
+                    if shirt:
+                        desc_parts.append(f"חולצה {shirt}")
+                    if pants:
+                        desc_parts.append(f"מכנס {pants}")
+                    if headwear and headwear != "ללא":
+                        desc_parts.append(headwear)
 
                 if desc_parts:
-                    parts.append(f"מחבל {i}: {', '.join(desc_parts)}.")
+                    parts.append(f"אדם {i}: {', '.join(desc_parts)}.")
 
         # Vehicle info
         vehicle = details.get("vehicle")

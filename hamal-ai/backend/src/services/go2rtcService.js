@@ -233,6 +233,18 @@ class Go2rtcService {
       // Use cameraId (frontend uses this), fallback to _id
       const streamId = camera.cameraId || camera._id;
 
+      // Skip webcam type cameras - they're handled by AI service with FFmpeg device capture
+      if (camera.type === 'webcam') {
+        console.log(`[go2rtc] Skipping ${streamId}: webcam (handled by AI service)`);
+        results.push({
+          camera: streamId,
+          success: true,
+          skipped: true,
+          reason: 'webcam handled by AI service'
+        });
+        continue;
+      }
+
       // Get source URL - can be rtspUrl, filePath, or sourceUrl
       const sourceUrl = camera.rtspUrl || camera.filePath || camera.sourceUrl;
 

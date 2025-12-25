@@ -110,18 +110,37 @@ router.post("/", async (req, res) => {
         // Get the source URL - can be rtspUrl, filePath, or sourceUrl
         const sourceUrl = camera.rtspUrl || camera.filePath || camera.sourceUrl;
         const isLocalFile = go2rtcService.isLocalFile(sourceUrl);
+        const isWebcam = camera.type === 'webcam';
         const aiServiceUrl = process.env.AI_SERVICE_URL || "http://localhost:8000";
 
+        // For webcams: AI service handles go2rtc registration with FFmpeg device source
         // For local files: Start AI service first (it will read the file),
         // then register with go2rtc (which will pull from AI service's MJPEG)
         // For RTSP: Register with go2rtc first, then start AI service
 
-        if (isLocalFile && sourceUrl) {
+        if (isWebcam) {
+            // Webcam: AI service handles everything (go2rtc registration + detection)
+            if (camera.aiEnabled !== false) {
+                try {
+                    const response = await fetch(
+                        `${aiServiceUrl}/detection/start/${camera.cameraId}?rtsp_url=${encodeURIComponent(sourceUrl)}&camera_type=webcam`,
+                        { method: "POST" }
+                    );
+                    if (response.ok) {
+                        console.log(`[Cameras] Started webcam detection for: ${camera.cameraId}`);
+                    } else {
+                        console.warn(`[Cameras] Failed to start AI detection for ${camera.cameraId}: ${response.status}`);
+                    }
+                } catch (aiError) {
+                    console.warn(`[Cameras] Could not notify AI service: ${aiError.message}`);
+                }
+            }
+        } else if (isLocalFile && sourceUrl) {
             // Step 1: Start AI service detection for local file
             if (camera.aiEnabled !== false) {
                 try {
                     const response = await fetch(
-                        `${aiServiceUrl}/detection/start/${camera.cameraId}?rtsp_url=${encodeURIComponent(sourceUrl)}`,
+                        `${aiServiceUrl}/detection/start/${camera.cameraId}?rtsp_url=${encodeURIComponent(sourceUrl)}&camera_type=file`,
                         { method: "POST" }
                     );
                     if (response.ok) {
@@ -157,7 +176,7 @@ router.post("/", async (req, res) => {
             if (camera.aiEnabled !== false) {
                 try {
                     const response = await fetch(
-                        `${aiServiceUrl}/detection/start/${camera.cameraId}?rtsp_url=${encodeURIComponent(sourceUrl)}`,
+                        `${aiServiceUrl}/detection/start/${camera.cameraId}?rtsp_url=${encodeURIComponent(sourceUrl)}&camera_type=rtsp`,
                         { method: "POST" }
                     );
                     if (response.ok) {
