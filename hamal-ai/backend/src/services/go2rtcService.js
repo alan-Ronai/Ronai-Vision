@@ -236,20 +236,25 @@ class Go2rtcService {
   /**
    * Clear all streams from go2rtc
    * Called on startup to ensure clean state
+   * NOTE: Preserves 'browser-webcam' stream which is used for WHIP publishing
    */
   async clearAllStreams() {
     try {
       const streams = await this.getStreams();
       const streamNames = Object.keys(streams || {});
 
-      if (streamNames.length === 0) {
-        console.log('[go2rtc] No streams to clear');
+      // Preserve these streams (defined in go2rtc.yaml for special purposes)
+      const preserveStreams = ['browser-webcam'];
+      const toRemove = streamNames.filter(name => !preserveStreams.includes(name));
+
+      if (toRemove.length === 0) {
+        console.log('[go2rtc] No streams to clear (preserving:', preserveStreams.join(', '), ')');
         return { success: true, cleared: 0 };
       }
 
-      console.log(`[go2rtc] Clearing ${streamNames.length} existing streams...`);
+      console.log(`[go2rtc] Clearing ${toRemove.length} streams (preserving: ${preserveStreams.join(', ')})...`);
 
-      for (const name of streamNames) {
+      for (const name of toRemove) {
         try {
           await this.removeStream(name);
         } catch (e) {
@@ -258,8 +263,8 @@ class Go2rtcService {
       }
 
       this.streams.clear();
-      console.log(`[go2rtc] Cleared ${streamNames.length} streams`);
-      return { success: true, cleared: streamNames.length };
+      console.log(`[go2rtc] Cleared ${toRemove.length} streams`);
+      return { success: true, cleared: toRemove.length };
     } catch (error) {
       console.error('[go2rtc] Error clearing streams:', error.message);
       return { success: false, error: error.message };

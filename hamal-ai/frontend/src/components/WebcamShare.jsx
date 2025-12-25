@@ -170,9 +170,10 @@ export default function WebcamShare({ onStreamStarted, onStreamStopped }) {
       console.log('[WebcamShare] ICE gathering complete');
 
       // Step 4: Send offer to go2rtc WHIP endpoint (via proxy to avoid mixed content)
-      // Use ?src= for PUBLISHING to go2rtc (not ?dst= which is for PLAYING)
+      // Use ?dst= for PUBLISHING to go2rtc (WHIP) - dst = destination for your stream
+      // ?src= is for PLAYING/consuming (WHEP) - src = source to receive from
       const streamId = regData.camera.cameraId;
-      const whipUrl = `${GO2RTC_PROXY}/api/webrtc?src=${streamId}`;
+      const whipUrl = `${GO2RTC_PROXY}/api/webrtc?dst=${streamId}`;
 
       console.log('[WebcamShare] Sending SDP to:', whipUrl);
       console.log('[WebcamShare] SDP (first 300 chars):', pc.localDescription.sdp.substring(0, 300));
