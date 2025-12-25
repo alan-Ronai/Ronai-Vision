@@ -28,6 +28,7 @@ from ultralytics import YOLO
 import numpy as np
 import cv2
 import asyncio
+import httpx
 import logging
 from pathlib import Path
 from datetime import datetime
@@ -125,6 +126,11 @@ def get_device():
 DEVICE = get_device()
 # Export DEVICE to environment so ReID models can use it
 os.environ["DEVICE"] = DEVICE
+
+# Limit PyTorch threads when running on CPU to prevent 400% CPU usage
+if DEVICE == "cpu":
+    torch.set_num_threads(2)  # Limit to 2 threads for CPU inference
+    logger.info("Limited PyTorch to 2 CPU threads")
 
 # Model paths
 MODEL_PATH = os.getenv("YOLO_MODEL", "yolo12m.pt")  # Upgraded from yolo12n for better accuracy
@@ -1736,6 +1742,94 @@ async def cleanup_old_tracks(
     return {"removed": removed}
 
 
+@app.delete("/tracker/clear-all")
+async def clear_all_tracking():
+    """
+    Clear ALL tracking data: GID store, ReID gallery, and backend tracked objects.
+
+    This is a full reset - use with caution.
+    Handles in-flight operations gracefully by incrementing session ID.
+    Returns stats on what was cleared.
+    """
+    from services.detection import get_bot_sort_tracker
+
+    stats = {
+        "tracker_persons": 0,
+        "tracker_vehicles": 0,
+        "gallery_persons": 0,
+        "gallery_vehicles": 0,
+        "backend_cleared": False,
+        "detection_loop_cleared": False
+    }
+
+    logger.info("🗑️ Starting clear-all operation...")
+
+    # 1. Clear BoT-SORT tracker (in-memory GID store)
+    # This increments session ID to invalidate in-flight operations
+    try:
+        tracker = get_bot_sort_tracker()
+        if tracker:
+            tracker_stats = tracker.clear_all()
+            stats["tracker_persons"] = tracker_stats.get("persons", 0)
+            stats["tracker_vehicles"] = tracker_stats.get("vehicles", 0)
+    except Exception as e:
+        logger.warning(f"Error clearing tracker: {e}")
+
+    # 2. Clear detection loop state (Gemini cooldowns, etc.)
+    try:
+        loop = get_detection_loop()
+        if loop:
+            loop.reset_gemini_state(reset_tracker=False)  # Tracker already cleared above
+            stats["detection_loop_cleared"] = True
+            logger.info("Cleared detection loop state (Gemini cooldowns, etc.)")
+    except Exception as e:
+        logger.warning(f"Error clearing detection loop: {e}")
+
+    # 3. Clear ReID gallery
+    try:
+        from services.reid import get_reid_gallery
+        gallery = get_reid_gallery()
+        if gallery:
+            gallery_stats = gallery.get_stats()
+            stats["gallery_persons"] = gallery_stats.get("persons", 0)
+            stats["gallery_vehicles"] = gallery_stats.get("vehicles", 0)
+            gallery.clear()
+    except Exception as e:
+        logger.warning(f"Error clearing ReID gallery: {e}")
+
+    # 4. Clear backend tracked objects
+    try:
+        backend_url = os.environ.get("BACKEND_URL", "http://localhost:3001")
+        async with httpx.AsyncClient() as client:
+            response = await client.delete(f"{backend_url}/api/tracked/clear-all", timeout=5.0)
+            if response.status_code == 200:
+                stats["backend_cleared"] = True
+                logger.info("Cleared backend tracked objects")
+    except Exception as e:
+        logger.warning(f"Error clearing backend: {e}")
+
+    # 5. Reset rule engine GID limits
+    try:
+        from services.rules import get_rule_engine
+        rule_engine = get_rule_engine()
+        if rule_engine:
+            rule_engine.reset_gid_limits()
+            logger.info("Reset rule engine GID limits")
+    except Exception as e:
+        logger.warning(f"Error resetting rule engine: {e}")
+
+    # Brief pause to let in-flight operations complete/fail gracefully
+    await asyncio.sleep(0.1)
+
+    logger.info(f"✅ Clear-all complete: {stats}")
+
+    return {
+        "status": "cleared",
+        "stats": stats,
+        "message": "All tracking data cleared"
+    }
+
+
 async def trigger_emergency(
     camera_id: str,
     person_analysis: Dict[str, Any],
@@ -2421,9 +2515,14 @@ async def stop_camera(camera_id: str):
         logger.warning(f"FFmpeg stream not found for {camera_id}: {e}")
 
     # CRITICAL: Clear tracks for this camera to prevent ghost tracks and stale events
-    if bot_sort:
-        bot_sort.clear_camera_tracks(camera_id)
-        logger.info(f"Cleared tracks for {camera_id}")
+    try:
+        from services.detection import get_bot_sort_tracker
+        tracker = get_bot_sort_tracker()
+        if tracker:
+            tracker.clear_camera_tracks(camera_id)
+            logger.info(f"Cleared tracks for {camera_id}")
+    except Exception as e:
+        logger.warning(f"Error clearing tracks for {camera_id}: {e}")
 
     # Stop any active recordings for this camera
     try:
@@ -2618,8 +2717,13 @@ async def stop_camera_detection(camera_id: str):
     get_rtsp_manager().remove_camera(camera_id)
 
     # Clear tracks for this camera to prevent stale events
-    if bot_sort:
-        bot_sort.clear_camera_tracks(camera_id)
+    try:
+        from services.detection import get_bot_sort_tracker
+        tracker = get_bot_sort_tracker()
+        if tracker:
+            tracker.clear_camera_tracks(camera_id)
+    except Exception as e:
+        logger.warning(f"Error clearing tracks: {e}")
 
     # Stop any active recordings for this camera
     from services.recording import get_recording_manager

@@ -856,6 +856,172 @@ async def update_analysis_throttled(
 
 
 # =============================================================================
+# STALE ENTRY CLEANUP
+# =============================================================================
+
+async def get_all_tracked() -> List[Dict[str, Any]]:
+    """Get all tracked entries from the backend.
+
+    Returns:
+        List of tracked entry dicts with gid, type, analysis, etc.
+    """
+    async def do_request():
+        client = await get_http_client()
+        return await client.get(f"{BACKEND_URL}/api/tracked")
+
+    try:
+        response = await retry_async(do_request, max_retries=2)
+        if response.status_code == 200:
+            data = response.json()
+            # Handle different response formats
+            if isinstance(data, list):
+                return data
+            elif isinstance(data, dict):
+                # Try common nested formats: {data: [...]}, {items: [...]}, {tracked: [...]}
+                for key in ['data', 'items', 'tracked', 'objects']:
+                    if key in data and isinstance(data[key], list):
+                        return data[key]
+                # If it's a single object dict, wrap in list
+                if 'gid' in data:
+                    return [data]
+                logger.warning(f"Unexpected tracked response format: {list(data.keys())}")
+                return []
+            else:
+                logger.warning(f"Unexpected tracked response type: {type(data)}")
+                return []
+        else:
+            logger.warning(f"Failed to get tracked entries: {response.status_code}")
+            return []
+    except Exception as e:
+        logger.error(f"Error getting tracked entries: {e}")
+        return []
+
+
+async def delete_tracked(gid: int) -> bool:
+    """Delete a tracked entry from the backend.
+
+    Args:
+        gid: Global ID to delete
+
+    Returns:
+        True if deleted successfully
+    """
+    async def do_request():
+        client = await get_http_client()
+        return await client.delete(f"{BACKEND_URL}/api/tracked/{gid}")
+
+    try:
+        response = await retry_async(do_request, max_retries=2)
+        if response.status_code in (200, 204):
+            logger.debug(f"Deleted stale tracked entry GID {gid}")
+            return True
+        elif response.status_code == 404:
+            # Already deleted
+            return True
+        else:
+            logger.warning(f"Failed to delete GID {gid}: {response.status_code}")
+            return False
+    except Exception as e:
+        logger.error(f"Error deleting GID {gid}: {e}")
+        return False
+
+
+async def cleanup_stale_entries(
+    active_gids: set,
+    analyzed_gids: set,
+    max_age_seconds: float = 60.0,
+) -> Dict[str, int]:
+    """Clean up stale GID entries that were never properly analyzed.
+
+    Removes entries that:
+    - Have no cutout image (analysis incomplete)
+    - Are NOT currently active in the scene
+    - Were NOT previously analyzed
+    - Are older than max_age_seconds
+
+    Args:
+        active_gids: Set of GIDs currently active in tracker
+        analyzed_gids: Set of GIDs that have been analyzed by Gemini
+        max_age_seconds: Minimum age before considering for cleanup
+
+    Returns:
+        Dict with cleanup statistics
+    """
+    stats = {"checked": 0, "deleted": 0, "kept_active": 0, "kept_analyzed": 0, "errors": 0}
+
+    try:
+        all_tracked = await get_all_tracked()
+        stats["checked"] = len(all_tracked)
+
+        # Debug: log what we got
+        if all_tracked and len(all_tracked) > 0:
+            sample = all_tracked[0]
+            if isinstance(sample, dict):
+                logger.debug(f"Cleanup: found {len(all_tracked)} entries, sample keys: {list(sample.keys())[:5]}")
+            else:
+                logger.warning(f"Cleanup: unexpected entry type: {type(sample)}, value: {str(sample)[:100]}")
+
+        now = datetime.now()
+
+        for entry in all_tracked:
+            # Skip non-dict entries (malformed data)
+            if not isinstance(entry, dict):
+                logger.debug(f"Skipping non-dict entry in tracked: {type(entry)}")
+                continue
+
+            gid = entry.get("gid")
+            if gid is None:
+                continue
+
+            # Keep if currently active in scene
+            if gid in active_gids:
+                stats["kept_active"] += 1
+                continue
+
+            # Keep if already analyzed (has cutout or in analyzed set)
+            analysis = entry.get("analysis") or {}
+            has_cutout = bool(analysis.get("cutout_image"))
+            if has_cutout or gid in analyzed_gids:
+                stats["kept_analyzed"] += 1
+                continue
+
+            # Check age - only delete if old enough
+            last_seen = entry.get("lastSeen") or entry.get("createdAt")
+            if last_seen:
+                try:
+                    # Parse ISO format timestamp
+                    if isinstance(last_seen, str):
+                        # Handle various ISO formats
+                        last_seen = last_seen.replace("Z", "+00:00")
+                        from datetime import timezone
+                        entry_time = datetime.fromisoformat(last_seen.split("+")[0])
+                        age_seconds = (now - entry_time).total_seconds()
+                        if age_seconds < max_age_seconds:
+                            continue  # Too recent, might still get analyzed
+                except Exception:
+                    pass  # If we can't parse time, proceed with deletion
+
+            # Delete stale entry
+            if await delete_tracked(gid):
+                stats["deleted"] += 1
+                logger.info(f"🗑️ Cleaned up stale GID {gid} (no cutout, not active)")
+            else:
+                stats["errors"] += 1
+
+    except Exception as e:
+        logger.error(f"Error during stale entry cleanup: {e}")
+        stats["errors"] += 1
+
+    if stats["deleted"] > 0:
+        logger.info(
+            f"🧹 Stale cleanup complete: deleted={stats['deleted']}, "
+            f"kept_active={stats['kept_active']}, kept_analyzed={stats['kept_analyzed']}"
+        )
+
+    return stats
+
+
+# =============================================================================
 # GLOBAL SYNC STATISTICS AGGREGATOR
 # =============================================================================
 

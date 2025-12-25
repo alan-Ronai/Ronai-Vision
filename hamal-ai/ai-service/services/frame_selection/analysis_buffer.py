@@ -116,6 +116,12 @@ class AnalysisBuffer:
         # Use OrderedDict to maintain insertion order for proper LRU eviction
         self._analyzed_tracks: OrderedDict = OrderedDict()  # track_id -> timestamp
         self._max_analyzed_history = 1000  # Max number of analyzed track IDs to remember
+
+        # GIDs that have been analyzed (persists across track_id changes)
+        # When a vehicle returns and gets a new track_id but same GID, we skip re-analysis
+        self._analyzed_gids: OrderedDict = OrderedDict()  # gid -> timestamp
+        self._max_analyzed_gids = 5000  # Max GIDs to remember (larger than tracks)
+
         self._lock = threading.Lock()
 
         # Callbacks for when analysis is ready
@@ -565,6 +571,62 @@ class AnalysisBuffer:
             buffer = self._buffers.get(track_id)
             return buffer is not None and buffer.analysis_triggered
 
+    def has_gid_been_analyzed(self, gid: int) -> bool:
+        """Check if a GID has been analyzed (persists across track_id changes).
+
+        When a vehicle returns and gets matched to an existing GID from the gallery,
+        this check prevents re-analyzing the same object.
+
+        Args:
+            gid: Global identifier (extracted from track_id like v_1_5 -> 5)
+
+        Returns:
+            True if this GID was already analyzed
+        """
+        with self._lock:
+            return gid in self._analyzed_gids
+
+    def mark_gid_analyzed(self, gid: int):
+        """Mark a GID as analyzed.
+
+        Called after successful Gemini analysis to prevent re-analysis
+        when the same object returns and matches via gallery.
+
+        Args:
+            gid: Global identifier to mark as analyzed
+        """
+        with self._lock:
+            self._analyzed_gids[gid] = time.time()
+            # Limit size - evict oldest
+            while len(self._analyzed_gids) > self._max_analyzed_gids:
+                self._analyzed_gids.popitem(last=False)
+            logger.debug(f"Marked GID {gid} as analyzed (total: {len(self._analyzed_gids)})")
+
+    def extract_gid_from_track_id(self, track_id) -> Optional[int]:
+        """Extract GID number from track_id string.
+
+        Args:
+            track_id: Track identifier like 'v_1_5' or 'p_2_10'
+
+        Returns:
+            GID number (e.g., 5) or None if not extractable
+        """
+        import re
+        if isinstance(track_id, str):
+            match = re.search(r'[vpt]_\d+_(\d+)', track_id)
+            if match:
+                return int(match.group(1))
+        return None
+
+    def get_all_analyzed_gids(self) -> set:
+        """Get all GIDs that have been analyzed.
+
+        Returns:
+            Set of GID integers that have been analyzed by Gemini
+        """
+        with self._lock:
+            return set(self._analyzed_gids.keys())
+
     def cleanup_track(self, track_id: int):
         """Clean up buffer for a deleted track.
 
@@ -618,6 +680,35 @@ class AnalysisBuffer:
                     "max_concurrent_buffers": self.config.max_concurrent_buffers,
                 }
             }
+
+    def cleanup_orphan_buffers(self, active_track_ids: set) -> int:
+        """Clean up buffers for tracks that no longer exist.
+
+        Prevents memory leak from buffers accumulating for deleted tracks.
+
+        Args:
+            active_track_ids: Set of currently active track IDs
+
+        Returns:
+            Number of orphan buffers cleaned up
+        """
+        with self._lock:
+            orphan_ids = []
+            for track_id in self._buffers:
+                if track_id not in active_track_ids:
+                    orphan_ids.append(track_id)
+
+            for track_id in orphan_ids:
+                buffer = self._buffers[track_id]
+                # Force trigger if not yet analyzed (gives it one last chance)
+                if not buffer.analysis_triggered:
+                    self._trigger_analysis(track_id, "orphan_cleanup")
+                del self._buffers[track_id]
+
+            if orphan_ids:
+                logger.debug(f"Cleaned up {len(orphan_ids)} orphan analysis buffers")
+
+            return len(orphan_ids)
 
     def clear(self):
         """Clear all buffers and reset state.

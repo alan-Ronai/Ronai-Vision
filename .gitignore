@@ -95,3 +95,6 @@ audio_storage/
 *.wav
 *.mp3
 *.aac
+
+
+go2rtc/go2rtc

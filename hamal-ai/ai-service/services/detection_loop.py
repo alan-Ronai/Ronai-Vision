@@ -304,14 +304,15 @@ class BBoxDrawer:
                             "רובה צלפים": "Sniper", "סכין": "Knife", "נשק קר": "Cold",
                         }.get(weapon_type, "")
 
-            # Check if predicted position
+            # Check if predicted position or low-confidence recovery
             is_predicted = det.get("is_predicted", False) or det.get("consecutive_misses", 0) > 0
+            is_low_confidence = confidence < 0.40  # Below typical YOLO threshold = recovery detection
 
             # Select box color
             if is_armed:
                 box_color = BBoxDrawer.BOX_COLORS["person_armed"]
-            elif is_predicted:
-                box_color = BBoxDrawer.BOX_COLORS["predicted"]
+            elif is_predicted or is_low_confidence:
+                box_color = BBoxDrawer.BOX_COLORS["predicted"]  # Gray for predicted/recovery
             else:
                 box_color = BBoxDrawer.BOX_COLORS.get(label, BBoxDrawer.BOX_COLORS["default"])
 
@@ -569,13 +570,15 @@ class DetectionLoop:
         # CRITICAL: Per-Class Confidence Thresholds
         # Different classes can have different minimum confidence scores
         # Higher threshold = fewer false positives for that class
+        # NOTE: All defaults now use YOLO_CONFIDENCE as minimum floor
+        base_conf = self.config.yolo_confidence
         self.class_confidence = {
-            "person": float(os.environ.get("CONF_PERSON", "0.35")),
-            "car": float(os.environ.get("CONF_CAR", "0.40")),
-            "truck": float(os.environ.get("CONF_TRUCK", "0.50")),
-            "bus": float(os.environ.get("CONF_BUS", "0.50")),
-            "motorcycle": float(os.environ.get("CONF_MOTORCYCLE", "0.40")),
-            "bicycle": float(os.environ.get("CONF_BICYCLE", "0.40")),
+            "person": max(base_conf, float(os.environ.get("CONF_PERSON", str(base_conf)))),
+            "car": max(base_conf, float(os.environ.get("CONF_CAR", str(base_conf)))),
+            "truck": max(base_conf, float(os.environ.get("CONF_TRUCK", str(base_conf)))),
+            "bus": max(base_conf, float(os.environ.get("CONF_BUS", str(base_conf)))),
+            "motorcycle": max(base_conf, float(os.environ.get("CONF_MOTORCYCLE", str(base_conf)))),
+            "bicycle": max(base_conf, float(os.environ.get("CONF_BICYCLE", str(base_conf)))),
         }
 
         # Parse CLASS_CONFIDENCE env var if provided (format: "person:0.35,car:0.40,truck:0.50")
@@ -584,6 +587,7 @@ class DetectionLoop:
             for item in class_conf_str.split(","):
                 if ":" in item:
                     class_name, threshold = item.split(":")
+                    # Allow CLASS_CONFIDENCE to override even below base_conf for specific classes
                     self.class_confidence[class_name.strip()] = float(threshold.strip())
 
         logger.info("=== Per-Class Confidence Thresholds ===")
@@ -634,7 +638,8 @@ class DetectionLoop:
 
         self._result_queue: Queue = Queue(maxsize=20)
         self._last_alert: Dict[str, float] = {}
-        self._last_gemini: Dict[str, float] = {}
+        self._last_gemini: OrderedDict = OrderedDict()  # Use OrderedDict for LRU eviction
+        self._last_gemini_max_size = 500  # Limit to prevent unbounded growth
         self._last_event: Dict[str, float] = {}  # Rate limiting for events
         self._http_client: Optional[httpx.AsyncClient] = None
         self._process_thread: Optional[threading.Thread] = None
@@ -775,6 +780,21 @@ class DetectionLoop:
             )
         else:
             logger.info("⚠️ Parallel detection DISABLED (set USE_PARALLEL_DETECTION=true to enable)")
+
+    def _update_gemini_cooldown(self, track_id: str):
+        """Update Gemini cooldown timestamp with LRU eviction to prevent memory leak.
+
+        Args:
+            track_id: Track identifier to update
+        """
+        # Move to end if exists, or add new entry
+        if track_id in self._last_gemini:
+            self._last_gemini.move_to_end(track_id)
+        self._last_gemini[track_id] = time.time()
+
+        # Evict oldest entries if over limit
+        while len(self._last_gemini) > self._last_gemini_max_size:
+            self._last_gemini.popitem(last=False)
 
     def on_frame(self, camera_id: str, frame: np.ndarray):
         """Callback when frame received from RTSP reader.
@@ -917,6 +937,9 @@ class DetectionLoop:
         # Start the rule engine periodic timer for time-based rules
         await self.rule_engine.start_periodic_timer()
 
+        # Start periodic stale entry cleanup (removes GIDs without cutouts)
+        self._cleanup_task = asyncio.create_task(self._periodic_stale_cleanup())
+
         logger.info("Detection loop started")
 
     async def stop(self):
@@ -930,6 +953,14 @@ class DetectionLoop:
 
         # Stop the rule engine periodic timer
         await self.rule_engine.stop_periodic_timer()
+
+        # Stop stale entry cleanup task
+        if hasattr(self, '_cleanup_task') and self._cleanup_task:
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
 
         if self._http_client:
             await self._http_client.aclose()
@@ -1164,61 +1195,67 @@ class DetectionLoop:
             self._timing_counts["detections_this_frame"] = num_detections
 
             # STEP 1.5: Pre-tracking ReID extraction for appearance-based matching
-            # CRITICAL OPTIMIZATION: Only extract ReID every N frames (not every frame!)
-            # ReID is the BIGGEST bottleneck (~2-3 seconds per frame on CPU)
-            # - IoU-based matching works well for most frames
-            # - ReID is only needed when tracks are lost or ambiguous
-            REID_EVERY_N_FRAMES = int(os.environ.get("REID_EVERY_N_FRAMES", "3"))  # Default: every 3 frames
-            self._reid_frame_counter = getattr(self, '_reid_frame_counter', 0) + 1
-            should_run_reid = (self._reid_frame_counter % REID_EVERY_N_FRAMES == 0)
-
+            # STRATEGY:
+            # - ALWAYS extract features for potentially NEW detections (needed for gallery matching)
+            # - Use IoU pre-check to identify which detections are likely NEW vs existing tracks
+            # - This ensures new objects always get features for gallery matching
             reid_extract_start = time.time()
             reid_extract_count = 0
 
-            if self.use_reid_features and self.bot_sort and should_run_reid:
-                # ALWAYS extract features for detections - even when no active tracks exist
-                # This is critical for gallery matching to work on NEW detections
-                # Without this, new objects never get features and can't match against gallery
-                MAX_REID_BATCH = int(os.environ.get("MAX_REID_BATCH", "5"))
+            if self.use_reid_features and self.bot_sort:
+                MAX_REID_BATCH = int(os.environ.get("MAX_REID_BATCH", "3"))  # Reduced from 5
                 reid_pre_count = 0
 
-                # BATCH extract ReID for person detections (single forward pass)
+                # Get current tracks to check which detections are "new" (no IoU match)
+                current_vehicle_tracks = self.bot_sort.get_active_tracks("vehicle", camera_id)
+                current_person_tracks = self.bot_sort.get_active_tracks("person", camera_id)
+
+                # Find detections that DON'T match any existing track (likely new objects)
+                def is_new_detection(det, existing_tracks, iou_threshold=0.3):
+                    """Check if detection doesn't match any existing track (likely new)."""
+                    for track in existing_tracks:
+                        iou = self._compute_iou_xywh(det.bbox, track.last_detection_bbox)
+                        if iou > iou_threshold:
+                            return False  # Matches existing track
+                    return True  # No match - likely new
+
+                # Extract features for NEW person detections only
                 if person_detections:
-                    # Get detections that need features (up to limit)
-                    dets_needing_features = [d for d in person_detections if d.feature is None][:MAX_REID_BATCH]
-                    if dets_needing_features:
+                    new_person_dets = [d for d in person_detections
+                                       if d.feature is None and is_new_detection(d, current_person_tracks)]
+                    if new_person_dets:
+                        dets_to_extract = new_person_dets[:MAX_REID_BATCH]
                         person_features = self._extract_reid_features_batch(
-                            frame, dets_needing_features, class_type="person"
+                            frame, dets_to_extract, class_type="person"
                         )
-                        # Assign features back to original detections
-                        for i, det in enumerate(dets_needing_features):
+                        for i, det in enumerate(dets_to_extract):
                             if i in person_features:
                                 det.feature = person_features[i]
                                 reid_pre_count += 1
                                 self._stats["reid_extractions"] += 1
-                        if dets_needing_features:
-                            logger.debug(f"Pre-track ReID: extracted {len([d for d in dets_needing_features if d.feature is not None])} person features")
+                        if dets_to_extract:
+                            logger.debug(f"Pre-track ReID: extracted {len([d for d in dets_to_extract if d.feature is not None])} NEW person features")
 
-                # BATCH extract ReID for vehicle detections (single forward pass)
+                # Extract features for NEW vehicle detections only
                 if vehicle_detections:
-                    # Get detections that need features (up to limit)
-                    dets_needing_features = [d for d in vehicle_detections if d.feature is None][:MAX_REID_BATCH]
-                    if dets_needing_features:
+                    new_vehicle_dets = [d for d in vehicle_detections
+                                        if d.feature is None and is_new_detection(d, current_vehicle_tracks)]
+                    if new_vehicle_dets:
+                        dets_to_extract = new_vehicle_dets[:MAX_REID_BATCH]
                         vehicle_features = self._extract_reid_features_batch(
-                            frame, dets_needing_features, class_type="vehicle"
+                            frame, dets_to_extract, class_type="vehicle"
                         )
-                        # Assign features back to original detections
-                        for i, det in enumerate(dets_needing_features):
+                        for i, det in enumerate(dets_to_extract):
                             if i in vehicle_features:
                                 det.feature = vehicle_features[i]
                                 reid_pre_count += 1
                                 self._stats["reid_extractions"] += 1
-                        if dets_needing_features:
-                            logger.debug(f"Pre-track ReID: extracted {len([d for d in dets_needing_features if d.feature is not None])} vehicle features")
+                        if dets_to_extract:
+                            logger.debug(f"Pre-track ReID: extracted {len([d for d in dets_to_extract if d.feature is not None])} NEW vehicle features")
 
                 reid_extract_count += reid_pre_count
                 if reid_pre_count > 0:
-                    logger.debug(f"Pre-tracking ReID (BATCHED): extracted {reid_pre_count} features total")
+                    logger.info(f"Pre-tracking ReID: extracted {reid_pre_count} features for NEW detections")
 
             reid_extract_elapsed = (time.time() - reid_extract_start) * 1000
             self._update_timing("reid_extract_ms", reid_extract_elapsed)
@@ -1619,7 +1656,8 @@ class DetectionLoop:
             )
 
         except Exception as e:
-            logger.error(f"Detection error for {camera_id}: {e}")
+            import traceback
+            logger.error(f"Detection error for {camera_id}: {e}\n{traceback.format_exc()}")
             return None
 
     def _extract_reid_feature(
@@ -2350,6 +2388,7 @@ class DetectionLoop:
                             class_id=candidate["class_id"],
                             class_name=candidate["class_name"],
                             feature=candidate["feature"],
+                            is_recovery=True,  # Mark as recovery detection for gray display
                         )
                     )
 
@@ -2494,10 +2533,16 @@ class DetectionLoop:
         the best frame is sent to Gemini.
         """
         # STEP 1: Start buffers for NEW tracks
+        # IMPORTANT: Check GID to avoid re-analyzing objects that return (gallery matches)
         for v in result.new_vehicles:
             track_id = v.get("track_id")
             if track_id and not self.analysis_buffer.is_buffering(track_id):
                 if not self.analysis_buffer.has_been_analyzed(track_id):
+                    # Check if this GID was already analyzed (prevents re-analysis on gallery match)
+                    gid = self.analysis_buffer.extract_gid_from_track_id(track_id)
+                    if gid and self.analysis_buffer.has_gid_been_analyzed(gid):
+                        logger.debug(f"Skipping analysis for {track_id}: GID {gid} already analyzed")
+                        continue
                     self.analysis_buffer.start_buffer(
                         track_id=track_id,
                         object_class=v.get("class", "vehicle"),
@@ -2508,6 +2553,11 @@ class DetectionLoop:
             track_id = p.get("track_id")
             if track_id and not self.analysis_buffer.is_buffering(track_id):
                 if not self.analysis_buffer.has_been_analyzed(track_id):
+                    # Check if this GID was already analyzed (prevents re-analysis on gallery match)
+                    gid = self.analysis_buffer.extract_gid_from_track_id(track_id)
+                    if gid and self.analysis_buffer.has_gid_been_analyzed(gid):
+                        logger.debug(f"Skipping analysis for {track_id}: GID {gid} already analyzed")
+                        continue
                     self.analysis_buffer.start_buffer(
                         track_id=track_id,
                         object_class="person",
@@ -2523,8 +2573,13 @@ class DetectionLoop:
             if not track_id:
                 continue
 
-            # Skip if already analyzed
+            # Skip if already analyzed (by track_id)
             if self.analysis_buffer.has_been_analyzed(track_id):
+                continue
+
+            # Skip if GID already analyzed (prevents re-analysis on gallery match)
+            gid = self.analysis_buffer.extract_gid_from_track_id(track_id)
+            if gid and self.analysis_buffer.has_gid_been_analyzed(gid):
                 continue
 
             # Ensure buffer exists (handles case where track wasn't in new_vehicles)
@@ -2560,8 +2615,13 @@ class DetectionLoop:
             if not track_id:
                 continue
 
-            # Skip if already analyzed
+            # Skip if already analyzed (by track_id)
             if self.analysis_buffer.has_been_analyzed(track_id):
+                continue
+
+            # Skip if GID already analyzed (prevents re-analysis on gallery match)
+            gid = self.analysis_buffer.extract_gid_from_track_id(track_id)
+            if gid and self.analysis_buffer.has_gid_been_analyzed(gid):
                 continue
 
             # Ensure buffer exists (handles case where track wasn't in new_persons)
@@ -2594,9 +2654,19 @@ class DetectionLoop:
 
         # STEP 3: Run triggered analyses (limit concurrent to avoid overloading Gemini)
         if analysis_tasks:
-            logger.info(f"Running {len(analysis_tasks)} Gemini analysis tasks (max 3)")
-            # Limit to 3 concurrent analyses
-            for i, task in enumerate(analysis_tasks[:3]):
+            # Only run first 3 tasks, cancel the rest to avoid unawaited coroutine warnings
+            tasks_to_run = analysis_tasks[:3]
+            tasks_to_skip = analysis_tasks[3:]
+
+            if tasks_to_skip:
+                logger.info(f"Running {len(tasks_to_run)} Gemini analysis tasks, skipping {len(tasks_to_skip)} (limit 3)")
+                # Close unawaited coroutines to prevent warnings
+                for task in tasks_to_skip:
+                    task.close()
+            else:
+                logger.info(f"Running {len(tasks_to_run)} Gemini analysis tasks")
+
+            for i, task in enumerate(tasks_to_run):
                 try:
                     await task
                 except Exception as e:
@@ -2687,14 +2757,21 @@ class DetectionLoop:
                 "camera_id": result.camera_id,
             }
 
-            # Update tracker with metadata
+            # Update tracker with metadata (check if tracker was cleared during analysis)
             if self.bot_sort:
+                if self.bot_sort.is_clearing():
+                    logger.debug(f"Skipping vehicle {track_id} metadata update: tracker being cleared")
+                    return
                 for track in self.bot_sort.get_active_tracks("vehicle", camera_id=result.camera_id):
                     if track.track_id == track_id:
                         track.metadata.update(metadata)
                         break
+                else:
+                    # Track no longer exists (was cleared)
+                    logger.debug(f"Vehicle track {track_id} no longer exists, skipping metadata update")
+                    return
 
-            self._last_gemini[track_id] = time.time()
+            self._update_gemini_cooldown(track_id)
 
             # Log what we're syncing (for debugging cutout issues)
             has_cutout = "cutout_image" in analysis and analysis["cutout_image"]
@@ -2711,6 +2788,11 @@ class DetectionLoop:
             sync_start = time.time()
             try:
                 await backend_sync.update_analysis(gid=track_id, analysis=analysis)
+                # Mark GID as analyzed to prevent re-analysis when vehicle returns
+                gid = self.analysis_buffer.extract_gid_from_track_id(track_id)
+                if gid:
+                    self.analysis_buffer.mark_gid_analyzed(gid)
+                    logger.debug(f"Marked vehicle GID {gid} as analyzed")
             except Exception as sync_error:
                 logger.warning(f"Backend sync error for vehicle {track_id}: {sync_error}")
             sync_elapsed = (time.time() - sync_start) * 1000
@@ -2816,14 +2898,21 @@ class DetectionLoop:
                 "camera_id": result.camera_id,
             }
 
-            # Update tracker with metadata
+            # Update tracker with metadata (check if tracker was cleared during analysis)
             if self.bot_sort:
+                if self.bot_sort.is_clearing():
+                    logger.debug(f"Skipping person {track_id} metadata update: tracker being cleared")
+                    return
                 for track in self.bot_sort.get_active_tracks("person", camera_id=result.camera_id):
                     if track.track_id == track_id:
                         track.metadata.update(metadata)
                         break
+                else:
+                    # Track no longer exists (was cleared)
+                    logger.debug(f"Person track {track_id} no longer exists, skipping metadata update")
+                    return
 
-            self._last_gemini[track_id] = time.time()
+            self._update_gemini_cooldown(track_id)
 
             # Log what we're syncing (for debugging cutout issues)
             has_cutout = "cutout_image" in analysis and analysis["cutout_image"]
@@ -2839,6 +2928,11 @@ class DetectionLoop:
             sync_start = time.time()
             try:
                 await backend_sync.update_analysis(gid=track_id, analysis=analysis)
+                # Mark GID as analyzed to prevent re-analysis when person returns
+                gid = self.analysis_buffer.extract_gid_from_track_id(track_id)
+                if gid:
+                    self.analysis_buffer.mark_gid_analyzed(gid)
+                    logger.debug(f"Marked person GID {gid} as analyzed")
             except Exception as sync_error:
                 logger.warning(f"Backend sync error for person {track_id}: {sync_error}")
             sync_elapsed = (time.time() - sync_start) * 1000
@@ -2937,7 +3031,7 @@ class DetectionLoop:
                             track.metadata.update(metadata)
                             break
 
-                self._last_gemini[track_id] = time.time()
+                self._update_gemini_cooldown(track_id)
                 # Note: gemini_calls now tracked in GeminiAnalyzer.get_call_count()
                 logger.debug(
                     f"Analyzed vehicle {track_id}: {analysis.get('manufacturer', '?')} {analysis.get('color', '?')}"
@@ -3000,7 +3094,7 @@ class DetectionLoop:
                             track.metadata.update(metadata)
                             break
 
-                self._last_gemini[track_id] = time.time()
+                self._update_gemini_cooldown(track_id)
                 # Note: gemini_calls now tracked in GeminiAnalyzer.get_call_count()
 
                 # Sync analysis to backend
@@ -3440,6 +3534,67 @@ class DetectionLoop:
             recovery_confidence = max(0.0, min(1.0, recovery_confidence))
             self.config.recovery_confidence = recovery_confidence
             logger.info(f"Recovery confidence changed to: {recovery_confidence}")
+
+    async def _periodic_stale_cleanup(self):
+        """Periodically clean up stale GID entries that were never analyzed.
+
+        Removes entries that:
+        - Have no cutout image (🚗 placeholder only)
+        - Are NOT currently active in the scene
+        - Were NOT previously analyzed by Gemini
+
+        Runs every 30 seconds to keep the GID store clean.
+        """
+        CLEANUP_INTERVAL = 30.0  # seconds between cleanup runs
+        MAX_AGE_SECONDS = 60.0  # entries must be at least this old to be cleaned
+
+        logger.info("🧹 Stale entry cleanup task started")
+
+        while self._running:
+            try:
+                await asyncio.sleep(CLEANUP_INTERVAL)
+
+                if not self._running:
+                    break
+
+                # Get active GIDs and track IDs from tracker
+                active_gids = set()
+                active_track_ids = set()
+                if self.bot_sort:
+                    active_gids = self.bot_sort.get_all_active_gids()
+                    active_track_ids = self.bot_sort.get_all_active_track_ids()
+
+                # Get analyzed GIDs from analysis buffer
+                analyzed_gids = set()
+                orphan_buffers_cleaned = 0
+                if self.analysis_buffer:
+                    analyzed_gids = self.analysis_buffer.get_all_analyzed_gids()
+                    # Clean up orphan analysis buffers (prevents memory leak)
+                    orphan_buffers_cleaned = self.analysis_buffer.cleanup_orphan_buffers(active_track_ids)
+
+                # Run backend stale entry cleanup
+                stats = await backend_sync.cleanup_stale_entries(
+                    active_gids=active_gids,
+                    analyzed_gids=analyzed_gids,
+                    max_age_seconds=MAX_AGE_SECONDS,
+                )
+
+                if stats["deleted"] > 0 or orphan_buffers_cleaned > 0:
+                    logger.info(
+                        f"🧹 Cleanup: removed {stats['deleted']} stale entries, "
+                        f"{orphan_buffers_cleaned} orphan buffers, "
+                        f"kept {stats['kept_active']} active, {stats['kept_analyzed']} analyzed"
+                    )
+
+            except asyncio.CancelledError:
+                logger.info("🧹 Stale entry cleanup task cancelled")
+                break
+            except Exception as e:
+                logger.error(f"🧹 Stale entry cleanup error: {e}")
+                # Continue running despite errors
+                await asyncio.sleep(5.0)
+
+        logger.info("🧹 Stale entry cleanup task stopped")
 
     def reset_gemini_state(self, reset_tracker: bool = True):
         """Reset Gemini analysis state to force re-analysis of all tracks.

@@ -44,6 +44,7 @@ class Detection:
     class_id: int
     class_name: str
     feature: Optional[np.ndarray] = None  # ReID feature vector
+    is_recovery: bool = False  # True if from low-confidence recovery pass
 
 
 class KalmanBoxTracker:
@@ -345,6 +346,10 @@ class BoTSORTTracker:
         # ReID Gallery for persistent matching across video loops
         self._gallery = gallery
 
+        # Session counter - incremented on clear to invalidate in-flight operations
+        self._session_id = 1
+        self._clearing = False  # Flag to indicate clearing is in progress
+
         # Stats
         self._stats = {
             "total_tracks": 0,
@@ -410,6 +415,9 @@ class BoTSORTTracker:
         # Only exclude GIDs active in THIS camera - allows cross-camera re-identification
         active_gids_this_camera = self._get_active_gids(object_type, camera_id)
 
+        # Track GIDs created in THIS frame to prevent duplicates within same frame
+        gids_created_this_frame: Dict[int, str] = {}  # gid -> track_id
+
         for i, detection in enumerate(detections):
             if i not in matched_detections:
                 reused_track_id = None
@@ -449,11 +457,47 @@ class BoTSORTTracker:
                             camera_id=camera_id,
                             confidence=detection.confidence,
                         )
+                    else:
+                        # NO GALLERY MATCH - check if any detection in THIS frame is similar
+                        # This prevents multiple GIDs for the same object detected multiple times in one frame
+                        threshold = self._gallery._get_threshold(object_type) if self._gallery else 0.5
+                        for existing_gid, existing_track_id in gids_created_this_frame.items():
+                            existing_track = tracks.get(existing_track_id)
+                            if existing_track and existing_track.feature is not None:
+                                similarity = self._gallery.cosine_similarity(detection.feature, existing_track.feature)
+                                if similarity > threshold:
+                                    # Same object as existing track in this frame - merge into it
+                                    prefix = "v" if object_type == "vehicle" else "p"
+                                    reused_track_id = f"{prefix}_{Track.session_counter}_{existing_gid}"
+                                    logger.info(
+                                        f"In-frame dedup: {object_type} merged into GID {existing_gid} "
+                                        f"(similarity={similarity:.3f})"
+                                    )
+                                    self._stats["gallery_matches"] += 1
+                                    break
 
-                # Create track (with reused ID if gallery matched)
+                # Create track (with reused ID if gallery matched or in-frame dedup)
                 track = Track(detection, track_id=reused_track_id, camera_id=camera_id, object_type=object_type)
                 tracks[track.track_id] = track
                 self._stats["total_tracks"] += 1
+
+                # CRITICAL: Add NEW tracks to gallery immediately so subsequent detections can match
+                # This prevents multiple GIDs for the same object appearing multiple times in the same frame
+                if reused_track_id is None and has_gallery and has_feature:
+                    # Extract GID from the new track_id
+                    match = re.search(r'[vpt]_\d+_(\d+)', track.track_id)
+                    if match:
+                        new_gid = int(match.group(1))
+                        self._gallery.add_or_update(
+                            gid=new_gid,
+                            feature=detection.feature,
+                            object_type=object_type,
+                            camera_id=camera_id,
+                            confidence=detection.confidence,
+                        )
+                        # Track this GID for in-frame deduplication
+                        gids_created_this_frame[new_gid] = track.track_id
+                        logger.debug(f"Immediately added new {object_type} GID {new_gid} to gallery")
 
                 # Only report as "new" when confirmed
                 if track.state == "confirmed":
@@ -466,8 +510,10 @@ class BoTSORTTracker:
                 self._stats["deleted_tracks"] += 1
 
         # STEP 5.5: Consolidate overlapping tracks (merge duplicates)
-        # This catches cases where multiple tracks were created for the same object
-        self._consolidate_overlapping_tracks(tracks, object_type)
+        # Only run every 10 frames to reduce CPU overhead
+        self._consolidation_counter = getattr(self, '_consolidation_counter', 0) + 1
+        if self._consolidation_counter % 10 == 0:
+            self._consolidate_overlapping_tracks(tracks, object_type)
 
         # STEP 6: Find newly confirmed tracks
         for track_id in matched_tracks:
@@ -654,7 +700,7 @@ class BoTSORTTracker:
 
                 if should_merge:
                     # Keep the older track (track1 if it has more hits, else track2)
-                    if track1.hit_count >= track2.hit_count:
+                    if track1.hits >= track2.hits:
                         to_delete.add(track2.track_id)
                     else:
                         to_delete.add(track1.track_id)
@@ -882,6 +928,29 @@ class BoTSORTTracker:
 
         return gids
 
+    def get_all_active_gids(self) -> set:
+        """Get all active GIDs across all object types and cameras.
+
+        Used for stale entry cleanup - to know which GIDs are still in scene.
+
+        Returns:
+            Set of all active GID integers
+        """
+        person_gids = self._get_active_gids('person')
+        vehicle_gids = self._get_active_gids('vehicle')
+        return person_gids | vehicle_gids
+
+    def get_all_active_track_ids(self) -> set:
+        """Get all active track IDs across all object types.
+
+        Used for analysis buffer cleanup - to identify orphan buffers.
+
+        Returns:
+            Set of all active track_id strings
+        """
+        track_ids = set(self._persons.keys()) | set(self._vehicles.keys())
+        return track_ids
+
     def sync_track_to_gallery(self, track: Track):
         """Sync a track's feature to the gallery for persistent storage.
 
@@ -947,6 +1016,55 @@ class BoTSORTTracker:
         if cleared_persons > 0 or cleared_vehicles > 0:
             logger.info(f"Cleared tracks for camera {camera_id}: {cleared_persons} persons, {cleared_vehicles} vehicles")
             self._stats["deleted_tracks"] += cleared_persons + cleared_vehicles
+
+    def clear_all(self) -> Dict[str, int]:
+        """Clear ALL tracks and reset state.
+
+        This is a full reset - increments session ID to invalidate in-flight operations.
+        Returns stats on what was cleared.
+        """
+        self._clearing = True
+        try:
+            stats = {
+                "persons": len(self._persons),
+                "vehicles": len(self._vehicles),
+                "session_id": self._session_id
+            }
+
+            self._persons.clear()
+            self._vehicles.clear()
+
+            # Reset GID counters
+            self._next_person_gid = 1
+            self._next_vehicle_gid = 1
+
+            # Increment session ID to invalidate any in-flight operations
+            self._session_id += 1
+
+            # Reset stats
+            self._stats = {
+                "total_tracks": 0,
+                "active_tracks": 0,
+                "deleted_tracks": 0,
+                "gallery_matches": 0,
+            }
+
+            logger.info(
+                f"🗑️ Tracker cleared: {stats['persons']} persons, {stats['vehicles']} vehicles. "
+                f"New session ID: {self._session_id}"
+            )
+
+            return stats
+        finally:
+            self._clearing = False
+
+    def get_session_id(self) -> int:
+        """Get current session ID. Used to validate in-flight operations."""
+        return self._session_id
+
+    def is_clearing(self) -> bool:
+        """Check if tracker is currently being cleared."""
+        return self._clearing
 
     def get_active_tracks_visible(self, object_type: str, camera_id: Optional[str] = None,
                                    max_frames_since_update: int = 5) -> List[Track]:

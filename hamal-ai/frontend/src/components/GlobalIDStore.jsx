@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useApp } from '../context/AppContext';
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3000';
+const AI_SERVICE_URL_BASE = import.meta.env.VITE_AI_SERVICE_URL || 'http://localhost:8000';
 
 // Helper to check if a value is a valid analysis result (not a placeholder)
 const isValidValue = (value) => {
@@ -45,6 +46,7 @@ export default function GlobalIDStore({ isOpen, onClose }) {
   });
   const [selectedObject, setSelectedObject] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [clearing, setClearing] = useState(false);
 
   // Fetch tracked objects
   const fetchObjects = useCallback(async () => {
@@ -79,6 +81,40 @@ export default function GlobalIDStore({ isOpen, onClose }) {
       console.error('Failed to fetch stats:', error);
     }
   }, []);
+
+  // Clear all tracking data (GID store + ReID gallery)
+  const clearAllTracking = async () => {
+    if (!window.confirm('האם אתה בטוח שברצונך לנקות את כל נתוני המעקב?\nפעולה זו תמחק את כל הזיהויים מהזיכרון ומהגלריה.')) {
+      return;
+    }
+
+    setClearing(true);
+    try {
+      const response = await fetch(`${AI_SERVICE_URL_BASE}/tracker/clear-all`, {
+        method: 'DELETE',
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to clear tracking data');
+      }
+
+      const result = await response.json();
+      console.log('Cleared tracking data:', result);
+
+      // Refresh the view
+      setObjects([]);
+      setSelectedObject(null);
+      await fetchStats();
+      await fetchObjects();
+
+      alert(`נוקו בהצלחה:\n- ${result.stats?.tracker_persons || 0} אנשים\n- ${result.stats?.tracker_vehicles || 0} רכבים\n- גלריית ReID נוקתה`);
+    } catch (error) {
+      console.error('Failed to clear tracking:', error);
+      alert('שגיאה בניקוי נתוני המעקב: ' + error.message);
+    } finally {
+      setClearing(false);
+    }
+  };
 
   // Initial fetch and refresh interval
   useEffect(() => {
@@ -268,6 +304,20 @@ export default function GlobalIDStore({ isOpen, onClose }) {
             className="bg-blue-600 hover:bg-blue-700 px-3 py-2 rounded text-sm transition-colors"
           >
             🔄 רענן
+          </button>
+
+          {/* Clear All */}
+          <button
+            onClick={clearAllTracking}
+            disabled={clearing}
+            className={`px-3 py-2 rounded text-sm transition-colors ${
+              clearing
+                ? 'bg-gray-600 cursor-wait'
+                : 'bg-red-600 hover:bg-red-700'
+            }`}
+            title="נקה את כל נתוני המעקב (GID Store + ReID Gallery)"
+          >
+            {clearing ? '🔄 מנקה...' : '🗑️ נקה הכל'}
           </button>
         </div>
 

@@ -1,18 +1,18 @@
 [
   {
-    "_id": "cam-1766600305484-ewzy8q7kl",
-    "cameraId": "test2",
-    "name": "test2",
+    "_id": "cam-1766651234774-rvxeo8xdo",
+    "cameraId": "test",
+    "name": "test",
     "location": "",
-    "rtspUrl": "assets/test2.mp4",
+    "rtspUrl": "rtsp://admin:ytcom123456@46.210.89.167:554/Streaming/channels/1/",
     "username": "",
     "password": "",
-    "type": "simulator",
+    "type": "rtsp",
     "aiEnabled": true,
-    "createdAt": "2025-12-24T18:18:25.484Z",
-    "updatedAt": "2025-12-24T21:33:05.830Z",
+    "createdAt": "2025-12-25T08:27:14.774Z",
+    "updatedAt": "2025-12-25T09:24:32.342Z",
     "status": "online",
-    "lastSeen": "2025-12-24T21:33:05.830Z",
+    "lastSeen": "2025-12-25T09:24:32.342Z",
     "errorMessage": "No frames received"
   }
 ]

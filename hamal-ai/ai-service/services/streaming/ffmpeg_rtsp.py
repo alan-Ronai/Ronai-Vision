@@ -58,6 +58,7 @@ class FFmpegStream:
         self._frames_read = 0
         self._reconnects = 0
         self._errors = 0
+        self._corrupted_frames = 0  # Frames skipped due to H264 corruption
 
     @property
     def is_connected(self) -> bool:
@@ -220,6 +221,14 @@ class FFmpegStream:
                 frame = np.frombuffer(raw, dtype=np.uint8)
                 frame = frame.reshape((self.config.height, self.config.width, 3))
 
+                # CORRUPTION DETECTION: Skip frames with H264 decode artifacts
+                # These cause CPU spikes when YOLO tries to process garbage data
+                if self._is_corrupted_frame(frame):
+                    self._corrupted_frames += 1
+                    if self._corrupted_frames % 10 == 1:  # Log every 10th
+                        logger.warning(f"Skipping corrupted frame for {self.camera_id} (total: {self._corrupted_frames})")
+                    continue
+
                 # Store latest frame
                 with self._frame_lock:
                     self._latest_frame = frame
@@ -247,6 +256,48 @@ class FFmpegStream:
             except:
                 pass
 
+    def _is_corrupted_frame(self, frame: np.ndarray) -> bool:
+        """Detect H264 decode artifacts that cause CPU spikes.
+
+        Common corruption patterns:
+        1. Green tint (missing color data) - high green channel relative to others
+        2. Black/near-black frame (decode failure)
+        3. Solid color blocks (macroblock errors)
+
+        Args:
+            frame: BGR numpy array
+
+        Returns:
+            True if frame appears corrupted
+        """
+        try:
+            # Quick brightness check - skip very dark frames (decode failure)
+            mean_brightness = np.mean(frame)
+            if mean_brightness < 5:  # Nearly black
+                return True
+
+            # Check for green tint (common H264 corruption artifact)
+            # In BGR format, index 1 is Green
+            b_mean = np.mean(frame[:, :, 0])
+            g_mean = np.mean(frame[:, :, 1])
+            r_mean = np.mean(frame[:, :, 2])
+
+            # If green is significantly higher than both red and blue, likely corrupt
+            # Normal video shouldn't have such extreme green dominance
+            if g_mean > 100 and g_mean > b_mean * 2 and g_mean > r_mean * 2:
+                return True
+
+            # Check for very low variance (solid color / stuck frame)
+            variance = np.var(frame)
+            if variance < 50:  # Very uniform frame
+                return True
+
+            return False
+
+        except Exception:
+            # If detection fails, assume frame is OK
+            return False
+
     def get_stats(self) -> dict:
         return {
             "camera_id": self.camera_id,
@@ -254,6 +305,7 @@ class FFmpegStream:
             "frames_read": self._frames_read,
             "reconnects": self._reconnects,
             "errors": self._errors,
+            "corrupted_frames": self._corrupted_frames,
             "frame_age": time.time() - self._frame_time if self._frame_time else None,
             "fps": self.config.fps
         }

@@ -126,12 +126,14 @@ class ReIDGallery:
         self._last_sync = 0
         self._sync_lock = asyncio.Lock()
         self._initialized = False
+        self._dirty = False  # Track if gallery has unsaved changes
 
         # Stats
         self._stats = {
             "matches_found": 0,
             "matches_missed": 0,
             "entries_added": 0,
+            "entries_updated": 0,
             "entries_expired": 0,
             "syncs_completed": 0,
         }
@@ -183,32 +185,32 @@ class ReIDGallery:
     async def _periodic_cleanup(self):
         """Periodically clean up expired entries and sync to backend/local."""
         cleanup_interval = 3600  # 1 hour
-        save_interval = 60  # 1 minute for local saves
-
-        last_save = time.time()
+        check_interval = 60  # Check every minute for dirty state
 
         while True:
             try:
-                await asyncio.sleep(min(cleanup_interval, save_interval))
+                await asyncio.sleep(check_interval)
 
                 now = time.time()
 
-                # Periodic save to local file (every minute)
-                if now - last_save >= save_interval:
+                # Only save if there are unsaved changes
+                if self._dirty:
                     self._save_to_local()
-                    last_save = now
+                    self._dirty = False
 
                 # Less frequent: cleanup expired entries (every hour)
-                if now % cleanup_interval < save_interval:
+                if now % cleanup_interval < check_interval:
                     removed = self.cleanup_expired()
                     if removed > 0:
                         logger.info(f"Periodic cleanup removed {removed} expired gallery entries")
+                        self._dirty = True  # Mark dirty after cleanup
                     # Sync to backend
                     await self.sync_all_to_backend()
 
             except asyncio.CancelledError:
-                # Final save before shutdown
-                self._save_to_local()
+                # Final save before shutdown (only if dirty)
+                if self._dirty:
+                    self._save_to_local()
                 break
             except Exception as e:
                 logger.error(f"Error in gallery periodic cleanup: {e}")
@@ -486,6 +488,8 @@ class ReIDGallery:
 
             # Move to end (most recently used)
             gallery.move_to_end(gid)
+            self._stats["entries_updated"] += 1
+            self._dirty = True  # Mark for save
 
         else:
             # Create new entry
@@ -501,6 +505,7 @@ class ReIDGallery:
             )
             gallery[gid] = entry
             self._stats["entries_added"] += 1
+            self._dirty = True  # Mark for save
 
             logger.info(
                 f"📥 Gallery NEW entry: {object_type} GID {gid} "
@@ -512,11 +517,6 @@ class ReIDGallery:
                 oldest_gid = next(iter(gallery))
                 del gallery[oldest_gid]
                 logger.debug(f"Evicted oldest gallery entry: {object_type} GID {oldest_gid}")
-
-            # Save to local file on first few entries, then every 10
-            entries_added = self._stats["entries_added"]
-            if entries_added <= 5 or entries_added % 10 == 0:
-                self._save_to_local()
 
         return entry
 
@@ -603,6 +603,31 @@ class ReIDGallery:
 
             except Exception as e:
                 logger.debug(f"Error syncing gallery to backend: {e}")
+
+    def clear(self):
+        """Clear all gallery entries and reset stats.
+
+        This is a full reset - clears both in-memory galleries and the local file.
+        """
+        persons_count = len(self._person_gallery)
+        vehicles_count = len(self._vehicle_gallery)
+
+        self._person_gallery.clear()
+        self._vehicle_gallery.clear()
+
+        # Reset stats
+        self._stats = {
+            "matches_found": 0,
+            "matches_missed": 0,
+            "entries_added": 0,
+            "entries_updated": 0,
+            "entries_expired": 0,
+        }
+
+        # Save empty gallery to local file
+        self._save_to_local()
+
+        logger.info(f"🗑️ Gallery cleared: {persons_count} persons, {vehicles_count} vehicles")
 
     def get_stats(self) -> Dict[str, Any]:
         """Get gallery statistics."""
