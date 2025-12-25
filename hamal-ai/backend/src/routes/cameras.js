@@ -640,12 +640,15 @@ router.post("/browser-webcam/:id/connected", async (req, res) => {
                 const producers = streamInfo?.producers || [];
 
                 // Check if any producer is WebRTC (not RTSP self-reference)
+                // Producer format: {format_name: "webrtc", protocol: "http+udp", ...}
                 const webrtcProducer = producers.find(p =>
-                    p.url && (p.url.startsWith('webrtc') || !p.url.includes('rtsp://localhost'))
+                    p.format_name === 'webrtc' ||
+                    (p.url && p.url.startsWith('webrtc')) ||
+                    (p.protocol && p.protocol.includes('udp'))
                 );
 
                 if (webrtcProducer) {
-                    console.log(`[Cameras] WebRTC producer confirmed: ${webrtcProducer.url}`);
+                    console.log(`[Cameras] WebRTC producer confirmed: ${webrtcProducer.format_name || webrtcProducer.url} (${webrtcProducer.bytes_recv || 0} bytes received)`);
                     hasRealProducer = true;
                     break;
                 }
