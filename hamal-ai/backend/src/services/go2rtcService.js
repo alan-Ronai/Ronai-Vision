@@ -295,7 +295,8 @@ class Go2rtcService {
       }
 
       // Skip browser-webcam type - these receive WebRTC WHIP input, don't add a source
-      if (camera.type === 'browser-webcam') {
+      // Also check by cameraId as a defensive measure
+      if (camera.type === 'browser-webcam' || streamId === 'browser-webcam') {
         console.log(`[go2rtc] Skipping ${streamId}: browser-webcam (receives WHIP input)`);
         results.push({
           camera: streamId,
