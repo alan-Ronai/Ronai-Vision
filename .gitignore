@@ -97,5 +97,4 @@ audio_storage/
 *.mp3
 *.aac
 
-
-go2rtc/go2rtc
+hamal-ai/go2rtc/go2rtc
