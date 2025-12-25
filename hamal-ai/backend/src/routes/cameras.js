@@ -597,6 +597,7 @@ router.post("/browser-webcam/start", async (req, res) => {
 /**
  * POST /api/cameras/browser-webcam/:id/connected
  * Called when browser successfully connects via WHIP
+ * NOTE: Does NOT auto-start AI detection - wait for actual WebRTC producer to be confirmed
  */
 router.post("/browser-webcam/:id/connected", async (req, res) => {
     try {
@@ -622,28 +623,59 @@ router.post("/browser-webcam/:id/connected", async (req, res) => {
             lastSeen: camera.lastSeen
         });
 
-        // Start AI detection on this stream
-        const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://localhost:8000';
+        console.log(`[Cameras] Browser webcam WebRTC connected: ${cameraId}`);
+        console.log(`[Cameras] Waiting for WebRTC producer to be confirmed before starting AI detection...`);
+
+        // Check if go2rtc has a real WebRTC producer (not RTSP self-reference)
+        // Poll for up to 5 seconds
         const GO2RTC_URL = process.env.GO2RTC_URL || 'http://localhost:1984';
+        const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://localhost:8000';
 
-        // AI service will consume from go2rtc's RTSP output
-        const rtspUrl = `rtsp://localhost:8554/${cameraId}`;
+        let hasRealProducer = false;
+        for (let i = 0; i < 10; i++) {
+            await new Promise(r => setTimeout(r, 500));
+            try {
+                const streamRes = await fetch(`${GO2RTC_URL}/api/streams?name=${cameraId}`);
+                const streamInfo = await streamRes.json();
+                const producers = streamInfo?.producers || [];
 
-        try {
-            const response = await fetch(
-                `${AI_SERVICE_URL}/detection/start/${cameraId}?rtsp_url=${encodeURIComponent(rtspUrl)}&camera_type=rtsp`,
-                { method: "POST" }
-            );
-            if (response.ok) {
-                console.log(`[Cameras] Started AI detection for browser webcam: ${cameraId}`);
+                // Check if any producer is WebRTC (not RTSP self-reference)
+                const webrtcProducer = producers.find(p =>
+                    p.url && (p.url.startsWith('webrtc') || !p.url.includes('rtsp://localhost'))
+                );
+
+                if (webrtcProducer) {
+                    console.log(`[Cameras] WebRTC producer confirmed: ${webrtcProducer.url}`);
+                    hasRealProducer = true;
+                    break;
+                }
+
+                console.log(`[Cameras] Waiting for WebRTC producer... (${i + 1}/10)`);
+            } catch (e) {
+                // Ignore errors during polling
             }
-        } catch (aiError) {
-            console.warn(`[Cameras] Could not start AI detection: ${aiError.message}`);
         }
 
-        console.log(`[Cameras] Browser webcam connected: ${cameraId}`);
+        if (hasRealProducer) {
+            // Now start AI detection
+            const rtspUrl = `rtsp://localhost:8554/${cameraId}`;
+            try {
+                const response = await fetch(
+                    `${AI_SERVICE_URL}/detection/start/${cameraId}?rtsp_url=${encodeURIComponent(rtspUrl)}&camera_type=rtsp`,
+                    { method: "POST" }
+                );
+                if (response.ok) {
+                    console.log(`[Cameras] Started AI detection for browser webcam: ${cameraId}`);
+                }
+            } catch (aiError) {
+                console.warn(`[Cameras] Could not start AI detection: ${aiError.message}`);
+            }
+        } else {
+            console.warn(`[Cameras] No WebRTC producer detected - AI detection NOT started`);
+            console.warn(`[Cameras] User may need to check WebRTC/UDP connectivity`);
+        }
 
-        res.json({ success: true, camera });
+        res.json({ success: true, camera, hasProducer: hasRealProducer });
     } catch (error) {
         console.error('[Cameras] Browser webcam connected error:', error);
         res.status(500).json({ error: error.message });
