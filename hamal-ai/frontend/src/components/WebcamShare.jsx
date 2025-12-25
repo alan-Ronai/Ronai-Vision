@@ -202,7 +202,44 @@ export default function WebcamShare({ onStreamStarted, onStreamStopped }) {
       });
       console.log('[WebcamShare] Remote description set');
 
-      // Step 5: Notify backend that connection is established
+      // Step 5: Wait for WebRTC connection to actually establish before notifying backend
+      // This ensures media is flowing and go2rtc has a producer
+      console.log('[WebcamShare] Waiting for connection state to become connected...');
+      await new Promise((resolve, reject) => {
+        // Check if already connected
+        if (pc.connectionState === 'connected') {
+          console.log('[WebcamShare] Already connected!');
+          resolve();
+          return;
+        }
+
+        const onStateChange = () => {
+          console.log('[WebcamShare] Connection state changed to:', pc.connectionState);
+          if (pc.connectionState === 'connected') {
+            pc.removeEventListener('connectionstatechange', onStateChange);
+            resolve();
+          } else if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+            pc.removeEventListener('connectionstatechange', onStateChange);
+            reject(new Error(`WebRTC connection ${pc.connectionState}`));
+          }
+        };
+
+        pc.addEventListener('connectionstatechange', onStateChange);
+
+        // Timeout after 15 seconds
+        setTimeout(() => {
+          pc.removeEventListener('connectionstatechange', onStateChange);
+          if (pc.connectionState === 'connected') {
+            resolve();
+          } else {
+            reject(new Error(`WebRTC connection timeout (state: ${pc.connectionState})`));
+          }
+        }, 15000);
+      });
+
+      console.log('[WebcamShare] WebRTC connected! Notifying backend...');
+
+      // Now notify backend - connection is actually established and media should be flowing
       await fetch(`${API_URL}/api/cameras/browser-webcam/${regData.camera.cameraId}/connected`, {
         method: 'POST'
       });
@@ -214,7 +251,7 @@ export default function WebcamShare({ onStreamStarted, onStreamStopped }) {
         onStreamStarted(regData.camera);
       }
 
-      // Handle connection state changes
+      // Handle connection state changes for disconnect/failure
       pc.addEventListener('connectionstatechange', () => {
         if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
           stopSharing();
