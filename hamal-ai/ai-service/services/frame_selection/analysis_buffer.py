@@ -699,22 +699,30 @@ class AnalysisBuffer:
                     orphan_ids.append(track_id)
 
             for track_id in orphan_ids:
-                buffer = self._buffers[track_id]
+                buffer = self._buffers.get(track_id)
+                if buffer is None:
+                    continue  # Already deleted (race condition or previous cleanup)
                 # Force trigger if not yet analyzed (gives it one last chance)
                 if not buffer.analysis_triggered:
                     self._trigger_analysis(track_id, "orphan_cleanup")
-                del self._buffers[track_id]
+                # Note: _trigger_analysis already deletes the buffer, but check just in case
+                if track_id in self._buffers:
+                    del self._buffers[track_id]
 
             if orphan_ids:
                 logger.debug(f"Cleaned up {len(orphan_ids)} orphan analysis buffers")
 
             return len(orphan_ids)
 
-    def clear(self):
+    def clear(self, clear_analyzed_gids: bool = False):
         """Clear all buffers and reset state.
 
         Note: This does NOT affect tracks stored in the backend.
         Only clears local buffering state.
+
+        Args:
+            clear_analyzed_gids: If True, also clear the analyzed GIDs tracking.
+                               Set to True for full reset (e.g., "clear all" button).
         """
         with self._lock:
             # Force trigger all pending analyses before clearing
@@ -725,7 +733,12 @@ class AnalysisBuffer:
 
             self._buffers.clear()
             self._analyzed_tracks.clear()
-            logger.info("Analysis buffer cleared (backend track data preserved)")
+
+            if clear_analyzed_gids:
+                self._analyzed_gids.clear()
+                logger.info("Analysis buffer fully cleared (including analyzed GIDs)")
+            else:
+                logger.info("Analysis buffer cleared (backend track data preserved)")
 
 
 # Global instance

@@ -225,8 +225,9 @@ class FFmpegStream:
                 # These cause CPU spikes when YOLO tries to process garbage data
                 if self._is_corrupted_frame(frame):
                     self._corrupted_frames += 1
-                    if self._corrupted_frames % 10 == 1:  # Log every 10th
-                        logger.warning(f"Skipping corrupted frame for {self.camera_id} (total: {self._corrupted_frames})")
+                    # Log first 5, then every 10th to avoid spam
+                    if self._corrupted_frames <= 5 or self._corrupted_frames % 10 == 0:
+                        logger.warning(f"[{self.camera_id}] Skipping corrupted frame #{self._corrupted_frames}")
                     continue
 
                 # Store latest frame
@@ -263,6 +264,8 @@ class FFmpegStream:
         1. Green tint (missing color data) - high green channel relative to others
         2. Black/near-black frame (decode failure)
         3. Solid color blocks (macroblock errors)
+        4. Extreme color channel imbalance
+        5. Block artifacts (sudden intensity jumps)
 
         Args:
             frame: BGR numpy array
@@ -274,28 +277,58 @@ class FFmpegStream:
             # Quick brightness check - skip very dark frames (decode failure)
             mean_brightness = np.mean(frame)
             if mean_brightness < 5:  # Nearly black
+                logger.debug(f"[{self.camera_id}] Corrupted: near-black frame (mean={mean_brightness:.1f})")
                 return True
 
             # Check for green tint (common H264 corruption artifact)
-            # In BGR format, index 1 is Green
+            # In BGR format, index 0=Blue, 1=Green, 2=Red
             b_mean = np.mean(frame[:, :, 0])
             g_mean = np.mean(frame[:, :, 1])
             r_mean = np.mean(frame[:, :, 2])
 
             # If green is significantly higher than both red and blue, likely corrupt
-            # Normal video shouldn't have such extreme green dominance
-            if g_mean > 100 and g_mean > b_mean * 2 and g_mean > r_mean * 2:
+            if g_mean > 80 and g_mean > b_mean * 1.8 and g_mean > r_mean * 1.8:
+                logger.debug(f"[{self.camera_id}] Corrupted: green tint (B={b_mean:.1f}, G={g_mean:.1f}, R={r_mean:.1f})")
+                return True
+
+            # Check for extreme color channel imbalance (any channel dominating)
+            max_channel = max(b_mean, g_mean, r_mean)
+            min_channel = min(b_mean, g_mean, r_mean)
+            if max_channel > 150 and min_channel < 30:
+                logger.debug(f"[{self.camera_id}] Corrupted: extreme channel imbalance (max={max_channel:.1f}, min={min_channel:.1f})")
                 return True
 
             # Check for very low variance (solid color / stuck frame)
             variance = np.var(frame)
             if variance < 50:  # Very uniform frame
+                logger.debug(f"[{self.camera_id}] Corrupted: low variance ({variance:.1f})")
+                return True
+
+            # Check for macroblock corruption: look for large uniform blocks
+            # Sample 8x8 blocks and check if any have near-zero variance (stuck macroblocks)
+            h, w = frame.shape[:2]
+            block_size = 16  # H264 macroblock size
+            corrupted_blocks = 0
+            total_blocks = 0
+
+            # Sample blocks across the frame
+            for y in range(0, h - block_size, block_size * 4):
+                for x in range(0, w - block_size, block_size * 4):
+                    block = frame[y:y+block_size, x:x+block_size]
+                    block_var = np.var(block)
+                    total_blocks += 1
+                    if block_var < 5:  # Very uniform block
+                        corrupted_blocks += 1
+
+            # If more than 20% of sampled blocks are uniform, likely corruption
+            if total_blocks > 0 and corrupted_blocks / total_blocks > 0.2:
+                logger.debug(f"[{self.camera_id}] Corrupted: {corrupted_blocks}/{total_blocks} uniform blocks detected")
                 return True
 
             return False
 
-        except Exception:
-            # If detection fails, assume frame is OK
+        except Exception as e:
+            logger.debug(f"[{self.camera_id}] Corruption detection error: {e}")
             return False
 
     def get_stats(self) -> dict:

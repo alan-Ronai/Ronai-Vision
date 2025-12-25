@@ -74,14 +74,18 @@ router.get('/status', (req, res) => {
 
 /**
  * GET /api/scenario/config
- * Get scenario configuration
+ * Get scenario configuration including variants
  */
 router.get('/config', (req, res) => {
   res.json({
     name: SCENARIO_CONFIG.name,
     displayName: SCENARIO_CONFIG.displayName,
     stages: SCENARIO_CONFIG.stages,
+    variants: SCENARIO_CONFIG.variants,
+    variantStages: SCENARIO_CONFIG.variantStages,
+    defaultVariant: SCENARIO_CONFIG.defaultVariant,
     thresholds: SCENARIO_CONFIG.thresholds,
+    armedThreshold: SCENARIO_CONFIG.thresholds.armedPersonsRequired,
     keywords: SCENARIO_CONFIG.keywords,
     messages: SCENARIO_CONFIG.messages,
     ui: SCENARIO_CONFIG.ui
@@ -584,6 +588,10 @@ router.post('/engine-event', async (req, res) => {
         break;
 
       case 'journal':
+        // Get cameraId from vehicle (stolen-vehicle variant) or first person (armed-person variant)
+        const journalCameraId = context?.vehicle?.cameraId ||
+                                context?.persons?.[0]?.cameraId ||
+                                null;
         io.emit('event:new', {
           type: 'alert',
           severity: params.severity || 'info',
@@ -592,7 +600,7 @@ router.post('/engine-event', async (req, res) => {
           timestamp: new Date().toISOString(),
           scenarioId,
           stage,
-          cameraId: context?.vehicle?.cameraId,
+          cameraId: journalCameraId,
           metadata: {
             vehicle: context?.vehicle,
             persons: context?.persons,
@@ -871,6 +879,47 @@ router.post('/test/add-armed-person', async (req, res) => {
     });
   } catch (error) {
     console.error('[Scenario] Test add armed person error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/scenario/test/start-armed
+ * Start scenario directly from armed person (alternative entry - no vehicle)
+ */
+router.post('/test/start-armed', async (req, res) => {
+  if (!SCENARIO_CONFIG.demo.enabled) {
+    return res.status(403).json({ error: 'Demo mode is disabled' });
+  }
+
+  try {
+    const manager = getScenarioManager();
+    if (!manager) {
+      return res.status(503).json({
+        error: 'Scenario manager not initialized'
+      });
+    }
+
+    const testPerson = {
+      trackId: Date.now(),
+      clothing: req.body.clothing || 'חולצה שחורה',
+      clothingColor: req.body.clothingColor || 'שחור',
+      weaponType: req.body.weaponType || 'רובה',
+      armed: true,
+      confidence: 0.9,
+      cameraId: req.body.cameraId || 'cam-1'
+    };
+
+    const triggered = await manager.handleArmedPersonEntry(testPerson);
+
+    res.json({
+      success: true,
+      triggered,
+      message: triggered ? 'Scenario started from armed person' : 'Scenario already active',
+      state: manager.getState()
+    });
+  } catch (error) {
+    console.error('[Scenario] Test start armed error:', error);
     res.status(500).json({ error: error.message });
   }
 });

@@ -1719,6 +1719,12 @@ function ScenarioFlowView({ scenario, activeScenario, onStageClick }) {
                             ⚡ אוטומטי
                           </span>
                         )}
+                        {/* Show variant-specific badge */}
+                        {stage.variantOnly && (
+                          <span className="bg-cyan-600 text-white px-2 py-0.5 rounded text-xs">
+                            {stage.variantOnly.includes('stolen-vehicle') ? '🚗' : '🔫'} {stage.variantOnly.join(', ')}
+                          </span>
+                        )}
                       </div>
                       <p className="text-sm text-gray-400 mt-1">{stage.description}</p>
                     </div>
@@ -2166,9 +2172,45 @@ function ActionCard({ action, index }) {
 function ScenarioConfigView({ scenario }) {
   const config = scenario.config || {};
   const context = scenario.context || {};
+  const variants = scenario.variants || [];
 
   return (
     <div className="space-y-4">
+      {/* Variants / Entry Points */}
+      {variants.length > 0 && (
+        <div className="bg-gray-800 rounded-lg p-4">
+          <h6 className="font-bold text-gray-300 mb-3 flex items-center gap-2">
+            <span>🔀</span> נקודות כניסה (וריאנטים)
+          </h6>
+          <div className="space-y-3">
+            {variants.map((variant) => (
+              <div key={variant.id} className="bg-gray-700 rounded-lg p-3">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-xl">{variant.icon || '▶️'}</span>
+                  <div>
+                    <h5 className="font-bold text-white">{variant.name}</h5>
+                    <p className="text-sm text-gray-400">{variant.description}</p>
+                  </div>
+                </div>
+                <div className="mt-2 text-xs">
+                  <span className="text-gray-500">שלב כניסה: </span>
+                  <span className="text-orange-400 font-mono">{variant.entryStage}</span>
+                </div>
+                {variant.stageFlow && (
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {variant.stageFlow.map((stage, i) => (
+                      <span key={i} className="text-xs bg-gray-600 px-1.5 py-0.5 rounded">
+                        {stage}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* General Settings */}
       <div className="bg-gray-800 rounded-lg p-4">
         <h6 className="font-bold text-gray-300 mb-3 flex items-center gap-2">

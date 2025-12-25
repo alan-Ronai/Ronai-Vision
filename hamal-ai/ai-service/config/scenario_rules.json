@@ -3,41 +3,110 @@
     {
       "_id": "armed-attack-scenario",
       "name": "התקפה חמושה",
-      "description": "תרחיש מלא של זיהוי רכב גנוב וחמושים - מזיהוי ראשוני ועד סיום האירוע",
+      "description": "תרחיש של זיהוי איום - רכב גנוב או חמושים",
       "enabled": true,
       "singleInstance": true,
+      "variants": [
+        {
+          "id": "stolen-vehicle",
+          "name": "רכב גנוב + חמושים",
+          "description": "זיהוי רכב גנוב, ואז המתנה לזיהוי חמושים",
+          "icon": "🚗",
+          "entryStage": "VEHICLE_DETECTED",
+          "trigger": {
+            "type": "detection",
+            "conditions": {
+              "objectType": "vehicle",
+              "hasLicensePlate": true,
+              "plateInStolenList": true
+            }
+          },
+          "stageFlow": [
+            "IDLE",
+            "VEHICLE_DETECTED",
+            "VEHICLE_ALERT",
+            "EMERGENCY_MODE",
+            "RESPONSE_INITIATED",
+            "DRONE_DISPATCHED",
+            "CIVILIAN_ALERT",
+            "CODE_BROADCAST",
+            "SOLDIER_VIDEO",
+            "NEW_CAMERA",
+            "SITUATION_END"
+          ],
+          "demoControls": [
+            {
+              "id": "start",
+              "label": "התחל תרחיש (רכב גנוב)",
+              "action": "start",
+              "color": "yellow",
+              "enabledWhen": "!active"
+            },
+            {
+              "id": "add-armed",
+              "label": "הוסף חמוש",
+              "labelTemplate": "הוסף חמוש ({armedCount}/{armedThreshold})",
+              "action": "add-armed-person",
+              "color": "red",
+              "enabledWhen": "stage === 'VEHICLE_ALERT'"
+            }
+          ]
+        },
+        {
+          "id": "armed-person",
+          "name": "חמוש זוהה",
+          "description": "זיהוי ישיר של אדם חמוש - מעבר מיידי לחירום",
+          "icon": "🔫",
+          "entryStage": "ARMED_PERSON_DETECTED",
+          "trigger": {
+            "type": "detection",
+            "conditions": {
+              "objectType": "person",
+              "armed": true
+            }
+          },
+          "stageFlow": [
+            "IDLE",
+            "ARMED_PERSON_DETECTED",
+            "EMERGENCY_MODE",
+            "RESPONSE_INITIATED",
+            "DRONE_DISPATCHED",
+            "CIVILIAN_ALERT",
+            "CODE_BROADCAST",
+            "SOLDIER_VIDEO",
+            "NEW_CAMERA",
+            "SITUATION_END"
+          ],
+          "demoControls": [
+            {
+              "id": "start",
+              "label": "התחל תרחיש (חמוש זוהה)",
+              "action": "start-armed",
+              "color": "red",
+              "enabledWhen": "!active"
+            }
+          ]
+        }
+      ],
       "stages": [
         {
           "id": "IDLE",
           "name": "מצב רגיל",
           "description": "מערכת במצב ניטור רגיל",
           "isInitial": true,
-          "transitions": [
-            {
-              "to": "VEHICLE_DETECTED",
-              "trigger": {
-                "type": "detection",
-                "conditions": {
-                  "objectType": "vehicle",
-                  "hasLicensePlate": true,
-                  "plateInStolenList": true
-                }
-              }
-            }
-          ]
+          "transitions": []
         },
         {
           "id": "VEHICLE_DETECTED",
           "name": "רכב זוהה",
           "description": "רכב גנוב זוהה במערכת",
+          "variantOnly": ["stolen-vehicle"],
           "autoTransition": true,
           "autoTransitionDelay": 0,
           "transitions": [
             {
               "to": "VEHICLE_ALERT",
-              "trigger": {
-                "type": "auto"
-              }
+              "trigger": { "type": "auto" }
             }
           ],
           "onEnter": [
@@ -62,13 +131,14 @@
           "id": "VEHICLE_ALERT",
           "name": "התראת רכב",
           "description": "התראה על רכב גנוב - ממתין לזיהוי חמושים",
+          "variantOnly": ["stolen-vehicle"],
           "transitions": [
             {
               "to": "EMERGENCY_MODE",
               "trigger": {
                 "type": "threshold",
                 "conditions": {
-                  "armedPersonCount": { "gte": 3 }
+                  "armedPersonCount": { "gte": 1 }
                 }
               }
             },
@@ -139,9 +209,55 @@
           ]
         },
         {
+          "id": "ARMED_PERSON_DETECTED",
+          "name": "חמוש זוהה",
+          "description": "אדם חמוש זוהה - נקודת כניסה חלופית. ממתין 4 שניות לאיסוף זיהויים נוספים.",
+          "variantOnly": ["armed-person"],
+          "autoTransition": true,
+          "autoTransitionDelay": 4000,
+          "gatheringWindow": true,
+          "transitions": [
+            {
+              "to": "EMERGENCY_MODE",
+              "trigger": { "type": "auto" }
+            }
+          ],
+          "onEnter": [
+            {
+              "type": "store_context",
+              "params": {
+                "key": "firstArmedPerson",
+                "fromDetection": true
+              }
+            },
+            {
+              "type": "track_armed_persons",
+              "params": {
+                "storeAs": "persons",
+                "countAs": "armedCount"
+              }
+            },
+            {
+              "type": "play_sound",
+              "params": {
+                "sound": "alert",
+                "repeatCount": 1
+              }
+            },
+            {
+              "type": "journal",
+              "params": {
+                "severity": "warning",
+                "title": "חמוש זוהה - אוסף מידע",
+                "description": "זוהה אדם חמוש, ממתין 4 שניות לזיהויים נוספים..."
+              }
+            }
+          ]
+        },
+        {
           "id": "EMERGENCY_MODE",
           "name": "מצב חירום",
-          "description": "זוהו 3+ חמושים - מצב חירום פעיל",
+          "description": "זוהה איום - מצב חירום פעיל",
           "transitions": [
             {
               "to": "RESPONSE_INITIATED",
@@ -168,16 +284,14 @@
           "onEnter": [
             {
               "type": "danger_mode",
-              "params": {
-                "active": true
-              }
+              "params": { "active": true }
             },
             {
               "type": "emergency_modal",
               "params": {
                 "title": "חדירה ודאית!",
                 "subtitle": "{armedCount} חמושים זוהו",
-                "showVehicle": true,
+                "showVehicle": "{hasVehicle}",
                 "showPersons": true
               }
             },
@@ -186,7 +300,7 @@
               "params": {
                 "severity": "critical",
                 "title": "חדירה ודאית",
-                "description": "זוהו {armedCount} חמושים\n\nפרטי רכב:\nלוחית רישוי: {vehicle.licensePlate}\nצבע: {vehicle.color}\nיצרן/דגם: {vehicle.make} {vehicle.model}\n\nחמושים:\n{persons_summary}"
+                "description": "זוהו {armedCount} חמושים\n{vehicleInfo}\nחמושים:\n{persons_summary}"
               }
             },
             {
@@ -260,9 +374,7 @@
             },
             {
               "type": "delay",
-              "params": {
-                "ms": 3000
-              }
+              "params": { "ms": 3000 }
             },
             {
               "type": "play_sound",
@@ -273,9 +385,7 @@
             },
             {
               "type": "delay",
-              "params": {
-                "ms": 3000
-              }
+              "params": { "ms": 3000 }
             },
             {
               "type": "simulation",
@@ -303,9 +413,7 @@
           "transitions": [
             {
               "to": "CIVILIAN_ALERT",
-              "trigger": {
-                "type": "auto"
-              }
+              "trigger": { "type": "auto" }
             }
           ],
           "onEnter": [
@@ -333,9 +441,7 @@
             },
             {
               "type": "delay",
-              "params": {
-                "ms": 3000
-              }
+              "params": { "ms": 3000 }
             },
             {
               "type": "simulation",
@@ -452,9 +558,7 @@
           "onEnter": [
             {
               "type": "soldier_video_panel",
-              "params": {
-                "open": true
-              }
+              "params": { "open": true }
             },
             {
               "type": "journal",
@@ -489,9 +593,7 @@
           "onEnter": [
             {
               "type": "new_camera_dialog",
-              "params": {
-                "open": true
-              }
+              "params": { "open": true }
             }
           ]
         },
@@ -504,9 +606,7 @@
           "onEnter": [
             {
               "type": "danger_mode",
-              "params": {
-                "active": false
-              }
+              "params": { "active": false }
             },
             {
               "type": "stop_all_sounds",
@@ -532,9 +632,7 @@
             },
             {
               "type": "cleanup",
-              "params": {
-                "delay": 5000
-              }
+              "params": { "delay": 5000 }
             }
           ]
         }
@@ -545,7 +643,8 @@
         "armedCount": 0,
         "startedAt": null,
         "acknowledged": false,
-        "endReason": null
+        "endReason": null,
+        "activeVariant": null
       },
       "config": {
         "stolenVehicles": [
@@ -553,15 +652,70 @@
           { "plate": "123-45-678", "color": "לבן", "make": "יונדאי", "model": "i20" },
           { "plate": "TEST-001", "color": "אדום", "make": "מזדה", "model": "3" }
         ],
-        "armedThreshold": 3,
+        "armedThreshold": 1,
+        "reannounceThreshold": 2,
         "keywords": {
           "drone": ["רחפן"],
           "code": ["צפרדע"],
           "end": ["חדל חדל חדל", "חדל", "סוף אירוע"]
         }
+      },
+      "demoConfig": {
+        "dataSources": [
+          {
+            "id": "fake",
+            "name": "נתונים מדומים",
+            "description": "נתוני הדגמה מוכנים מראש"
+          },
+          {
+            "id": "real",
+            "name": "נתוני סצנה אמיתיים",
+            "description": "שימוש באובייקטים שזוהו בסצנה הנוכחית"
+          }
+        ],
+        "sharedControls": [
+          {
+            "id": "drone-keyword",
+            "label": "שלח \"רחפן\"",
+            "action": "transcription",
+            "params": { "text": "רחפן" },
+            "color": "purple",
+            "enabledWhen": "stage === 'RESPONSE_INITIATED'"
+          },
+          {
+            "id": "code-keyword",
+            "label": "שלח \"צפרדע\"",
+            "action": "transcription",
+            "params": { "text": "צפרדע" },
+            "color": "orange",
+            "enabledWhen": "stage === 'CIVILIAN_ALERT'"
+          },
+          {
+            "id": "end-keyword",
+            "label": "שלח \"חדל\" (סיום)",
+            "action": "transcription",
+            "params": { "text": "חדל חדל חדל" },
+            "color": "green",
+            "enabledWhen": "stage === 'NEW_CAMERA'"
+          },
+          {
+            "id": "advance",
+            "label": "קדם שלב (דלג)",
+            "action": "advance",
+            "color": "blue",
+            "enabledWhen": "active"
+          },
+          {
+            "id": "reset",
+            "label": "אפס תרחיש",
+            "action": "reset",
+            "color": "gray",
+            "enabledWhen": "active"
+          }
+        ]
       }
     }
   ],
-  "version": "1.0.0",
+  "version": "2.0.0",
   "lastUpdated": null
 }

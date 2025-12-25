@@ -52,6 +52,7 @@ class ScenarioRuleEngine:
     def __init__(self, config_path: Optional[str] = None):
         self.config_path = config_path or self._default_config_path()
         self.scenarios: Dict[str, Dict] = {}
+        self.global_config: Dict = {}
         self.active_scenario: Optional[ScenarioContext] = None
         self.http_client = httpx.AsyncClient(timeout=10.0)
         self._load_config()
@@ -70,10 +71,19 @@ class ScenarioRuleEngine:
             for scenario in data.get('scenarios', []):
                 self.scenarios[scenario['_id']] = scenario
 
+            # Load global config options
+            self.global_config = data.get('config', {})
+
             logger.info(f"Loaded {len(self.scenarios)} scenario rules")
         except Exception as e:
             logger.error(f"Failed to load scenario rules: {e}")
             self.scenarios = {}
+            self.global_config = {}
+
+    @property
+    def reannounce_threshold(self) -> int:
+        """Get the threshold for re-announcing armed person count changes. Default: 2"""
+        return self.global_config.get('reannounceThreshold', 2)
 
     def reload_config(self):
         """Reload configuration from file"""
@@ -155,9 +165,16 @@ class ScenarioRuleEngine:
         """
         Handle armed person detection.
 
-        Returns True if this triggered a transition.
+        Can START a scenario if no scenario is active (alternative entry point).
+        Can also trigger transitions within an active scenario.
+
+        Returns True if this triggered a transition or scenario start.
         """
+        # If no active scenario, check if we should start one from armed person detection
         if not self.active_scenario:
+            started = await self._try_start_from_armed_person(person_data)
+            if started:
+                return True
             return False
 
         # Deduplicate: Check if this person (by track_id) is already in the list
@@ -175,12 +192,38 @@ class ScenarioRuleEngine:
             logger.debug(f"Updated existing armed person track {track_id}")
         else:
             # New person - add to context
+            previous_count = self.active_scenario.armed_count
             self.active_scenario.persons.append(person_data)
             logger.debug(f"Added new armed person track {track_id}")
 
-        self.active_scenario.armed_count = len([p for p in self.active_scenario.persons if p.get('armed')])
+            # Update count
+            self.active_scenario.armed_count = len([p for p in self.active_scenario.persons if p.get('armed')])
 
-        logger.info(f"Armed person detected. Total: {self.active_scenario.armed_count}")
+            logger.info(f"Armed person detected. Total: {self.active_scenario.armed_count}")
+
+            # Re-announce if count increased significantly AFTER EMERGENCY_MODE was entered
+            # (i.e., after the initial TTS announcement)
+            # Uses configurable threshold from config (default: 2)
+            if (self.active_scenario.current_stage == 'EMERGENCY_MODE' or
+                self.active_scenario.current_stage in ['RESPONSE_INITIATED', 'DRONE_DISPATCHED']):
+                count_increase = self.active_scenario.armed_count - previous_count
+                if count_increase >= self.reannounce_threshold:
+                    # Send updated TTS announcement
+                    new_count = self.active_scenario.armed_count
+                    persons_desc = self._build_persons_descriptions()
+                    update_message = f"עדכון: זוהו {new_count} חמושים כעת. {persons_desc}"
+                    await self._send_tts(update_message)
+                    logger.info(f"Re-announced armed count: {previous_count} -> {new_count} (threshold: {self.reannounce_threshold})")
+
+                    # Also send journal and backend update
+                    await self._send_action_to_backend('journal', {
+                        'severity': 'critical',
+                        'title': f'עדכון: {new_count} חמושים זוהו',
+                        'description': f'מספר החמושים עלה מ-{previous_count} ל-{new_count}\n{self._build_persons_summary()}'
+                    })
+
+        # Ensure count is current
+        self.active_scenario.armed_count = len([p for p in self.active_scenario.persons if p.get('armed')])
 
         # Check for threshold transitions
         await self._check_threshold_transitions()
@@ -192,6 +235,86 @@ class ScenarioRuleEngine:
         })
 
         return True
+
+    async def _try_start_from_armed_person(self, person_data: Dict) -> bool:
+        """
+        Try to start a scenario from an armed person detection.
+
+        This is the alternative entry point that bypasses the stolen vehicle check.
+        Looks for scenarios with IDLE -> ARMED_PERSON_DETECTED transition.
+
+        Returns True if scenario was started.
+        """
+        for scenario_id, scenario in self.scenarios.items():
+            if not scenario.get('enabled', True):
+                continue
+
+            # Skip if singleInstance and we already have an active scenario
+            if self.active_scenario and scenario.get('singleInstance', True):
+                continue
+
+            # Find IDLE stage and check for armed person trigger
+            stages = scenario.get('stages', [])
+            idle_stage = next((s for s in stages if s.get('isInitial')), None)
+            if not idle_stage:
+                continue
+
+            # Check transitions for armed person detection
+            for transition in idle_stage.get('transitions', []):
+                trigger = transition.get('trigger', {})
+                if trigger.get('type') != 'detection':
+                    continue
+
+                conditions = trigger.get('conditions', {})
+                if conditions.get('objectType') == 'person' and conditions.get('armed') == True:
+                    # This scenario accepts armed person as entry point
+                    target_stage = transition.get('to')
+                    logger.info(f"Armed person detected, starting scenario {scenario_id} at stage {target_stage}")
+
+                    # Start the scenario with armed person instead of vehicle
+                    await self._start_scenario_from_armed(scenario_id, target_stage, person_data)
+                    return True
+
+        return False
+
+    async def _start_scenario_from_armed(self, scenario_id: str, start_stage: str, person_data: Dict):
+        """Start a scenario from armed person detection (alternative entry point)."""
+        scenario = self.scenarios.get(scenario_id)
+        if not scenario:
+            return
+
+        # Find the target stage
+        stage = self._get_stage(scenario, start_stage)
+        if not stage:
+            logger.error(f"Start stage {start_stage} not found for scenario {scenario_id}")
+            return
+
+        # Create scenario context (no vehicle in this case)
+        self.active_scenario = ScenarioContext(
+            scenario_id=f"{scenario_id}-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+            rule_id=scenario_id,
+            current_stage=start_stage,
+            started_at=datetime.now(),
+            vehicle=None  # No vehicle in armed person entry
+        )
+
+        # Add the first armed person to context
+        self.active_scenario.persons.append(person_data)
+        self.active_scenario.armed_count = 1
+
+        logger.info(f"Started scenario {self.active_scenario.scenario_id} from armed person detection")
+
+        # Notify backend
+        await self._notify_backend('started', {
+            'scenarioId': self.active_scenario.scenario_id,
+            'ruleId': scenario_id,
+            'vehicle': None,
+            'entryPoint': 'armed_person',
+            'firstArmedPerson': person_data
+        })
+
+        # Execute stage actions and check for auto-transition
+        await self._enter_stage(stage)
 
     async def handle_transcription(self, text: str) -> bool:
         """
@@ -520,28 +643,57 @@ class ScenarioRuleEngine:
                 # Replace placeholders
                 value = value.replace('{armedCount}', str(self.active_scenario.armed_count))
 
+                # Vehicle info
                 if self.active_scenario.vehicle:
                     for vkey, vval in self.active_scenario.vehicle.items():
-                        value = value.replace(f'{{vehicle.{vkey}}}', str(vval or ''))
+                        value = value.replace(f'{{vehicle.{vkey}}}', str(vval or 'לא זוהה'))
+                    # Vehicle info summary
+                    if '{vehicleInfo}' in value:
+                        v = self.active_scenario.vehicle
+                        vehicle_info = f"רכב: {v.get('licensePlate', 'לא זוהה')} | צבע: {v.get('color', 'לא זוהה')} | {v.get('make', '')} {v.get('model', '')}".strip()
+                        value = value.replace('{vehicleInfo}', vehicle_info)
+                    value = value.replace('{hasVehicle}', 'true')
+                else:
+                    # No vehicle - clear vehicle placeholders
+                    value = value.replace('{vehicleInfo}', '')
+                    value = value.replace('{hasVehicle}', 'false')
+                    # Clear any remaining vehicle.X placeholders
+                    import re
+                    value = re.sub(r'\{vehicle\.[^}]+\}', 'לא זוהה', value)
+
+                # First armed person info (for armed-person variant)
+                if self.active_scenario.persons and len(self.active_scenario.persons) > 0:
+                    first_person = self.active_scenario.persons[0]
+                    for pkey, pval in first_person.items():
+                        value = value.replace(f'{{firstArmedPerson.{pkey}}}', str(pval or 'לא זוהה'))
+                else:
+                    import re
+                    value = re.sub(r'\{firstArmedPerson\.[^}]+\}', 'לא זוהה', value)
 
                 # Generate persons summary
                 if '{persons_summary}' in value:
                     summary = self._build_persons_summary()
-                    value = value.replace('{persons_summary}', summary)
+                    value = value.replace('{persons_summary}', summary if summary else 'אין נתונים')
 
                 if '{persons_descriptions}' in value:
                     desc = self._build_persons_descriptions()
-                    value = value.replace('{persons_descriptions}', desc)
+                    value = value.replace('{persons_descriptions}', desc if desc else 'אין תיאור')
 
                 if '{end_reason}' in value:
-                    value = value.replace('{end_reason}', self.active_scenario.end_reason or 'הסתיים')
+                    reason_map = {
+                        'false_alarm': 'אזעקת שווא',
+                        'neutralized': 'נוטרל',
+                        'manual': 'סיום ידני'
+                    }
+                    reason = self.active_scenario.end_reason or 'הסתיים'
+                    value = value.replace('{end_reason}', reason_map.get(reason, reason))
 
                 if '{duration}' in value:
                     if self.active_scenario.started_at:
                         duration = datetime.now() - self.active_scenario.started_at
                         minutes = int(duration.total_seconds() // 60)
                         seconds = int(duration.total_seconds() % 60)
-                        value = value.replace('{duration}', f'{minutes}:{seconds:02d}')
+                        value = value.replace('{duration}', f'{minutes} דקות, {seconds} שניות')
 
             result[key] = value
 
@@ -555,10 +707,16 @@ class ScenarioRuleEngine:
         lines = []
         for i, person in enumerate(self.active_scenario.persons, 1):
             parts = [f'חמוש #{i}']
-            if person.get('clothing'):
-                parts.append(f"לבוש: {person['clothing']}")
-            if person.get('weaponType'):
+            if person.get('weaponType') and person['weaponType'] != 'לא זוהה':
                 parts.append(f"נשק: {person['weaponType']}")
+            if person.get('clothing') and person['clothing'] != 'לא זוהה':
+                parts.append(f"לבוש: {person['clothing']}")
+            if person.get('clothingColor') and person['clothingColor'] != 'לא זוהה':
+                parts.append(f"צבע: {person['clothingColor']}")
+            if person.get('ageRange') and person['ageRange'] != 'לא זוהה':
+                parts.append(f"גיל: {person['ageRange']}")
+            if person.get('cameraId'):
+                parts.append(f"מצלמה: {person['cameraId']}")
             lines.append(' | '.join(parts))
 
         return '\n'.join(lines)
@@ -752,12 +910,17 @@ class ScenarioRuleEngine:
             duration = params.get('duration', 60)
 
             # Record on the camera where the scenario is happening
+            # Try vehicle first (stolen-vehicle variant), then persons (armed-person variant)
             camera_id = None
-            if self.active_scenario and self.active_scenario.vehicle:
-                camera_id = self.active_scenario.vehicle.get('cameraId')
+            if self.active_scenario:
+                if self.active_scenario.vehicle:
+                    camera_id = self.active_scenario.vehicle.get('cameraId')
+                elif self.active_scenario.persons and len(self.active_scenario.persons) > 0:
+                    # Armed-person variant: get camera from first armed person
+                    camera_id = self.active_scenario.persons[0].get('cameraId')
 
             if not camera_id:
-                logger.warning("🎬 No camera ID available for recording")
+                logger.warning("🎬 No camera ID available for recording (no vehicle or person)")
                 return
 
             recording_id = recording_manager.start_recording(

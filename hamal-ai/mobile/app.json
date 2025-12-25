@@ -18,7 +18,9 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.hamal.soldier",
       "infoPlist": {
-        "NSCameraUsageDescription": "אפליקציה זו זקוקה לגישה למצלמה לצילום והעלאת סרטונים לחמ\"ל"
+        "NSCameraUsageDescription": "אפליקציה זו זקוקה לגישה למצלמה לצילום והעלאת סרטונים לחמ\"ל",
+        "NSPhotoLibraryUsageDescription": "אפליקציה זו זקוקה לגישה לגלריה לבחירת סרטונים",
+        "NSMicrophoneUsageDescription": "אפליקציה זו זקוקה לגישה למיקרופון להקלטת סרטונים"
       }
     },
     "android": {
@@ -29,7 +31,9 @@
       "package": "com.hamal.soldier",
       "permissions": [
         "android.permission.CAMERA",
-        "android.permission.RECORD_AUDIO"
+        "android.permission.RECORD_AUDIO",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.READ_MEDIA_VIDEO"
       ]
     },
     "web": {
@@ -42,6 +46,19 @@
         {
           "cameraPermission": "אפליקציה זו זקוקה לגישה למצלמה",
           "microphonePermission": "אפליקציה זו זקוקה לגישה למיקרופון"
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "אפליקציה זו זקוקה לגישה לגלריה לבחירת סרטונים"
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "אפליקציה זו זקוקה לגישה לגלריה לבחירת סרטונים",
+          "savePhotosPermission": "אפליקציה זו זקוקה להרשאה לשמירת סרטונים"
         }
       ]
     ]

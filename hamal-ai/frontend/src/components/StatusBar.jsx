@@ -1,9 +1,9 @@
 import { useApp } from '../context/AppContext';
 import { useScenario } from '../context/ScenarioContext';
 
-export default function StatusBar({ onOpenAIStats }) {
+export default function StatusBar({ onOpenAIStats, onOpenActiveScenarios }) {
   const { connected, cameras, events, isEmergency } = useApp();
-  const { soundVolume, setSoundVolume, soundMuted, setSoundMuted } = useScenario();
+  const { soundVolume, setSoundVolume, soundMuted, setSoundMuted, scenario } = useScenario();
 
   const onlineCameras = cameras.filter(c => c.status === 'online').length;
   const criticalEvents = events.filter(e => e.severity === 'critical' && !e.acknowledged).length;
@@ -54,12 +54,18 @@ export default function StatusBar({ onOpenAIStats }) {
           <span className="text-sm">{onlineCameras}/{cameras.length} מצלמות</span>
         </div>
 
-        {/* Alert counts */}
-        {criticalEvents > 0 && (
-          <div className="flex items-center gap-2 bg-red-600 px-2 py-1 rounded animate-pulse">
+        {/* Alert counts - clickable to show active scenarios */}
+        {(criticalEvents > 0 || scenario?.active) && (
+          <button
+            onClick={onOpenActiveScenarios}
+            className="flex items-center gap-2 bg-red-600 hover:bg-red-500 px-2 py-1 rounded animate-pulse cursor-pointer transition-colors"
+            title="לחץ להצגת אירועים פעילים"
+          >
             <span>🚨</span>
-            <span className="text-sm font-bold">{criticalEvents} קריטי</span>
-          </div>
+            <span className="text-sm font-bold">
+              {criticalEvents > 0 ? `${criticalEvents} קריטי` : 'תרחיש פעיל'}
+            </span>
+          </button>
         )}
 
         {warningEvents > 0 && (

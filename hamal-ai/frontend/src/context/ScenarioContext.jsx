@@ -47,6 +47,8 @@ export function ScenarioProvider({ children }) {
   const [scenario, setScenario] = useState({
     active: false,
     stage: STAGES.IDLE,
+    variant: null,
+    variantInfo: null,
     scenarioId: null,
     startedAt: null,
     vehicle: null,
@@ -193,6 +195,8 @@ export function ScenarioProvider({ children }) {
       active: true,
       scenarioId: data.scenarioId,
       stage: data.toStage,
+      variant: data.context?.variant || prev.variant,
+      variantInfo: data.context?.variantInfo || prev.variantInfo,
       vehicle: data.context?.vehicle || prev.vehicle,
       persons: data.context?.persons || prev.persons,
       armedCount: data.context?.armedCount || prev.armedCount,
@@ -211,6 +215,8 @@ export function ScenarioProvider({ children }) {
       active: true,
       scenarioId: data.scenarioId || prev.scenarioId,
       stage: data.stage || prev.stage,
+      variant: data.context?.variant || data.variant || prev.variant,
+      variantInfo: data.context?.variantInfo || data.variantInfo || prev.variantInfo,
       vehicle: data.context?.vehicle || prev.vehicle,
       persons: data.context?.persons || prev.persons,
       armedCount: data.context?.armedCount || prev.armedCount,
@@ -334,6 +340,8 @@ export function ScenarioProvider({ children }) {
     setScenario({
       active: false,
       stage: STAGES.IDLE,
+      variant: null,
+      variantInfo: null,
       scenarioId: null,
       startedAt: null,
       vehicle: null,
@@ -351,6 +359,19 @@ export function ScenarioProvider({ children }) {
     stopAllSounds();
   }, []);
 
+  // Sound file mapping - maps sound names to audio files in /sounds/
+  const SOUND_FILES = {
+    'alarm': 'alarm.mp3',
+    'alert': 'alert.mp3',
+    'phoneRing': 'phone-ring.mp3',
+    'phone-ring': 'phone-ring.mp3',
+    'phoneDial': 'phone-dial.mp3',
+    'phone-dial': 'phone-dial.mp3',
+    'droneTakeoff': 'drone-takeoff.mp3',
+    'drone-takeoff': 'drone-takeoff.mp3',
+    'success': 'success.mp3',
+  };
+
   // Sound functions
   const playSound = useCallback((soundName, loop = false, volume = null, repeatCount = 1) => {
     // Use global volume if not specified, apply mute
@@ -361,8 +382,55 @@ export function ScenarioProvider({ children }) {
       return;
     }
 
+    // Try to play audio file first, then fall back to oscillator
+    const soundFile = SOUND_FILES[soundName];
+    if (soundFile) {
+      try {
+        const audio = new Audio(`/sounds/${soundFile}`);
+        audio.volume = effectiveVolume;
+        audio.loop = loop;
+
+        // Handle repeat count for non-looping sounds
+        let playedCount = 0;
+        const playAudio = () => {
+          audio.currentTime = 0;
+          audio.play().catch(err => {
+            console.warn(`[ScenarioContext] Audio file not found: ${soundFile}, using oscillator fallback`);
+            playOscillatorSound(soundName, loop, effectiveVolume, repeatCount);
+          });
+        };
+
+        audio.onended = () => {
+          playedCount++;
+          if (!loop && playedCount < repeatCount) {
+            playAudio();
+          } else if (!loop) {
+            setActiveSounds(prev => prev.filter(s => s !== soundName));
+            delete audioRef.current[soundName];
+          }
+        };
+
+        audio.onerror = () => {
+          console.warn(`[ScenarioContext] Audio file error: ${soundFile}, using oscillator fallback`);
+          playOscillatorSound(soundName, loop, effectiveVolume, repeatCount);
+        };
+
+        audioRef.current[soundName] = { audio };
+        setActiveSounds(prev => [...prev, soundName]);
+        playAudio();
+        return;
+      } catch (error) {
+        console.warn('[ScenarioContext] Audio error, using oscillator:', error);
+      }
+    }
+
+    // Fallback to oscillator
+    playOscillatorSound(soundName, loop, effectiveVolume, repeatCount);
+  }, [soundVolume, soundMuted]);
+
+  // Oscillator-based sound (fallback when audio files not available)
+  const playOscillatorSound = useCallback((soundName, loop, effectiveVolume, repeatCount) => {
     try {
-      // Generate sound using Web Audio API
       const audioContext = new (window.AudioContext || window.webkitAudioContext)();
       const oscillator = audioContext.createOscillator();
       const gainNode = audioContext.createGain();
@@ -485,14 +553,20 @@ export function ScenarioProvider({ children }) {
 
       setActiveSounds(prev => [...prev, soundName]);
     } catch (error) {
-      console.error('[ScenarioContext] Sound error:', error);
+      console.error('[ScenarioContext] Oscillator sound error:', error);
     }
-  }, [soundVolume, soundMuted]);
+  }, []);
 
   const stopSound = useCallback((soundName) => {
     try {
       const ref = audioRef.current[soundName];
       if (ref) {
+        // Stop HTML5 Audio element
+        if (ref.audio) {
+          ref.audio.pause();
+          ref.audio.currentTime = 0;
+        }
+        // Stop oscillator
         if (ref.oscillator) {
           ref.oscillator.stop();
         }
@@ -606,6 +680,20 @@ export function ScenarioProvider({ children }) {
     }
   }, []);
 
+  const testStartArmedScenario = useCallback(async (cameraId) => {
+    try {
+      const response = await fetch(`${API_URL}/api/scenario/test/start-armed`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cameraId }),
+      });
+      return response.ok;
+    } catch (error) {
+      console.error('[ScenarioContext] Test start armed error:', error);
+      return false;
+    }
+  }, []);
+
   const testAddArmedPerson = useCallback(async () => {
     try {
       const response = await fetch(`${API_URL}/api/scenario/test/add-armed-person`, {
@@ -690,6 +778,7 @@ export function ScenarioProvider({ children }) {
 
     // Test functions
     testStartScenario,
+    testStartArmedScenario,
     testAddArmedPerson,
     testAdvanceStage,
     testTranscription,

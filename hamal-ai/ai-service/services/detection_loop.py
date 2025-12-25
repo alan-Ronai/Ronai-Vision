@@ -2533,16 +2533,19 @@ class DetectionLoop:
         the best frame is sent to Gemini.
         """
         # STEP 1: Start buffers for NEW tracks
-        # IMPORTANT: Check GID to avoid re-analyzing objects that return (gallery matches)
+        # NOTE: Gallery-matched tracks are forced to re-analyze since they might be different objects
         for v in result.new_vehicles:
             track_id = v.get("track_id")
+            is_gallery_match = v.get("is_gallery_match", False)
             if track_id and not self.analysis_buffer.is_buffering(track_id):
                 if not self.analysis_buffer.has_been_analyzed(track_id):
-                    # Check if this GID was already analyzed (prevents re-analysis on gallery match)
+                    # Check if this GID was already analyzed - but FORCE re-analysis for gallery matches
                     gid = self.analysis_buffer.extract_gid_from_track_id(track_id)
-                    if gid and self.analysis_buffer.has_gid_been_analyzed(gid):
+                    if gid and self.analysis_buffer.has_gid_been_analyzed(gid) and not is_gallery_match:
                         logger.debug(f"Skipping analysis for {track_id}: GID {gid} already analyzed")
                         continue
+                    if is_gallery_match:
+                        logger.info(f"🔄 Gallery match {track_id} (GID {gid}) - forcing re-analysis")
                     self.analysis_buffer.start_buffer(
                         track_id=track_id,
                         object_class=v.get("class", "vehicle"),
@@ -2551,13 +2554,16 @@ class DetectionLoop:
 
         for p in result.new_persons:
             track_id = p.get("track_id")
+            is_gallery_match = p.get("is_gallery_match", False)
             if track_id and not self.analysis_buffer.is_buffering(track_id):
                 if not self.analysis_buffer.has_been_analyzed(track_id):
-                    # Check if this GID was already analyzed (prevents re-analysis on gallery match)
+                    # Check if this GID was already analyzed - but FORCE re-analysis for gallery matches
                     gid = self.analysis_buffer.extract_gid_from_track_id(track_id)
-                    if gid and self.analysis_buffer.has_gid_been_analyzed(gid):
+                    if gid and self.analysis_buffer.has_gid_been_analyzed(gid) and not is_gallery_match:
                         logger.debug(f"Skipping analysis for {track_id}: GID {gid} already analyzed")
                         continue
+                    if is_gallery_match:
+                        logger.info(f"🔄 Gallery match {track_id} (GID {gid}) - forcing re-analysis")
                     self.analysis_buffer.start_buffer(
                         track_id=track_id,
                         object_class="person",
@@ -2570,6 +2576,7 @@ class DetectionLoop:
 
         for v in result.tracked_vehicles:
             track_id = v.get("track_id")
+            is_gallery_match = v.get("is_gallery_match", False)
             if not track_id:
                 continue
 
@@ -2577,9 +2584,9 @@ class DetectionLoop:
             if self.analysis_buffer.has_been_analyzed(track_id):
                 continue
 
-            # Skip if GID already analyzed (prevents re-analysis on gallery match)
+            # Skip if GID already analyzed - but NOT for gallery matches (they need re-analysis)
             gid = self.analysis_buffer.extract_gid_from_track_id(track_id)
-            if gid and self.analysis_buffer.has_gid_been_analyzed(gid):
+            if gid and self.analysis_buffer.has_gid_been_analyzed(gid) and not is_gallery_match:
                 continue
 
             # Ensure buffer exists (handles case where track wasn't in new_vehicles)
@@ -2612,6 +2619,7 @@ class DetectionLoop:
 
         for p in result.tracked_persons:
             track_id = p.get("track_id")
+            is_gallery_match = p.get("is_gallery_match", False)
             if not track_id:
                 continue
 
@@ -2619,9 +2627,9 @@ class DetectionLoop:
             if self.analysis_buffer.has_been_analyzed(track_id):
                 continue
 
-            # Skip if GID already analyzed (prevents re-analysis on gallery match)
+            # Skip if GID already analyzed - but NOT for gallery matches (they need re-analysis)
             gid = self.analysis_buffer.extract_gid_from_track_id(track_id)
-            if gid and self.analysis_buffer.has_gid_been_analyzed(gid):
+            if gid and self.analysis_buffer.has_gid_been_analyzed(gid) and not is_gallery_match:
                 continue
 
             # Ensure buffer exists (handles case where track wasn't in new_persons)
@@ -2964,8 +2972,9 @@ class DetectionLoop:
                         track_id=track_id,
                         armed=True,
                         weapon_type=analysis.get("weaponType") or analysis.get("סוג_נשק"),
-                        clothing=analysis.get("clothingDescription") or analysis.get("תיאור_ביגוד"),
+                        clothing=analysis.get("clothing") or analysis.get("תיאור_ביגוד"),
                         clothing_color=analysis.get("clothingColor") or analysis.get("צבע_ביגוד"),
+                        age_range=analysis.get("ageRange") or analysis.get("גיל"),
                         confidence=frame_metadata.get("quality_score", 0),
                         camera_id=result.camera_id,
                         bbox=list(bbox) if bbox else None,
@@ -3534,6 +3543,38 @@ class DetectionLoop:
             recovery_confidence = max(0.0, min(1.0, recovery_confidence))
             self.config.recovery_confidence = recovery_confidence
             logger.info(f"Recovery confidence changed to: {recovery_confidence}")
+
+    def clear_state(self):
+        """Clear all detection loop state for a full reset.
+
+        Called when user clicks "Clear All" button.
+        Clears analysis buffer, analyzed GIDs tracking, and cooldowns.
+        """
+        logger.info("🗑️ Clearing detection loop state...")
+
+        # Clear analysis buffer including analyzed GIDs
+        if self.analysis_buffer:
+            self.analysis_buffer.clear(clear_analyzed_gids=True)
+
+        # Clear Gemini cooldown tracking
+        self._gemini_cooldowns.clear()
+
+        # Clear camera event cooldowns
+        self._event_cooldowns.clear()
+
+        # Clear ReID cache
+        self._reid_cache = ReIDFeatureCache()
+
+        # Reset stats
+        self._stats = {
+            "frames_processed": 0,
+            "detections": 0,
+            "tracks": 0,
+            "alerts": 0,
+            "analysis_requests": 0,
+        }
+
+        logger.info("✅ Detection loop state cleared")
 
     async def _periodic_stale_cleanup(self):
         """Periodically clean up stale GID entries that were never analyzed.

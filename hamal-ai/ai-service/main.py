@@ -1799,12 +1799,14 @@ async def clear_all_tracking():
 
     # 4. Clear backend tracked objects
     try:
-        backend_url = os.environ.get("BACKEND_URL", "http://localhost:3001")
+        backend_url = os.environ.get("BACKEND_URL", "http://localhost:3000")
         async with httpx.AsyncClient() as client:
             response = await client.delete(f"{backend_url}/api/tracked/clear-all", timeout=5.0)
             if response.status_code == 200:
                 stats["backend_cleared"] = True
                 logger.info("Cleared backend tracked objects")
+            else:
+                logger.warning(f"Backend clear failed: HTTP {response.status_code}")
     except Exception as e:
         logger.warning(f"Error clearing backend: {e}")
 

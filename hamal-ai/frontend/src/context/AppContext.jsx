@@ -68,7 +68,12 @@ export function AppProvider({ children }) {
     // Event listeners
     newSocket.on('event:new', (event) => {
       console.log('New event:', event);
-      setEvents(prev => [event, ...prev].slice(0, 100));
+      // Ensure event has a unique ID for acknowledge functionality
+      const eventWithId = {
+        ...event,
+        id: event.id || `evt-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+      };
+      setEvents(prev => [eventWithId, ...prev].slice(0, 100));
 
       // Check for simulation events - support multiple field locations
       if (event.type === 'simulation') {
@@ -441,11 +446,19 @@ export function AppProvider({ children }) {
     setEvents([]);
   }, []);
 
+  // Acknowledge/dismiss a specific event by id
+  const acknowledgeEvent = useCallback((eventId) => {
+    setEvents(prev => prev.map(e =>
+      e.id === eventId ? { ...e, acknowledged: true } : e
+    ));
+  }, []);
+
   const value = {
     socket,
     connected,
     events,
     clearEvents,
+    acknowledgeEvent,
     cameras,
     selectedCamera,
     selectCamera,

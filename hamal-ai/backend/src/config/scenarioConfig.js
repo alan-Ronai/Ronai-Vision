@@ -12,12 +12,46 @@ export const SCENARIO_CONFIG = {
   displayNameEn: "Armed Attack",
 
   // =========================================================================
+  // VARIANT DEFINITIONS
+  // =========================================================================
+  variants: {
+    "stolen-vehicle": {
+      id: "stolen-vehicle",
+      name: "רכב גנוב + חמושים",
+      description: "זיהוי רכב גנוב, ואז המתנה לזיהוי חמושים",
+      icon: "🚗",
+      entryStage: "vehicle_detected",
+      stageFlow: [
+        "idle", "vehicle_detected", "vehicle_alert", "emergency_mode",
+        "response_initiated", "drone_dispatched", "civilian_alert",
+        "code_broadcast", "soldier_video", "new_camera", "situation_end"
+      ]
+    },
+    "armed-person": {
+      id: "armed-person",
+      name: "חמוש זוהה",
+      description: "זיהוי ישיר של אדם חמוש - מעבר מיידי לחירום",
+      icon: "🔫",
+      entryStage: "armed_person_detected",
+      stageFlow: [
+        "idle", "armed_person_detected", "emergency_mode",
+        "response_initiated", "drone_dispatched", "civilian_alert",
+        "code_broadcast", "soldier_video", "new_camera", "situation_end"
+      ]
+    }
+  },
+
+  // Default variant
+  defaultVariant: "stolen-vehicle",
+
+  // =========================================================================
   // STAGE DEFINITIONS
   // =========================================================================
   stages: {
     IDLE: "idle",
     VEHICLE_DETECTED: "vehicle_detected",
     VEHICLE_ALERT: "vehicle_alert",
+    ARMED_PERSON_DETECTED: "armed_person_detected",
     ARMED_PERSONS_DETECTED: "armed_persons_detected",
     EMERGENCY_MODE: "emergency_mode",
     RESPONSE_INITIATED: "response_initiated",
@@ -29,12 +63,18 @@ export const SCENARIO_CONFIG = {
     SITUATION_END: "situation_end"
   },
 
+  // Stages specific to each variant
+  variantStages: {
+    "stolen-vehicle": ["vehicle_detected", "vehicle_alert"],
+    "armed-person": ["armed_person_detected"]
+  },
+
   // =========================================================================
   // THRESHOLDS
   // =========================================================================
   thresholds: {
     // Minimum armed persons to trigger emergency mode
-    armedPersonsRequired: 3,
+    armedPersonsRequired: 1,
 
     // Minimum confidence for detections
     minVehicleConfidence: 0.5,

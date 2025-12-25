@@ -59,6 +59,7 @@ class ScenarioManager extends EventEmitter {
       return {
         active: false,
         stage: STAGES.IDLE,
+        variant: null,
         context: null
       };
     }
@@ -66,6 +67,8 @@ class ScenarioManager extends EventEmitter {
     return {
       active: this.isActive(),
       stage: this.scenario.stage,
+      variant: this.scenario.variant,
+      variantInfo: this.config.variants?.[this.scenario.variant] || null,
       scenarioId: this.scenario.id,
       startedAt: this.scenario.startedAt,
       vehicle: this.scenario.vehicle,
@@ -79,24 +82,45 @@ class ScenarioManager extends EventEmitter {
   }
 
   /**
-   * Initialize a new scenario
+   * Get available variants
    */
-  _initScenario(vehicleData) {
+  getVariants() {
+    return this.config.variants || {};
+  }
+
+  /**
+   * Check if current stage is valid for the active variant
+   */
+  isStageInVariant(stage, variant) {
+    const variantConfig = this.config.variants?.[variant];
+    if (!variantConfig) return true; // No variant restrictions
+    return variantConfig.stageFlow.includes(stage);
+  }
+
+  /**
+   * Initialize a new scenario
+   * @param {Object} data - Initial data (vehicle or person)
+   * @param {string} variant - Variant ID ('stolen-vehicle' or 'armed-person')
+   */
+  _initScenario(data, variant = 'stolen-vehicle') {
     const id = `armed-attack-${Date.now()}`;
+    const isVehicleVariant = variant === 'stolen-vehicle';
+    const initialStage = isVehicleVariant ? STAGES.VEHICLE_DETECTED : STAGES.ARMED_PERSON_DETECTED;
 
     this.scenario = {
       id,
-      stage: STAGES.VEHICLE_DETECTED,
+      variant,
+      stage: initialStage,
       startedAt: new Date().toISOString(),
-      vehicle: vehicleData,
-      persons: [],
-      armedCount: 0,
+      vehicle: isVehicleVariant ? data : null,
+      persons: isVehicleVariant ? [] : [data],
+      armedCount: isVehicleVariant ? 0 : 1,
       acknowledged: false,
       recording: null,
       stageHistory: [{
-        stage: STAGES.VEHICLE_DETECTED,
+        stage: initialStage,
         enteredAt: new Date().toISOString(),
-        data: { vehicle: vehicleData }
+        data: isVehicleVariant ? { vehicle: data } : { person: data }
       }],
       currentStageData: {},
       soldierVideoPath: null,
@@ -154,8 +178,16 @@ class ScenarioManager extends EventEmitter {
    */
   async _executeStageActions(stage, data) {
     switch (stage) {
+      case STAGES.VEHICLE_DETECTED:
+        // Auto-transition handled by caller
+        break;
+
       case STAGES.VEHICLE_ALERT:
         await this._handleVehicleAlert(data);
+        break;
+
+      case STAGES.ARMED_PERSON_DETECTED:
+        await this._handleArmedPersonDetected(data);
         break;
 
       case STAGES.ARMED_PERSONS_DETECTED:
@@ -254,11 +286,56 @@ class ScenarioManager extends EventEmitter {
   }
 
   /**
+   * ARMED_PERSON_DETECTED stage handler (armed-person variant entry)
+   */
+  async _handleArmedPersonDetected(data) {
+    const person = this.scenario.persons[0];
+    const cameraId = person?.cameraId || data.cameraId || 'unknown';
+
+    // 1. Play critical alert sound
+    this._emitSound('alert', { loop: false });
+
+    // 2. Build person details for journal
+    const personDetails = [
+      person?.weaponType ? `סוג נשק: ${person.weaponType}` : null,
+      person?.clothing ? `לבוש: ${person.clothing}` : null,
+      person?.clothingColor ? `צבע לבוש: ${person.clothingColor}` : null,
+      `מצלמה: ${cameraId}`
+    ].filter(Boolean).join('\n');
+
+    // 3. Create journal entry
+    await this._createEvent({
+      type: 'alert',
+      severity: 'critical',
+      title: 'אדם חמוש זוהה!',
+      description: `זוהה אדם חמוש ללא רכב גנוב מזוהה\n${personDetails}`,
+      cameraId,
+      metadata: {
+        scenarioId: this.scenario.id,
+        person,
+        variant: 'armed-person'
+      }
+    });
+
+    // 4. Auto-focus camera
+    this._emitCameraFocus(cameraId, 'זיהוי אדם חמוש', 'critical');
+
+    console.log('[ScenarioManager] Armed person entry - auto-transitioning to EMERGENCY_MODE');
+    // Note: auto-transition to EMERGENCY_MODE is handled by caller (handleArmedPersonEntry)
+  }
+
+  /**
    * EMERGENCY_MODE stage handler
+   * Supports both stolen-vehicle and armed-person variants
    */
   async _handleEmergencyMode(data) {
     const persons = this.scenario.persons;
     const count = this.scenario.armedCount;
+    const vehicle = this.scenario.vehicle; // May be null in armed-person variant
+    const variant = this.scenario.variant || 'stolen-vehicle';
+
+    // Determine camera ID from vehicle or first person
+    const cameraId = vehicle?.cameraId || persons[0]?.cameraId || 'unknown';
 
     // 1. Activate danger mode UI
     this._emitDangerMode(true);
@@ -267,60 +344,76 @@ class ScenarioManager extends EventEmitter {
     this._emitEmergencyModal({
       title: this.config.ui.emergencyTitle,
       subtitle: this.config.ui.emergencySubtitle.replace('{count}', count),
-      vehicle: this.scenario.vehicle,
+      vehicle: vehicle, // May be null
       persons,
-      cameraId: this.scenario.vehicle.cameraId
+      cameraId,
+      variant
     });
 
-    // 3. Journal entry with detailed description
-    const vehicle = this.scenario.vehicle;
+    // 3. Build person details for journal
     const personDetails = persons.map((p, i) => {
       const parts = [`חמוש #${i + 1}`];
       if (p.clothing) parts.push(`לבוש: ${p.clothing}`);
+      if (p.clothingColor) parts.push(`צבע: ${p.clothingColor}`);
       if (p.weaponType) parts.push(`נשק: ${p.weaponType}`);
+      if (p.cameraId) parts.push(`מצלמה: ${p.cameraId}`);
       return parts.join(' | ');
     }).join('\n');
 
-    const emergencyDetails = [
-      `זוהו ${count} חמושים`,
-      '',
-      'פרטי רכב:',
-      `לוחית רישוי: ${vehicle.licensePlate}`,
-      vehicle.color ? `צבע: ${vehicle.color}` : null,
-      (vehicle.make || vehicle.model) ? `יצרן/דגם: ${vehicle.make || ''} ${vehicle.model || ''}`.trim() : null,
-      '',
-      'חמושים:',
-      personDetails
-    ].filter(line => line !== null).join('\n');
+    // 4. Build emergency details based on variant
+    let emergencyDetails;
+    if (vehicle) {
+      // Stolen-vehicle variant - include vehicle info
+      emergencyDetails = [
+        `זוהו ${count} חמושים`,
+        '',
+        'פרטי רכב:',
+        `לוחית רישוי: ${vehicle.licensePlate}`,
+        vehicle.color ? `צבע: ${vehicle.color}` : null,
+        (vehicle.make || vehicle.model) ? `יצרן/דגם: ${vehicle.make || ''} ${vehicle.model || ''}`.trim() : null,
+        '',
+        'חמושים:',
+        personDetails
+      ].filter(line => line !== null).join('\n');
+    } else {
+      // Armed-person variant - no vehicle info
+      emergencyDetails = [
+        `זוהו ${count} חמושים (ללא רכב גנוב מזוהה)`,
+        '',
+        'חמושים:',
+        personDetails
+      ].join('\n');
+    }
 
     await this._createEvent({
       type: 'alert',
       severity: 'critical',
       title: 'חדירה ודאית',
       description: emergencyDetails,
-      cameraId: this.scenario.vehicle.cameraId,
+      cameraId,
       metadata: {
         scenarioId: this.scenario.id,
-        vehicle: this.scenario.vehicle,
+        variant,
+        vehicle,
         persons,
         armedCount: count
       }
     });
 
-    // 4. TTS with person descriptions
+    // 5. TTS with person descriptions
     const descriptions = this._buildPersonDescriptions(persons);
     const message = this.config.messages.armedPersonsWithDetails
       .replace('{count}', count)
       .replace('{descriptions}', descriptions);
     await this._sendTTS(message);
 
-    // 5. Start recording
+    // 6. Start recording
     await this._startRecording();
 
-    // 6. Play alarm sound (twice, not infinite)
+    // 7. Play alarm sound (twice, not infinite)
     this._emitSound('alarm', { loop: false, repeatCount: 2 });
 
-    // 7. Set auto-progress timeout (if user doesn't click)
+    // 8. Set auto-progress timeout (if user doesn't click)
     this._setTimeout('emergencyAutoProgress', this.config.timeouts.emergencyAutoProgress, () => {
       if (!this.scenario.acknowledged) {
         console.log('[ScenarioManager] Emergency auto-progress - user did not acknowledge');
@@ -566,11 +659,11 @@ class ScenarioManager extends EventEmitter {
 
     console.log(`[ScenarioManager] Stolen vehicle detected: ${vehicleData.licensePlate}`);
 
-    // Initialize scenario
+    // Initialize scenario with stolen-vehicle variant
     this._initScenario({
       ...vehicleData,
       stolenInfo
-    });
+    }, 'stolen-vehicle');
 
     // Transition to alert stage
     await this._transitionTo(STAGES.VEHICLE_ALERT, { vehicle: vehicleData });
@@ -610,6 +703,40 @@ class ScenarioManager extends EventEmitter {
     }
 
     return false;
+  }
+
+  /**
+   * Handle armed person entry (alternative scenario start - no vehicle required)
+   * This starts the scenario directly from armed person detection using the armed-person variant
+   */
+  async handleArmedPersonEntry(personData) {
+    // Prevent multiple scenarios
+    if (this.isActive()) {
+      console.log('[ScenarioManager] Scenario already active, ignoring armed person entry');
+      return false;
+    }
+
+    console.log('[ScenarioManager] Starting scenario from armed person entry (armed-person variant)');
+
+    // Initialize scenario with armed-person variant
+    this._initScenario(personData, 'armed-person');
+
+    // Emit initial state
+    this._emitStateChange(STAGES.ARMED_PERSON_DETECTED, {
+      person: personData,
+      armedCount: 1,
+      variant: 'armed-person'
+    });
+
+    // Transition directly to EMERGENCY_MODE (auto-transition from ARMED_PERSON_DETECTED)
+    await this._transitionTo(STAGES.EMERGENCY_MODE, {
+      person: personData,
+      armedCount: 1,
+      reason: 'armed_person_entry',
+      variant: 'armed-person'
+    });
+
+    return true;
   }
 
   /**
@@ -937,13 +1064,23 @@ class ScenarioManager extends EventEmitter {
    * This method emits a socket event that the frontend/recording system can listen to.
    */
   async _startRecording() {
-    const cameraId = this.scenario.vehicle.cameraId;
+    // Guard against null scenario
+    if (!this.scenario) {
+      console.warn('[ScenarioManager] Cannot start recording - no active scenario');
+      return;
+    }
+
+    // Get camera ID from vehicle (stolen-vehicle variant) or first person (armed-person variant)
+    const cameraId = this.scenario.vehicle?.cameraId ||
+                     this.scenario.persons?.[0]?.cameraId ||
+                     'unknown';
 
     // Emit recording start event
     this.io.emit('scenario:recording', {
       action: 'start',
       cameraId,
       scenarioId: this.scenario.id,
+      variant: this.scenario.variant,
       reason: `Scenario: ${this.scenario.id}`
     });
 
@@ -972,9 +1109,22 @@ class ScenarioManager extends EventEmitter {
   _buildPersonDescriptions(persons) {
     return persons.map((p, i) => {
       const parts = [];
-      if (p.clothing) parts.push(`בלבוש ${p.clothing}`);
-      if (p.weaponType) parts.push(`עם ${p.weaponType}`);
-      return `אדם ${i + 1} ${parts.join(' ')}`;
+      // Clothing description
+      if (p.clothing && p.clothing !== 'לא זוהה') {
+        parts.push(`בלבוש ${p.clothing}`);
+      }
+      if (p.clothingColor && p.clothingColor !== 'לא זוהה') {
+        parts.push(`צבע ${p.clothingColor}`);
+      }
+      // Weapon type
+      if (p.weaponType && p.weaponType !== 'לא זוהה') {
+        parts.push(`עם ${p.weaponType}`);
+      }
+      // Age if available
+      if (p.ageRange && p.ageRange !== 'לא זוהה') {
+        parts.push(`גיל משוער ${p.ageRange}`);
+      }
+      return parts.length > 0 ? `אדם ${i + 1} ${parts.join(', ')}` : `אדם ${i + 1}`;
     }).join('. ');
   }
 

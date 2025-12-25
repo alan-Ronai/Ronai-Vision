@@ -58,6 +58,7 @@ class PersonData:
     weapon_type: Optional[str] = None
     clothing: Optional[str] = None
     clothing_color: Optional[str] = None
+    age_range: Optional[str] = None
     confidence: float = 0.0
     camera_id: Optional[str] = None
     bbox: Optional[List[float]] = None
@@ -213,6 +214,7 @@ class ScenarioHooks:
             "weaponType": person.weapon_type,
             "clothing": person.clothing,
             "clothingColor": person.clothing_color,
+            "ageRange": person.age_range,
             "confidence": person.confidence,
             "cameraId": person.camera_id,
             "bbox": person.bbox,

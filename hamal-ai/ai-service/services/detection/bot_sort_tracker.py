@@ -234,6 +234,10 @@ class Track:
         self.metadata = {}
         self.is_reported = False  # For "new object" event logic
 
+        # Gallery matching flag - indicates this track was matched from persistent gallery
+        # Used to trigger re-analysis since the metadata might be stale or from wrong match
+        self.is_gallery_match = False
+
     def predict(self, dt: float = 1/15):
         """Predict next position using Kalman filter."""
         self.bbox = self.kalman.predict(dt)
@@ -327,7 +331,8 @@ class Track:
             "last_seen": self.last_seen,
             "is_reported": self.is_reported,
             "camera_id": self.camera_id,
-            "last_seen_camera": self.last_seen_camera
+            "last_seen_camera": self.last_seen_camera,
+            "is_gallery_match": self.is_gallery_match
         }
 
 
@@ -363,6 +368,34 @@ class BoTSORTTracker:
         self._gallery = gallery
         if gallery:
             logger.info("ReID Gallery attached to BoT-SORT tracker")
+            # Initialize GID counter to avoid collisions with existing gallery entries
+            self._init_gid_counter_from_gallery()
+
+    def _init_gid_counter_from_gallery(self):
+        """Initialize GID counter above highest GID in the gallery.
+
+        This prevents new tracks from getting GIDs that already exist in the gallery,
+        which would cause identity collisions and metadata confusion.
+        """
+        if not self._gallery:
+            return
+
+        max_gid = 0
+
+        # Check person gallery
+        for gid in self._gallery._person_gallery.keys():
+            if gid > max_gid:
+                max_gid = gid
+
+        # Check vehicle gallery
+        for gid in self._gallery._vehicle_gallery.keys():
+            if gid > max_gid:
+                max_gid = gid
+
+        if max_gid > 0:
+            # Set counter above the max to prevent collisions
+            Track.global_id_counter = max_gid
+            logger.info(f"📌 GID counter initialized to {max_gid} (above gallery max)")
 
     def update(
         self,
@@ -481,6 +514,11 @@ class BoTSORTTracker:
                 tracks[track.track_id] = track
                 self._stats["total_tracks"] += 1
 
+                # Mark as gallery match so detection loop knows to trigger re-analysis
+                if reused_track_id is not None:
+                    track.is_gallery_match = True
+                    logger.debug(f"Marked {track.track_id} as gallery match (needs re-analysis)")
+
                 # CRITICAL: Add NEW tracks to gallery immediately so subsequent detections can match
                 # This prevents multiple GIDs for the same object appearing multiple times in the same frame
                 if reused_track_id is None and has_gallery and has_feature:
@@ -516,8 +554,11 @@ class BoTSORTTracker:
             self._consolidate_overlapping_tracks(tracks, object_type)
 
         # STEP 6: Find newly confirmed tracks
+        # Note: Some track_ids in matched_tracks may have been deleted in STEP 5
         for track_id in matched_tracks:
-            track = tracks[track_id]
+            track = tracks.get(track_id)
+            if track is None:
+                continue  # Track was deleted in STEP 5
             if track.state == "confirmed" and not track.is_reported:
                 new_tracks.append(track)
                 track.is_reported = True
@@ -1034,9 +1075,10 @@ class BoTSORTTracker:
             self._persons.clear()
             self._vehicles.clear()
 
-            # Reset GID counters
-            self._next_person_gid = 1
-            self._next_vehicle_gid = 1
+            # Increment session counter BEFORE resetting ID counter
+            # This ensures new IDs don't collide with old ones in frontend stores
+            Track.session_counter += 1
+            Track.global_id_counter = 0  # Reset the actual GID counter
 
             # Increment session ID to invalidate any in-flight operations
             self._session_id += 1
@@ -1051,7 +1093,7 @@ class BoTSORTTracker:
 
             logger.info(
                 f"🗑️ Tracker cleared: {stats['persons']} persons, {stats['vehicles']} vehicles. "
-                f"New session ID: {self._session_id}"
+                f"New session ID: {self._session_id}, Track session: {Track.session_counter}"
             )
 
             return stats
