@@ -214,20 +214,22 @@ class Go2rtcService {
    */
   async createBrowserWebcamStream(streamId) {
     try {
-      // Create an empty stream in go2rtc that will receive WHIP input
-      // go2rtc needs the stream to exist before it can accept WHIP connections
-      // We create it with an empty source array - it will be populated when browser connects
+      // For WHIP ingestion, go2rtc needs a self-referencing stream
+      // This creates an empty "slot" that accepts WebRTC push via WHIP
+      // See: https://github.com/AlexxIT/go2rtc/issues/693
 
-      const response = await axios.put(
+      await axios.put(
         `${this.baseUrl}/api/streams`,
         null,
         {
           params: {
             name: streamId,
-            src: ''  // Empty source - will receive WHIP input
+            src: streamId  // Self-reference creates WHIP-ready stream
           }
         }
       );
+
+      console.log(`[go2rtc] Created self-referencing stream for WHIP: ${streamId}`);
 
       const whipInfo = this.getWHIPInfo(streamId);
 
@@ -236,8 +238,6 @@ class Go2rtcService {
         addedAt: new Date(),
         status: 'waiting'  // Waiting for browser to connect
       });
-
-      console.log(`[go2rtc] Created browser webcam stream slot: ${streamId}`);
 
       return {
         success: true,
