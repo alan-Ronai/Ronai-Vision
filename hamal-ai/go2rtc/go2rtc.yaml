@@ -16,9 +16,8 @@ api:
 webrtc:
   listen: ":8555"
   candidates:
-    # Tailscale IP with TCP fallback
+    # Tailscale IP
     - 100.51.235.63:8555
-    - 100.51.235.63:8555/tcp
   ice_servers:
     - urls:
         - stun:stun.l.google.com:19302
