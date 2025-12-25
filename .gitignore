@@ -74,8 +74,8 @@ logs/
 # Data and weights
 hamal-ai/ai-service/data/
 node_modules/
-weights/
 package-lock.json
+weights/
 models/
 output/
 config/camera_settings.json
@@ -98,3 +98,4 @@ audio_storage/
 *.aac
 
 hamal-ai/go2rtc/go2rtc
+

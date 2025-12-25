@@ -9,12 +9,13 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "hls.js": "^1.5.17",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "socket.io-client": "^4.8.1",
-    "hls.js": "^1.5.17"
+    "socket.io-client": "^4.8.1"
   },
   "devDependencies": {
+    "@vitejs/plugin-basic-ssl": "^2.1.0",
     "@vitejs/plugin-react": "^4.3.3",
     "autoprefixer": "^10.4.20",
     "postcss": "^8.4.47",
