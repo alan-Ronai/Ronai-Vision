@@ -56,6 +56,10 @@ class Go2rtcService {
    */
   async addStream(streamId, sourceUrl, useTcp = true) {
     try {
+      // Debug: log who's calling addStream
+      console.log(`[go2rtc] addStream called: streamId=${streamId}, sourceUrl=${sourceUrl}`);
+      console.log(`[go2rtc] addStream caller:`, new Error().stack?.split('\n').slice(1, 4).join('\n'));
+
       let source = sourceUrl;
 
       // Handle local file paths - use AI service's MJPEG stream
