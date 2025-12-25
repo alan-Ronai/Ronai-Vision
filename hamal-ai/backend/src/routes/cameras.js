@@ -635,9 +635,10 @@ router.post("/browser-webcam/:id/connected", async (req, res) => {
         for (let i = 0; i < 10; i++) {
             await new Promise(r => setTimeout(r, 500));
             try {
-                const streamRes = await fetch(`${GO2RTC_URL}/api/streams?name=${cameraId}`);
-                const streamInfo = await streamRes.json();
-                const producers = streamInfo?.producers || [];
+                const streamRes = await fetch(`${GO2RTC_URL}/api/streams`);
+                const allStreams = await streamRes.json();
+                // go2rtc returns { "stream-name": { producers: [...] } }
+                const producers = allStreams?.[cameraId]?.producers || [];
 
                 // Check if any producer is WebRTC (not RTSP self-reference)
                 // Producer format: {format_name: "webrtc", protocol: "http+udp", ...}
