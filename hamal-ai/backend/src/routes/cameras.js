@@ -666,10 +666,12 @@ router.post("/browser-webcam/:id/connected", async (req, res) => {
             await new Promise(r => setTimeout(r, 1000));
 
             // Now start AI detection
+            // Set use_go2rtc=false because the stream already exists in go2rtc (via WebRTC WHIP)
+            // This prevents AI service from trying to register the RTSP URL with go2rtc (circular reference)
             const rtspUrl = `rtsp://localhost:8554/${cameraId}`;
             try {
                 const response = await fetch(
-                    `${AI_SERVICE_URL}/detection/start/${cameraId}?rtsp_url=${encodeURIComponent(rtspUrl)}&camera_type=rtsp`,
+                    `${AI_SERVICE_URL}/detection/start/${cameraId}?rtsp_url=${encodeURIComponent(rtspUrl)}&camera_type=rtsp&use_go2rtc=false`,
                     { method: "POST" }
                 );
                 if (response.ok) {
